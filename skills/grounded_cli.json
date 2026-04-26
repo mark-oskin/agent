@@ -1,0 +1,43 @@
+{
+  "description": "Unfamiliar programs and CLIs: ground in --help/version/docs before acting; avoid invented flags.",
+  "triggers": [
+    "unfamiliar",
+    "never used",
+    "first time",
+    "learn how",
+    "how do i use",
+    "man page",
+    "--help",
+    "grounding",
+    "new tool",
+    "new program",
+    "cheatsheet",
+    "runbook"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "search_web",
+    "fetch_page",
+    "tail_file",
+    "use_git",
+    "call_python",
+    "download_file"
+  ],
+  "prompt": "Grounded CLI skill (active):\n\n- The user may be asking about a program the model was not trained on. **Do not invent subcommands, flags, or config keys.** Discover them from the environment (`--help`, `--version`, subcommand help) or from bundled/linked documentation.\n- Prefer a short **discover → minimal repro → real task** loop. Log the exact commands and the tool version when reporting success.\n- If the user names a binary, substitute it into the grounding command templates below; do not treat angle-bracket placeholders as literal commands.\n- When `fetch_page` is appropriate, use **official or primary** docs; if the page fails, say so and fall back to help output.\n- If the real task is better done in Python (structured data, parsing JSON), say so and switch approach—this skill is for **shell-first** or **unknown CLI** situations.\n\nSee the bundled reference file below for the full runbook.",
+  "reference_files": [
+    "references/grounding_cli_template.md"
+  ],
+  "grounding_commands": [
+    "<program> --version",
+    "<program> --help"
+  ],
+  "workflow": {
+    "max_steps": 8,
+    "planner_prompt": "Assume the program may be unknown to the model. Plan steps that (1) discover version and help, (2) run the smallest safe command that validates the install, (3) execute the user’s task in small increments with verification. If the user did not name the program, first plan a step to ask which binary or to find it in PATH/docs. Include a final step to record what worked (comment in script or README snippet) if they asked for something repeatable.",
+    "step_prompt": "Execute ONLY this step. Ground flags in --help or bundled reference text. One command group or one file edit. Summarize output and what to run next."
+  }
+}

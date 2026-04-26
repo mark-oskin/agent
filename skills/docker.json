@@ -1,0 +1,31 @@
+{
+  "description": "Docker: Dockerfiles, Compose, run/debug in containers, multi-stage builds, image hygiene.",
+  "triggers": [
+    "docker",
+    "container",
+    "dockerfile",
+    "docker compose",
+    "compose",
+    "kubernetes",
+    "k8s",
+    "oci image",
+    "image build"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "tail_file",
+    "use_git",
+    "search_web",
+    "fetch_page"
+  ],
+  "prompt": "Docker skill (active):\n\n- Prefer small, clear images: pin base images by digest or tag, multi-stage builds for compiled or asset-heavy projects, and non-root users when runtime allows.\n- .dockerignore: exclude .git, local venv, secrets, and large artifacts; keep build context small.\n- docker compose: use explicit service names, profiles, and healthchecks when debugging startup order. Document required env vars in compose or comments.\n- Commands: `docker build`, `docker run`, `docker compose up/build/logs` are typical; do not require daemon features the user did not ask for (e.g. Swarm) unless they requested orchestration at that level.\n- Security: do not copy secrets into images; use build secrets or runtime env. Be careful with `--privileged` and mounting the Docker socket.\n- If the user is on a different host OS/CPU, mention platform (`--platform`) when cross-building matters.",
+  "workflow": {
+    "max_steps": 8,
+    "planner_prompt": "Clarify what runs in the container (app, worker, one-off job), which ports and volumes, and the expected base image stack. Propose steps: inventory existing Docker/Compose files, then edit or add Dockerfile/compose, then a minimal run/build check command. If networking or build failures are likely, add a log-inspection sub-step.",
+    "step_prompt": "Execute ONLY this Docker step. Keep changes minimal and testable (build or one container run). Summarize what files changed and the exact next command the user (or a follow-up step) should run."
+  }
+}

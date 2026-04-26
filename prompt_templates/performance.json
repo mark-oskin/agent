@@ -1,0 +1,5 @@
+{
+  "kind": "overlay",
+  "description": "Performance tuning (measure, then optimize).",
+  "text": "Do not guess. Measure first (profile, timings, counters). Optimize the bottleneck with minimal complexity. Explain expected impact and how to verify it."
+}

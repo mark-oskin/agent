@@ -1,0 +1,5 @@
+{
+  "kind": "overlay",
+  "description": "Debugging mode (hypothesis-driven, evidence-first).",
+  "text": "Debug systematically: restate the symptom, propose 2–4 hypotheses, pick the fastest discriminating check, and iterate. Prefer reading logs / reproducing / isolating minimal cases. Do not change multiple things at once."
+}

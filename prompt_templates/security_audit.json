@@ -1,0 +1,5 @@
+{
+  "kind": "overlay",
+  "description": "Security audit (threat model + mitigations).",
+  "text": "Assume an attacker mindset. Identify threat model, trust boundaries, data flows, and highest-impact risks. Recommend practical mitigations and safe defaults."
+}

@@ -1,0 +1,42 @@
+{
+  "description": "Rust: application and library development with Cargo, idiomatic ownership/async patterns, and solid testing and lints.",
+  "triggers": [
+    "rust",
+    "cargo",
+    "rustc",
+    "rustfmt",
+    "clippy",
+    "crates.io",
+    "crate",
+    "tokio",
+    "async rust",
+    "lifetime",
+    "trait",
+    "macro rust",
+    "proc macro",
+    "serde",
+    "anyhow",
+    "thiserror",
+    "rust edition",
+    "rust workspace",
+    "wasm",
+    "wasm-pack"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "tail_file",
+    "use_git",
+    "search_web",
+    "fetch_page"
+  ],
+  "prompt": "Rust development skill (active):\n\n- Project model: `Cargo.toml` is the source of truth for crate name, edition, dependencies, and features. Prefer workspace layout (`[workspace]`, multiple crates) when the user already uses it. Keep MSRV in mind if they specify one.\n- Idioms: ownership/borrowing first; `Result` and `?` for errors; `Option` for absence. Suggest `thiserror`/`anyhow` for libraries vs applications when it fits. Avoid `unwrap`/`expect` in library code without strong invariants; document panics. Use `clippy` and `rustfmt` (via `cargo fmt` / `cargo clippy`); mention `#![forbid(unsafe_code)]` when the goal is a safe API unless unsafe is required.\n- Async: `async`/`.await` with an explicit runtime (e.g. Tokio) and clear task boundaries. Avoid blocking inside async without `spawn_blocking`. For Wasm or embedded, call out `no_std` and allocator constraints.\n- Build/test: `cargo build`, `cargo test`, `cargo run`; use `cargo check` for fast iteration. For benches, `cargo bench` with criterion when present. For cross-compilation, set `--target` and link flags rather than ad-hoc gcc unless needed.\n- Unsafe: only with a narrow `unsafe` block, documented invariants, and `SAFETY` comments; prefer safe abstractions. Do not add FFI without clear ABI and `#[repr(C)]` where needed.\n- Dependencies: choose small, well-maintained crates; pin versions in lockfiles for apps; for libs, be conservative on MSRV. Use `search_web` / `fetch_page` for up-to-date crate or edition docs when the user asks for bleeding-edge behavior.\n- Delivery: for feature work, add or update modules, tests, and `Cargo.toml` features; for fixes, add a regression test when feasible.",
+  "workflow": {
+    "max_steps": 8,
+    "planner_prompt": "Clarify binary vs library, edition, async or sync, and target (host, cross, wasm, embedded). Propose a short plan: inspect Cargo and src layout, implement or fix code, add tests, then `cargo clippy`/`cargo test`. Each step should end in a verifiable `cargo` outcome when possible.",
+    "step_prompt": "Execute ONLY this Rust step. Use tools to edit `Cargo.toml` and sources; use run_command for `cargo` invocations (check, test, clippy) that fit the project. Summarize what changed, any new public API or error story, and the exact `cargo` command the user should run next."
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "description": "Git: safe worktree operations (prefer use_git over run_command).",
+  "triggers": [
+    "git",
+    "commit",
+    "push",
+    "pull",
+    "rebase",
+    "merge",
+    "branch",
+    "stash",
+    "clone",
+    "status",
+    "diff",
+    "log"
+  ],
+  "tools": [
+    "use_git",
+    "read_file",
+    "write_file",
+    "run_command",
+    "search_web",
+    "fetch_page",
+    "list_directory",
+    "call_python",
+    "replace_text",
+    "tail_file",
+    "download_file"
+  ],
+  "prompt": "Git skill (active): Prefer the tool \"use_git\" for repository operations. Do not use run_command for raw `git` unless use_git cannot express the need.\n\nWorkflow:\n1) If the user did not state intent clearly, use use_git with op \"status\" (and optional worktree path) to inspect state.\n2) Before commit: use \"diff\" (and \"add\" with explicit paths) so changes are reviewable.\n3) For \"push\" / \"pull\", confirm the branch and remote are correct; use conservative defaults (origin, current branch) only if the user implied them.\n4) Never commit secrets, keys, or huge generated artifacts. Refuse or ask the user to adjust .gitignore if needed.\n\nThe use_git tool only exposes a vetted set of subcommands (op parameter). If something is not supported, explain the limitation and suggest a manual git command for the user to run outside the agent, or use run_command only with explicit user confirmation of risk.",
+  "workflow": {
+    "max_steps": 6,
+    "planner_prompt": "Clarify what the user wants to achieve in the repository (intent, branch, remote). Propose a short ordered list of git steps using only operations that use_git supports (status, log, diff, add, commit, push, pull, branch). If intent is ambiguous, include questions and a reasonable default plan.",
+    "step_prompt": "Execute ONLY this git-related step. Prefer use_git. Do not run broad shell commands unless use_git cannot do the job. When done, state what changed and what is next."
+  }
+}

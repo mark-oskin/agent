@@ -1,0 +1,35 @@
+{
+  "description": "REST/HTTP APIs and OpenAPI: design contracts, map endpoints to code, read and validate specs.",
+  "triggers": [
+    "openapi",
+    "swagger",
+    "rest api",
+    "restful",
+    "http api",
+    "endpoint",
+    "status code",
+    "json schema",
+    "webhook",
+    "oauth",
+    "jwt",
+    "graphql"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "search_web",
+    "fetch_page",
+    "tail_file",
+    "use_git",
+    "call_python"
+  ],
+  "prompt": "API / OpenAPI skill (active):\n\n- Clarify: audience (public vs internal), auth model, idempotency, error shape, pagination, versioning (URL vs header), and content types (JSON, multipart, SSE).\n- Prefer a single source of truth: OpenAPI 3 (YAML/JSON) when the user needs a spec; keep examples and schema in sync with implementation.\n- For public APIs, document breaking vs additive changes; for HTTP details, be precise: methods, paths, query params, headers, body schemas, and typical status codes (e.g. 201 vs 200).\n- If inferring from code, trace routes/handlers to paths and map request/response types; if inferring from docs, use fetch_page/search_web to verify against primary sources when URLs are given.\n- Security: do not put real secrets, tokens, or private keys in examples; use placeholders. Call out common pitfalls: CSRF (cookies), CORS, SSRF, mass assignment, and unsafe deserialization.\n- When the user needs interoperability, mention idempotent retries, rate limits, and backward-compatible error bodies.",
+  "workflow": {
+    "max_steps": 8,
+    "planner_prompt": "Clarify the API goal (read vs design vs implement), base URL or repo context, and whether the deliverable is an OpenAPI file, code changes, or both. Propose small steps: inventory existing routes or spec, draft or update the contract, then align code and examples. If information is missing, list questions in the plan and still propose a reasonable default path.",
+    "step_prompt": "Execute ONLY this API-related step. Prefer concrete file edits and verifiable results (e.g. validate OpenAPI, list routes). Summarize what changed and what is still missing."
+  }
+}

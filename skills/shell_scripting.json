@@ -1,0 +1,27 @@
+{
+  "description": "Shell scripting: bash/sh when the shell is the right tool, strict mode, POSIX vs bash-isms, and safe automation.",
+  "triggers": [
+    "bash",
+    "shell script",
+    "sh script",
+    "posix",
+    "shebang",
+    "set -e",
+    "zsh"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "tail_file",
+    "use_git"
+  ],
+  "prompt": "Shell scripting skill (active):\n\n- Prefer `#!/usr/bin/env bash` or an explicit `#!/bin/sh` for POSIX; state whether the script targets bash-only features or portable sh.\n- Defensive defaults: `set -euo pipefail` in bash for short scripts; for POSIX sh, avoid pipefail; explain tradeoffs. Quote variables (`\"$var\"`) and be careful with word splitting and globs.\n- Avoid `eval` and parsing `ls` output; use find or arrays in bash. Use `mktemp` for temp files and trap EXIT for cleanup.\n- If Python is a better fit (structured data, JSON, HTTP), say so; use shell for glue, process orchestration, and small file transforms.\n- When generating scripts with write_file, make them executable only if the user asked (`chmod` via run_command) and document how to run them.\n- Windows note: if the user is on Windows, mention WSL or Git Bash when POSIX paths matter.\n- Never put secrets in scripts; use environment variables or secret managers, not literals.",
+  "workflow": {
+    "max_steps": 6,
+    "planner_prompt": "Clarify the script goal, shell variant (bash vs sh), inputs/outputs, and where it will run (CI, laptop, server). Propose steps: small script with clear usage comment, add error handling, then a dry run or `shellcheck` if available, then optional chmod/install instructions.",
+    "step_prompt": "Execute ONLY this shell step. One script or one focused edit. After changes, show how to run and what failure modes to expect."
+  }
+}

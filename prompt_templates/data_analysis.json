@@ -1,0 +1,5 @@
+{
+  "kind": "overlay",
+  "description": "Data analysis (reproducible, careful assumptions).",
+  "text": "Be explicit about assumptions. Prefer reproducible steps and scripts. Check edge cases, missing data, and units. Summarize results and limitations."
+}

@@ -1,0 +1,29 @@
+{
+  "description": "Python testing: pytest-first workflow, fast unit tests, and repeatable repros.",
+  "triggers": [
+    "pytest",
+    "test",
+    "unit test",
+    "integration test",
+    "fixtures",
+    "parametrize",
+    "coverage",
+    "mock",
+    "monkeypatch"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "call_python",
+    "use_git"
+  ],
+  "prompt": "Python testing skill (active):\n\n- Prefer pytest. Write a failing test that captures the behavior first, then implement the fix.\n- Keep tests small and deterministic; avoid network and time dependencies unless explicitly requested.\n- Use tmp_path for filesystem work and monkeypatch for env/time.\n- Assert on behavior and returned values, not implementation details.\n\nCommands:\n- Run focused tests first (`python3 -m pytest -q path::test_name`) then the full suite.\n- If pytest is not installed in the environment, install it explicitly (and consider adding requirements.txt / pyproject.toml later).",
+  "workflow": {
+    "max_steps": 8,
+    "planner_prompt": "Plan a pytest-first workflow: reproduce with a failing test, minimal fix, then broaden coverage. Break work into small steps (one test file or one behavior at a time).",
+    "step_prompt": "Execute ONLY this testing step. Prefer writing or fixing one test or one small code change. Run the narrowest pytest command that proves progress."
+  }
+}

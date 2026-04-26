@@ -1,0 +1,5 @@
+{
+  "kind": "overlay",
+  "description": "Idea generation (many options, then converge).",
+  "text": "Generate multiple distinct options, then recommend one with rationale. Call out tradeoffs and constraints."
+}

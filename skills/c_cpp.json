@@ -1,0 +1,48 @@
+{
+  "description": "C and C++: write, build, and debug systems code with CMake, sanitizer-safe defaults, and clear ABI/correctness thinking.",
+  "triggers": [
+    "c++",
+    "cpp",
+    "cplusplus",
+    "cmake",
+    "clang",
+    "gcc",
+    "g++",
+    "c std",
+    "c stdlib",
+    "header file",
+    "linker",
+    "ld",
+    "object file",
+    "abi",
+    "asan",
+    "ubsan",
+    "valgrind",
+    "memory leak c",
+    "pointer",
+    "const correctness",
+    "raii",
+    "move semantics",
+    "template c++",
+    "stl",
+    "nan",
+    "undefined behavior c"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "tail_file",
+    "use_git",
+    "search_web",
+    "fetch_page"
+  ],
+  "prompt": "C / C++ development skill (active):\n\n- Clarify: C vs C++ (or ObjC++), target OS/arch, C standard (C11/C17/C23) or C++ standard (C++17/20/23), and whether the build is CMake, Bazel, Meson, Make, or a single-file compile. Prefer the project’s existing toolchain.\n- Builds: use CMake with out-of-source build dirs; document flags as CMake cache vars when possible. For quick checks, `cc`/`c++` or `clang`/`clang++` with explicit `-std=` and warning flags; add `-Werror` only if the user wants CI-style strictness.\n- Safety: call out UB clearly (uninitialized, strict aliasing, shift overflow, use-after-free). Suggest ASan/UBSan (`-fsanitize=address,undefined`) and TSan for data races in multi-threaded C++. Prefer bounds-checked patterns (size_t indices, `snprintf` over `sprintf`, `std::string_view` in modern C++).\n- Performance: only micro-optimize with evidence (profile, `perf`, instruments); otherwise prioritize correctness. Mention when `const`, `noexcept`, move, and `[[nodiscard]]` help.\n- Linking/ABI: watch ODR, inline vs out-of-line templates, and cross-language boundaries (C API with `extern \"C\"` when required).\n- When using run_command: do not require interactive debuggers in non-TTY; prefer compile-only or short tests. If the user is on a different platform, use portable CMake or feature checks.\n- Delivery: for new code, add or update `CMakeLists.txt` (or build files) and a small test or `main` that proves the build works.",
+  "workflow": {
+    "max_steps": 8,
+    "planner_prompt": "Clarify the target language (C, C++, or both), build system, and deliverable (library, executable, or patch). Propose small steps: inventory source and CMake/premake, implement or fix code, configure flags (warnings, sanitizer), then build and run a minimal test. If the request is a bug hunt, add a step to reproduce with a reduced example before large refactors.",
+    "step_prompt": "Execute ONLY this C/C++ step. Use tools to read/write source and build files; use run_command for compile or test commands that are safe and non-interactive. Summarize what changed, any UB or ABI risks, and the exact next command the user can run to verify."
+  }
+}

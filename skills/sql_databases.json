@@ -1,0 +1,36 @@
+{
+  "description": "SQL and databases: schemas, queries, migrations, and safe operations (read vs destructive).",
+  "triggers": [
+    "sql",
+    "database",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "schema",
+    "migration",
+    "query",
+    "select",
+    "join",
+    "index",
+    "transaction"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "search_web",
+    "fetch_page",
+    "tail_file",
+    "use_git",
+    "call_python"
+  ],
+  "prompt": "SQL / databases skill (active):\n\n- Default to non-destructive work: read schema, run SELECT/EXPLAIN when appropriate, and prefer migrations or explicit scripts for DDL.\n- Before DELETE/UPDATE/DROP/TRUNCATE: confirm scope (WHERE), backups, and whether the user runs against prod; refuse or use dry-run when risk is high.\n- Name constraints (PK, FK, UNIQUE, CHECK) explicitly; call out N+1 patterns, missing indexes for common filters, and transaction boundaries.\n- If the user has no live DB, generate migration SQL or fixture-friendly SQLite examples and state assumptions (engine version, case sensitivity, UUID vs serial).\n- Never embed real credentials in files or commands; use env vars and placeholders. Prefer parameterized queries in generated app code, not string concatenation.\n- Dialect matters: call out differences (Postgres vs MySQL vs SQLite) when a feature is not portable.",
+  "workflow": {
+    "max_steps": 8,
+    "planner_prompt": "Clarify database engine, environment (local/dev/prod), and whether the task is read-only, schema change, or data fix. Propose steps that separate discovery (read files, list migrations) from change (one migration or one script) and verification. If destructive ops might be required, make an explicit 'confirm/backup' sub-step first in the plan.",
+    "step_prompt": "Execute ONLY this database step. Prefer safe reads and small, verifiable changes. When done, state what ran (or what SQL was written) and any risks for the next step."
+  }
+}

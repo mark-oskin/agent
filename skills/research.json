@@ -1,0 +1,18 @@
+{
+  "description": "Research: web verification and source-grounded answers.",
+  "triggers": [
+    "research",
+    "sources",
+    "citations",
+    "wikipedia",
+    "verify online",
+    "look up on the web"
+  ],
+  "tools": null,
+  "prompt": "Research skill (active): Prioritize search_web and fetch_page to ground claims. Prefer recent, credible pages; include URLs or source titles in the final answer when the user needs verifiability. If web tools fail, say so and answer with clear uncertainty.",
+  "workflow": {
+    "max_steps": 5,
+    "planner_prompt": "Clarify what needs to be verified online. Propose a short plan: which queries to run, which pages to fetch, and what conclusion would count as evidence. If the request is vague, list clarifying questions and a best-guess plan anyway.",
+    "step_prompt": "Execute ONLY this research step. Use search_web and/or fetch_page. Do not invent URLs; work from tool output. Summarize findings and what is still unknown."
+  }
+}

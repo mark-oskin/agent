@@ -1,0 +1,31 @@
+{
+  "description": "Python packaging: pyproject.toml, src-layout packages, and runnable CLIs.",
+  "triggers": [
+    "pyproject",
+    "packaging",
+    "publish",
+    "pypi",
+    "setuptools",
+    "wheel",
+    "build",
+    "install",
+    "editable",
+    "pip",
+    "entry point",
+    "console_scripts"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "use_git"
+  ],
+  "prompt": "Python packaging skill (active):\n\n- Prefer pyproject.toml with a src/ layout for packages.\n- For a CLI, prefer python -m <pkg> via src/<pkg>/__main__.py or a console entrypoint.\n- Keep dependencies minimal; add only what is required.\n\nSuggested layout:\n- pyproject.toml\n- src/<pkg>/__init__.py\n- src/<pkg>/__main__.py (or src/<pkg>/cli.py)\n- tests/\n\nCommands:\n- Build sanity checks: `python3 -m pip install -e .` then `python3 -m <pkg> --help`.",
+  "workflow": {
+    "max_steps": 6,
+    "planner_prompt": "Clarify package name, entrypoint, and dependencies. Propose steps: scaffold layout, pyproject metadata, editable install smoke test, optional CLI wiring, optional test hookup.",
+    "step_prompt": "Execute ONLY this packaging step. Prefer concrete file edits and one verifiable command (install, build, or run) before moving on."
+  }
+}

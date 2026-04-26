@@ -1,0 +1,43 @@
+{
+  "description": "Apple platforms: Swift, Xcode projects, iOS/iPadOS/macOS targets, signing, and simulator/device workflows at an engineering level.",
+  "triggers": [
+    "swift",
+    "xcode",
+    "ios",
+    "ipados",
+    "macos",
+    "mac app",
+    "catalyst",
+    "swiftui",
+    "uikit",
+    "appkit",
+    "xctest",
+    "simulator",
+    "signing",
+    "provisioning",
+    "entitlements",
+    "info.plist",
+    "spm",
+    "swift package",
+    "cocoapods",
+    "xcworkspace",
+    "xcodeproj"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "tail_file",
+    "use_git",
+    "search_web",
+    "fetch_page"
+  ],
+  "prompt": "Apple / iOS + Swift skill (active):\n\n- Environment: default to the user’s machine; prefer `xcodebuild`, `swift`/`swiftc`, and `swift test` for Swift Package Manager projects. For `.xcodeproj`/`.xcworkspace`, use schema and destination flags the user can run locally; do not assume GUI-only steps are always available in agent sessions.\n- Project shape: Swift Package: `Package.swift` + `Sources/`. Xcode app: app target, entitlements, Info.plist, and asset catalogs. Call out the difference when mixing SPM with Xcode (local packages, binary frameworks).\n- iOS delivery: be explicit about minimum iOS version, required capabilities, background modes, and privacy keys in Info.plist and usage descriptions. Remind that App Store and TestFlight rules change; point to current Apple docs (fetch_page) when the user needs exact text.\n- Signing: distinguish debug vs release, team ID, automatic signing vs manual; never invent provisioning profile UUIDs or put real secrets, keys, or push tokens in code or example plist entries.\n- UI: prefer SwiftUI vs UIKit/AppKit per target; mention accessibility and Dynamic Type for user-facing UIs. For data flow, use `@Observable`, `ObservableObject`, or explicit dependency injection as appropriate to the user’s iOS version.\n- Building/testing: `xcodebuild -scheme ... -destination 'platform=iOS Simulator,name=...' build` or `test` when a scheme exists. For swift packages, `swift build` and `swift test` from the package root.\n- Debugging: suggest Instruments or console logs for perf; for crashes, symbolication and dSYM. Keep commands reproducible in CI style when the user asked for automation.\n- If the user is on Linux/Windows, say clearly that Xcode/iOS Simulator are macOS-only and offer Swift-only or server-side paths.",
+  "workflow": {
+    "max_steps": 8,
+    "planner_prompt": "Clarify app vs library, platform (iOS, macOS, both), and whether the repo uses SPM, CocoaPods, or pure Xcode. Propose steps: map targets/schemes, adjust Swift sources or plists, then a build or test command. If the issue is signing or entitlements, isolate device vs simulator and list exact settings to verify in Xcode or project files.",
+    "step_prompt": "Execute ONLY this Apple/Swift step. Change project files and Swift sources with tools; use run_command only for non-interactive `swift`/`xcodebuild` that match the user’s project. Summarize what changed, what the user must still do in Xcode (if any), and the next verification command."
+  }
+}

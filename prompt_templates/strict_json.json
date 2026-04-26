@@ -1,0 +1,5 @@
+{
+  "kind": "overlay",
+  "description": "Extra strict JSON discipline.",
+  "text": "Be extra strict about emitting only a single JSON object. Never include Markdown fences or extra keys."
+}

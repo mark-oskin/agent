@@ -1,0 +1,30 @@
+{
+  "description": "Documentation and technical writing: README, ADRs, API docs, and clear structure for new readers.",
+  "triggers": [
+    "readme",
+    "documentation",
+    "docs",
+    "adr",
+    "changelog",
+    "onboarding",
+    "how to",
+    "architecture",
+    "runbook"
+  ],
+  "tools": [
+    "read_file",
+    "write_file",
+    "list_directory",
+    "replace_text",
+    "run_command",
+    "search_web",
+    "fetch_page",
+    "use_git"
+  ],
+  "prompt": "Documentation skill (active):\n\n- Audience: write for a new teammate: prerequisites, how to run locally, how to test, how to release/deploy at a high level, and where to find more detail (paths, not vague links).\n- Structure: start with a short 'what/why', then 'quick start', then deeper sections. For ADRs: context, decision, status, consequences. For runbooks: trigger, impact, steps, verification, rollback.\n- Do not restate the entire codebase; link to source files and commands. Use concrete examples and copy-pasteable commands with placeholders for secrets.\n- Match repo tone: if README exists, update in place; prefer one source of truth over duplicating content across many files.\n- Diagrams: use simple ASCII or Mermaid in markdown only if the user asked or it clarifies a flow; keep diagrams short.\n- Quality: fix broken headings, code fence languages, and lists; use consistent naming for the project, CLI, and env vars.",
+  "workflow": {
+    "max_steps": 6,
+    "planner_prompt": "Clarify the doc type (README, ADR, API, runbook) and the reader goal. Propose steps: read existing doc surface (README, docs/), decide outline, then write or update one file at a time with a final proofread step for consistency and links.",
+    "step_prompt": "Execute ONLY this documentation step. Edit or create focused markdown; avoid dumping unrelated refactors. When done, say what file changed and the next doc gap if any."
+  }
+}
