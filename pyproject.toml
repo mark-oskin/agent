@@ -1,7 +1,7 @@
 [project]
-name = "ollama-test"
+name = "agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local-first CLI agent for Ollama (and optional hosted OpenAI-compatible backends)."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
