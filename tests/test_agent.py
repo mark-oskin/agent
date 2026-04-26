@@ -69,6 +69,37 @@ def test_tool_progress_message_includes_useful_params():
     assert "path" in s2 and "/tmp/x.txt" in s2
 
 
+def test_plugin_toolsets_load_and_route(monkeypatch):
+    d = importlib.import_module("agent")
+    assert "dev" in d._PLUGIN_TOOLSETS
+    assert "desktop" in d._PLUGIN_TOOLSETS
+    # If both are enabled, routing should pick dev for a pytest-y query.
+    enabled_toolsets = {"dev", "desktop"}
+    active = d._route_active_toolsets_for_request("please run pytest", enabled_toolsets)
+    assert "dev" in active
+
+
+def test_tools_dir_override_loads_plugins(tmp_path, monkeypatch):
+    d = importlib.import_module("agent")
+    tdir = tmp_path / "tools"
+    tdir.mkdir()
+    (tdir / "x.py").write_text(
+        "def hi(params):\n"
+        "    return 'hi'\n"
+        "TOOLSET = {\n"
+        "  'name': 'xset',\n"
+        "  'description': 'x',\n"
+        "  'triggers': ['hi'],\n"
+        "  'tools': [{'id':'x_hi','description':'hi','aliases':['hi'], 'handler': hi}],\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    d._load_plugin_toolsets(str(tdir))
+    d._register_tool_aliases()
+    assert "xset" in d._PLUGIN_TOOLSETS
+    assert "x_hi" in d._PLUGIN_TOOL_HANDLERS
+
+
 def test_ollama_request_think_value_gpt_oss_defaults_to_medium(monkeypatch):
     d = importlib.import_module("agent")
     monkeypatch.setenv("OLLAMA_MODEL", "gpt-oss:20b")

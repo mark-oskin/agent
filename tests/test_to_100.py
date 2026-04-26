@@ -242,7 +242,7 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=True,
         cloud_ai_enabled=True,
-        enabled_tools=set(d._KNOWN_TOOLS) - {"run_command"},
+        enabled_tools=set(d._CORE_TOOLS) - {"run_command"},
         reviewer_hosted_profile=None,
         reviewer_ollama_model="mymodel:latest",
         session_save_path="/tmp/x.json",
@@ -317,7 +317,7 @@ def test_prefs_system_prompt_inline_roundtrip(tmp_path, monkeypatch):
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=False,
         cloud_ai_enabled=False,
-        enabled_tools=set(d._KNOWN_TOOLS),
+        enabled_tools=set(d._CORE_TOOLS),
         reviewer_hosted_profile=None,
         reviewer_ollama_model=None,
         session_save_path=None,
@@ -340,7 +340,7 @@ def test_prefs_system_prompt_path_roundtrip(tmp_path, monkeypatch):
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=False,
         cloud_ai_enabled=False,
-        enabled_tools=set(d._KNOWN_TOOLS),
+        enabled_tools=set(d._CORE_TOOLS),
         reviewer_hosted_profile=None,
         reviewer_ollama_model=None,
         session_save_path=None,
@@ -407,6 +407,36 @@ def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch
     assert "thinking:" in out
     assert os.environ.get("AGENT_THINKING_LEVEL") in ("high", "")
     assert os.environ.get("AGENT_STREAM_THINKING") in ("0", "1")
+
+
+def test_interactive_settings_tools_lists_toolsets_and_describe(tmp_path, monkeypatch):
+    d = _d()
+    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(tmp_path / "x.json"))
+    lines = [
+        "/settings tools",
+        "/settings tools describe run_pytest",
+        "/settings tools describe dev",
+        "/quit",
+    ]
+    it = iter(lines)
+
+    def fake_input(_=""):
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        d._interactive_repl(
+            verbose=0,
+            second_opinion_enabled=False,
+            cloud_ai_enabled=False,
+            save_context_path=None,
+            prefs_loaded=False,
+        )
+    out = buf.getvalue()
+    assert "Toolsets (plugins)" in out
+    assert "Tool: run_pytest" in out
+    assert "Toolset: dev" in out
 
 
 def test_interactive_settings_save_command(tmp_path, monkeypatch):
@@ -588,7 +618,7 @@ def test_interactive_settings_tools(monkeypatch):
 
 def test_route_requires_websearch_skips_when_search_web_disabled(monkeypatch):
     d = _d()
-    et = frozenset(t for t in d._KNOWN_TOOLS if t != "search_web")
+    et = frozenset(t for t in d._CORE_TOOLS if t != "search_web")
     called = []
 
     def no_chat(*a, **k):

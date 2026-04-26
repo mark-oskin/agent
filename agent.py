@@ -15,7 +15,10 @@ import datetime
 import warnings
 import html as html_module
 from dataclasses import dataclass, replace
-from typing import AbstractSet, Optional, Tuple
+from typing import AbstractSet, Callable, Optional, Tuple
+
+import importlib
+import importlib.util
 
 warnings.filterwarnings(
     "ignore",
@@ -85,8 +88,8 @@ def _describe_llm_profile_short(p: LlmProfile) -> str:
     return f"hosted {p.model!r} @ {p.base_url!r} (key: {p.api_key_env})"
 
 
-# Tools we implement in this script (Ollama may emit other native tool names — ignore those).
-_KNOWN_TOOLS = frozenset(
+# Core tools we implement in this script (Ollama may emit other native tool names — ignore those).
+_CORE_TOOLS = frozenset(
     {
         "search_web",
         "fetch_page",
@@ -101,6 +104,11 @@ _KNOWN_TOOLS = frozenset(
         "call_python",
     }
 )
+
+
+def _all_known_tools() -> frozenset[str]:
+    """Core tools + currently loaded plugin tools."""
+    return frozenset(set(_CORE_TOOLS) | set(_PLUGIN_TOOL_HANDLERS.keys()))
 
 # (internal_id, short description, user-facing aliases — spaces and hyphens ok)
 _TOOL_ENTRIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
@@ -152,6 +160,106 @@ _TOOL_ENTRIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ("call_python", "Run Python code in-process", ("python", "py", "eval", "code eval")),
 )
 
+
+# Plugin toolsets (loaded from tools/ directory).
+# Toolsets are off by default and can be enabled by the user.
+_PLUGIN_TOOLSETS: dict[str, dict] = {}
+_PLUGIN_TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {}
+_PLUGIN_TOOL_TO_TOOLSET: dict[str, str] = {}
+_PLUGIN_TOOLSET_TRIGGERS: dict[str, list[str]] = {}
+
+
+def _load_plugin_toolsets(tools_dir: Optional[str] = None) -> None:
+    """
+    Load plugin toolsets from the local `tools/` directory.
+
+    Each plugin module must define:
+      TOOLSET = {
+        "name": "dev" | "web" | ...,
+        "description": "…",
+        "triggers": ["keyword", "regex:..."] (optional),
+        "tools": [
+          {"id": "run_pytest", "description": "...", "aliases": ["pytest", ...], "handler": callable},
+          ...
+        ],
+      }
+    """
+    _PLUGIN_TOOLSETS.clear()
+    _PLUGIN_TOOL_HANDLERS.clear()
+    _PLUGIN_TOOL_TO_TOOLSET.clear()
+    _PLUGIN_TOOLSET_TRIGGERS.clear()
+    base0 = (tools_dir or "").strip()
+    base = os.path.abspath(os.path.expanduser(base0)) if base0 else _default_tools_dir()
+    if not os.path.isdir(base):
+        return
+    # Support loading plugin modules from a custom directory:
+    # - if base == default tools dir: import from tools.<modname>
+    # - else: import by file path under a unique module name prefix
+    use_pkg_import = os.path.abspath(base) == os.path.abspath(_default_tools_dir())
+    for fn in sorted(os.listdir(base)):
+        if not fn.endswith(".py") or fn.startswith("_"):
+            continue
+        modname = os.path.splitext(fn)[0]
+        try:
+            if use_pkg_import:
+                m = importlib.import_module(f"tools.{modname}")
+            else:
+                path = os.path.join(base, fn)
+                spec = importlib.util.spec_from_file_location(f"agent_tools_{modname}", path)
+                if spec is None or spec.loader is None:
+                    continue
+                m = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(m)
+        except Exception:
+            continue
+        ts = getattr(m, "TOOLSET", None)
+        if not isinstance(ts, dict):
+            continue
+        nm = str(ts.get("name") or "").strip().lower()
+        if not nm:
+            continue
+        tools = ts.get("tools")
+        if not isinstance(tools, list) or not tools:
+            continue
+        _PLUGIN_TOOLSETS[nm] = ts
+        tr = ts.get("triggers")
+        if isinstance(tr, list):
+            _PLUGIN_TOOLSET_TRIGGERS[nm] = [str(x) for x in tr if str(x).strip()]
+        else:
+            _PLUGIN_TOOLSET_TRIGGERS[nm] = []
+        for td in tools:
+            if not isinstance(td, dict):
+                continue
+            tid = str(td.get("id") or "").strip()
+            if not tid or tid in _CORE_TOOLS:
+                continue
+            h = td.get("handler")
+            if not callable(h):
+                continue
+            _PLUGIN_TOOL_HANDLERS[tid] = h
+            _PLUGIN_TOOL_TO_TOOLSET[tid] = nm
+
+
+def _plugin_tool_entries() -> Tuple[Tuple[str, str, Tuple[str, ...]], ...]:
+    entries = []
+    for ts in _PLUGIN_TOOLSETS.values():
+        tools = ts.get("tools") if isinstance(ts, dict) else None
+        if not isinstance(tools, list):
+            continue
+        for td in tools:
+            if not isinstance(td, dict):
+                continue
+            tid = str(td.get("id") or "").strip()
+            if not tid:
+                continue
+            desc = str(td.get("description") or "").strip() or "Plugin tool"
+            aliases = td.get("aliases")
+            if not isinstance(aliases, (list, tuple)):
+                aliases = ()
+            aliases_t = tuple(str(a) for a in aliases if str(a).strip())
+            entries.append((tid, desc, aliases_t))
+    return tuple(entries)
+
 _TOOL_ALIASES: dict[str, str] = {}
 
 
@@ -164,20 +272,20 @@ def _canonicalize_user_tool_phrase(phrase: str) -> str:
 
 def _register_tool_aliases() -> None:
     _TOOL_ALIASES.clear()
-    for internal, _label, aliases in _TOOL_ENTRIES:
+    for internal, _label, aliases in (*_TOOL_ENTRIES, *_plugin_tool_entries()):
         for phrase in (internal, *aliases):
             key = _canonicalize_user_tool_phrase(phrase)
             if key:
                 _TOOL_ALIASES[key] = internal
 
 
-_register_tool_aliases()
+
 
 
 def _coerce_enabled_tools(ets: Optional[AbstractSet[str]]):
     """None means all tools enabled (default)."""
     if ets is None:
-        return _KNOWN_TOOLS
+        return _all_known_tools()
     return frozenset(ets)
 
 
@@ -185,7 +293,7 @@ def _resolve_tool_token(phrase: str) -> Optional[str]:
     c = _canonicalize_user_tool_phrase(phrase)
     if not c:
         return None
-    if c in _KNOWN_TOOLS:
+    if c in _all_known_tools():
         return c
     return _TOOL_ALIASES.get(c)
 
@@ -195,8 +303,73 @@ def _normalize_tool_name(token: str) -> Optional[str]:
     return _resolve_tool_token(token)
 
 
+def _plugin_tools_for_toolset(toolset: str) -> set[str]:
+    nm = (toolset or "").strip().lower()
+    out: set[str] = set()
+    for tid, ts in _PLUGIN_TOOL_TO_TOOLSET.items():
+        if ts == nm:
+            out.add(tid)
+    return out
+
+
+def _route_active_toolsets_for_request(user_query: str, enabled_toolsets: AbstractSet[str]) -> set[str]:
+    """
+    Select which enabled toolsets to expose for a specific request (to avoid tool overload).
+    Heuristic: match toolset triggers (keywords or regex: patterns) against the user query.
+    """
+    ets = {str(x).strip().lower() for x in (enabled_toolsets or set()) if str(x).strip()}
+    if not ets:
+        return set()
+    if len(ets) == 1:
+        return set(ets)
+    q = (user_query or "").strip().lower()
+    if not q:
+        return set(ets)
+    active: set[str] = set()
+    for ts in sorted(ets):
+        tr = _PLUGIN_TOOLSET_TRIGGERS.get(ts) or []
+        for one in tr:
+            s = str(one).strip()
+            if not s:
+                continue
+            if s.startswith("regex:"):
+                pat = s[len("regex:") :].strip()
+                if pat:
+                    try:
+                        if re.search(pat, q, flags=re.I):
+                            active.add(ts)
+                            break
+                    except re.error:
+                        continue
+            else:
+                if s.lower() in q:
+                    active.add(ts)
+                    break
+    return active or set(ets)
+
+
+def _effective_enabled_tools_for_turn(
+    *,
+    base_enabled_tools: AbstractSet[str],
+    enabled_toolsets: AbstractSet[str],
+    user_query: str,
+) -> frozenset[str]:
+    """
+    Tools exposed for one model turn:
+    - always include base_enabled_tools (core tools minus any user-disabled tools)
+    - include plugin tools only from router-selected active toolsets (subset of enabled_toolsets)
+    """
+    base = set(base_enabled_tools or set())
+    active_ts = _route_active_toolsets_for_request(user_query, enabled_toolsets)
+    for ts in active_ts:
+        base.update(_plugin_tools_for_toolset(ts))
+    # Only allow tools we actually know about.
+    base = base & set(_all_known_tools())
+    return frozenset(base)
+
+
 def _all_tool_name_suggestion_pool() -> list[str]:
-    pool = set(_KNOWN_TOOLS)
+    pool = set(_all_known_tools())
     pool.update(_TOOL_ALIASES.keys())
     pool.add("second_opinion")
     return sorted(pool)
@@ -221,7 +394,7 @@ def _format_unknown_tool_hint(phrase: str) -> str:
 
 
 def _format_settings_tools_list(enabled_tools: AbstractSet[str]) -> str:
-    lines = ["Tools for this session (id in parentheses, use either):"]
+    lines = ["Core tools for this session (id in parentheses, use either):"]
     for internal, label, _aliases in _TOOL_ENTRIES:
         on = "on" if internal in enabled_tools else "off"
         lines.append(f"  [{on}] {label}  ({internal})")
@@ -232,13 +405,71 @@ def _format_settings_tools_list(enabled_tools: AbstractSet[str]) -> str:
     return "\n".join(lines)
 
 
+def _describe_tool_call_contract(tool_id: str) -> str:
+    """
+    Human-readable contract for a tool: what params it accepts and what it returns.
+    For plugins, this is read from the TOOLSET metadata when present.
+    """
+    tid = (tool_id or "").strip()
+    if not tid:
+        return "Unknown tool."
+    # Plugin tool
+    if tid in _PLUGIN_TOOL_HANDLERS:
+        ts = _PLUGIN_TOOL_TO_TOOLSET.get(tid) or ""
+        rec = _PLUGIN_TOOLSETS.get(ts) or {}
+        tools = rec.get("tools") if isinstance(rec, dict) else None
+        td = None
+        if isinstance(tools, list):
+            for one in tools:
+                if isinstance(one, dict) and str(one.get("id") or "").strip() == tid:
+                    td = one
+                    break
+        desc = str((td or {}).get("description") or "").strip() if isinstance(td, dict) else ""
+        aliases = (td or {}).get("aliases") if isinstance(td, dict) else None
+        if not isinstance(aliases, (list, tuple)):
+            aliases = ()
+        params = (td or {}).get("params") if isinstance(td, dict) else None
+        returns = str((td or {}).get("returns") or "").strip() if isinstance(td, dict) else ""
+        out = [f"Tool: {tid} (plugin toolset {ts!r})"]
+        if desc:
+            out.append(f"Description: {desc}")
+        if aliases:
+            out.append("Aliases: " + ", ".join(str(a) for a in aliases))
+        if isinstance(params, dict) and params:
+            out.append("Parameters:")
+            for k, v in params.items():
+                out.append(f"  - {k}: {str(v).strip()}")
+        else:
+            out.append("Parameters: (tool-specific; accepts a JSON object in parameters)")
+        out.append("Returns: " + (returns if returns else "string (tool output)"))
+        return "\n".join(out)
+
+    # Core tool (fixed contract)
+    core = {
+        "search_web": "parameters.query (string); optional max_results (1–30). Returns: formatted web results string.",
+        "fetch_page": "parameters.url (http/https URL). Returns: fetched page text (string).",
+        "run_command": "parameters.command (shell command). Returns: STDOUT/STDERR string.",
+        "use_git": "parameters.op plus additional fields (status|log|diff|add|commit|push|pull|branch). Returns: git output string.",
+        "write_file": "parameters.path, parameters.content. Returns: success/error string.",
+        "read_file": "parameters.path. Returns: file contents string (or error).",
+        "list_directory": "parameters.path. Returns: JSON-ish list string (or error).",
+        "download_file": "parameters.url, parameters.path. Returns: success/error string.",
+        "tail_file": "parameters.path, optional lines. Returns: tail text string.",
+        "replace_text": "parameters.path, pattern, replacement, optional replace_all. Returns: success/error string.",
+        "call_python": "parameters.code, optional globals. Returns: stdout + locals JSON string (or error).",
+    }
+    if tid in core:
+        return f"Tool: {tid} (core)\nContract: {core[tid]}"
+    return "Unknown tool."
+
+
 def _tool_policy_runner_text(ets: Optional[AbstractSet[str]]) -> str:
     """Non-empty when some tools are disabled for this session."""
     e = set(_coerce_enabled_tools(ets))
-    if e == set(_KNOWN_TOOLS):
+    if e == set(_all_known_tools()):
         return ""
-    disabled = sorted(_KNOWN_TOOLS - e)
-    allowed = sorted(e & _KNOWN_TOOLS)
+    disabled = sorted(_all_known_tools() - e)
+    allowed = sorted(e & _all_known_tools())
     return (
         "Runner: tool policy — you MUST NOT use tool_call for: "
         + ", ".join(disabled)
@@ -431,6 +662,7 @@ _AGENT_FILE_ENV_KEYS: Tuple[str, ...] = (
     "AGENT_PROGRESS",
     "AGENT_PROMPT_TEMPLATES_DIR",
     "AGENT_SKILLS_DIR",
+    "AGENT_TOOLS_DIR",
     "AGENT_REPL_HISTORY",
     "AGENT_REPL_INPUT_MAX_BYTES",
     "AGENT_REPL_BUFFERED_LINE",
@@ -639,6 +871,16 @@ def _default_skills_dir() -> str:
     return os.path.join(_agent_module_dir(), "skills")
 
 
+def _default_tools_dir() -> str:
+    return os.path.join(_agent_module_dir(), "tools")
+
+
+# Load bundled plugin toolsets (default tools_dir) at import time.
+# If tools_dir is overridden in prefs/env, main() / _session_defaults_from_prefs will reload.
+_load_plugin_toolsets(_default_tools_dir())
+_register_tool_aliases()
+
+
 def _resolved_prompt_templates_dir(prefs: Optional[dict] = None) -> str:
     p = (os.environ.get("AGENT_PROMPT_TEMPLATES_DIR") or "").strip()
     if p:
@@ -655,6 +897,15 @@ def _resolved_skills_dir(prefs: Optional[dict] = None) -> str:
     if prefs and isinstance(prefs, dict) and (prefs.get("skills_dir") or "").strip():
         return os.path.abspath(os.path.expanduser(str(prefs["skills_dir"]).strip()))
     return _default_skills_dir()
+
+
+def _resolved_tools_dir(prefs: Optional[dict] = None) -> str:
+    p = (os.environ.get("AGENT_TOOLS_DIR") or "").strip()
+    if p:
+        return os.path.abspath(os.path.expanduser(p))
+    if prefs and isinstance(prefs, dict) and (prefs.get("tools_dir") or "").strip():
+        return os.path.abspath(os.path.expanduser(str(prefs["tools_dir"]).strip()))
+    return _default_tools_dir()
 
 
 def _load_prompt_templates_from_dir(dir_path: str) -> dict:
@@ -1054,7 +1305,7 @@ def _effective_enabled_tools_for_skill(
     raw = rec.get("tools")
     if not isinstance(raw, list) or not raw:
         return base_enabled
-    wanted = {str(t).strip() for t in raw if isinstance(t, str) and t.strip() in _KNOWN_TOOLS}
+    wanted = {str(t).strip() for t in raw if isinstance(t, str) and t.strip() in _all_known_tools()}
     if not wanted:
         return base_enabled
     narrowed = wanted & set(base_enabled)
@@ -1158,6 +1409,8 @@ def _file_env_default_value_display(full: str) -> str:
         return _default_prompt_templates_dir()
     if full == "AGENT_SKILLS_DIR":
         return _default_skills_dir()
+    if full == "AGENT_TOOLS_DIR":
+        return _default_tools_dir()
     if full == "AGENT_REPL_HISTORY":
         return os.path.join(os.path.expanduser("~"), ".agent_repl_history")
     if full == "AGENT_REPL_INPUT_MAX_BYTES":
@@ -1383,6 +1636,7 @@ def _build_agent_prefs_payload(
     second_opinion_on: bool,
     cloud_ai_enabled: bool,
     enabled_tools: AbstractSet[str],
+    enabled_toolsets: Optional[AbstractSet[str]] = None,
     reviewer_hosted_profile: Optional[LlmProfile],
     reviewer_ollama_model: Optional[str],
     session_save_path: Optional[str],
@@ -1392,6 +1646,7 @@ def _build_agent_prefs_payload(
     prompt_template_default: Optional[str] = None,
     prompt_templates_dir: Optional[str] = None,
     skills_dir: Optional[str] = None,
+    tools_dir: Optional[str] = None,
     context_manager: Optional[dict] = None,
     verbose_level: int = 0,
 ) -> dict:
@@ -1406,7 +1661,7 @@ def _build_agent_prefs_payload(
         "verbose": _coerce_verbose_level(verbose_level),
         "primary_llm": _llm_profile_to_pref(primary_profile),
         "enabled_tools": sorted(enabled_tools)
-        if len(enabled_tools) < len(_KNOWN_TOOLS)
+        if len(enabled_tools) < len(_CORE_TOOLS)
         else None,
     }
     if reviewer_hosted_profile is not None and reviewer_hosted_profile.backend == "hosted":
@@ -1435,8 +1690,14 @@ def _build_agent_prefs_payload(
     skd = (skills_dir or "").strip()
     if skd:
         payload["skills_dir"] = os.path.abspath(os.path.expanduser(skd))
+    tld = (tools_dir or "").strip()
+    if tld:
+        payload["tools_dir"] = os.path.abspath(os.path.expanduser(tld))
     if context_manager is not None:
         payload["context_manager"] = context_manager
+    ets = {str(x).strip().lower() for x in (enabled_toolsets or set()) if str(x).strip()}
+    ets = {x for x in ets if x in _PLUGIN_TOOLSETS}
+    payload["enabled_toolsets"] = sorted(ets) if ets else None
     oa = _file_env_block_from_process(_OLLAMA_FILE_ENV_KEYS, "ollama")
     oi = _file_env_block_from_process(_OPENAI_FILE_ENV_KEYS, "openai")
     ag = _file_env_block_from_process(_AGENT_FILE_ENV_KEYS, "agent")
@@ -1452,10 +1713,17 @@ def _build_agent_prefs_payload(
 def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
     if isinstance(prefs, dict):
         _apply_stored_env_from_prefs(prefs)
+    # Ensure plugin toolsets are loaded from the resolved tools_dir for this prefs object.
+    try:
+        _load_plugin_toolsets(_resolved_tools_dir(prefs))
+        _register_tool_aliases()
+    except Exception:
+        pass
     _pt = _default_prompt_templates_dir()
     _sk = _default_skills_dir()
     out = {
-        "enabled_tools": set(_KNOWN_TOOLS),
+        "enabled_tools": set(_CORE_TOOLS),
+        "enabled_toolsets": set(),
         "second_opinion_enabled": False,
         "cloud_ai_enabled": False,
         "verbose": 0,
@@ -1467,6 +1735,7 @@ def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
         "system_prompt_path": None,
         "prompt_templates_dir": _pt,
         "skills_dir": _sk,
+        "tools_dir": _resolved_tools_dir(prefs),
         "prompt_templates": _merge_prompt_templates(None),
         "skills": _load_skills_from_dir(_resolved_skills_dir(None)),
         "prompt_template_default": "coding",
@@ -1503,6 +1772,14 @@ def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
                 et.add(tn)
         if et:
             out["enabled_tools"] = et
+    raw_ts = prefs.get("enabled_toolsets")
+    if isinstance(raw_ts, list):
+        ts: set[str] = set()
+        for one in raw_ts:
+            nm = str(one).strip().lower()
+            if nm and nm in _PLUGIN_TOOLSETS:
+                ts.add(nm)
+        out["enabled_toolsets"] = ts
     rev = prefs.get("second_opinion_reviewer")
     if isinstance(rev, dict):
         rb = _scalar_to_str(rev.get("backend"), "").strip().lower()
@@ -1539,6 +1816,7 @@ def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
     out["skills_dir"] = _resolved_skills_dir(prefs)
     out["prompt_templates"] = _merge_prompt_templates(prefs)
     out["skills"] = _load_skills_from_dir(out["skills_dir"])
+    out["tools_dir"] = _resolved_tools_dir(prefs)
     ptd = prefs.get("prompt_template_default")
     if isinstance(ptd, str) and ptd.strip():
         out["prompt_template_default"] = ptd.strip()
@@ -1959,7 +2237,7 @@ def _tool_calls_to_agent_json_text(
         args = fn.get("arguments")
         mapped = _tool_call_to_agent_dict(name, args)
         t = mapped.get("tool") if mapped else None
-        if mapped and t in _KNOWN_TOOLS and t in et:
+        if mapped and t in _all_known_tools() and t in et:
             return json.dumps(mapped)
     return None
 
@@ -2035,10 +2313,10 @@ def _best_agent_dict_from_text(text: str) -> Optional[dict]:
 
     def score(d: dict) -> tuple:
         action = d.get("action")
-        tool = d.get("tool") or (action if action in _KNOWN_TOOLS else None)
+        tool = d.get("tool") or (action if action in _all_known_tools() else None)
         has_action = 1 if action else 0
-        known_tool = 1 if tool in _KNOWN_TOOLS else 0
-        tool_call_shape = 1 if action == "tool_call" and tool in _KNOWN_TOOLS else 0
+        known_tool = 1 if tool in _all_known_tools() else 0
+        tool_call_shape = 1 if action == "tool_call" and tool in _all_known_tools() else 0
         return (tool_call_shape, known_tool, has_action)
 
     candidates.sort(key=score, reverse=True)
@@ -3429,9 +3707,9 @@ def _is_tool_call_intent(out: dict) -> bool:
     a = out.get("action")
     if a == "tool_call":
         return True
-    if a in _KNOWN_TOOLS:
+    if a in _all_known_tools():
         return True
-    if out.get("tool") in _KNOWN_TOOLS:
+    if out.get("tool") in _all_known_tools():
         return True
     return False
 
@@ -3470,15 +3748,15 @@ def _normalize_agent_dict(d: dict) -> dict:
     if out.get("tool") is None:
         for alias in ("tool_name", "toolName", "function_name", "function"):
             v = out.get(alias)
-            if isinstance(v, str) and v in _KNOWN_TOOLS:
+            if isinstance(v, str) and v in _all_known_tools():
                 out["tool"] = v
                 break
-        if out.get("tool") is None and isinstance(out.get("name"), str) and out["name"] in _KNOWN_TOOLS:
+        if out.get("tool") is None and isinstance(out.get("name"), str) and out["name"] in _all_known_tools():
             out["tool"] = out["name"]
 
     # Infer missing action after aliases / answer fields are filled in.
     if not action or (isinstance(action, str) and action.lower() in ("null", "none", "")):
-        if out.get("tool") in _KNOWN_TOOLS:
+        if out.get("tool") in _all_known_tools():
             out["action"] = "tool_call"
             action = "tool_call"
         elif out.get("answer") is not None and isinstance(out.get("answer"), str) and out["answer"].strip():
@@ -3489,7 +3767,7 @@ def _normalize_agent_dict(d: dict) -> dict:
                 out.pop("content", None)
 
     # {"action": "run_command", "command": "..."}  (action is the tool id)
-    if action in _KNOWN_TOOLS and out.get("tool") is None:
+    if action in _all_known_tools() and out.get("tool") is None:
         out["tool"] = action
         out["action"] = "tool_call"
 
@@ -4175,6 +4453,7 @@ def _interactive_repl(
     cloud_ai_enabled: bool,
     save_context_path: Optional[str],
     enabled_tools: Optional[AbstractSet[str]] = None,
+    enabled_toolsets: Optional[AbstractSet[str]] = None,
     primary_profile: Optional[LlmProfile] = None,
     reviewer_hosted_profile: Optional[LlmProfile] = None,
     reviewer_ollama_model: Optional[str] = None,
@@ -4185,6 +4464,7 @@ def _interactive_repl(
     prompt_template_default: Optional[str] = None,
     prompt_templates_dir: Optional[str] = None,
     skills_dir: Optional[str] = None,
+    tools_dir: Optional[str] = None,
     skills_map: Optional[dict] = None,
     context_cfg: Optional[dict] = None,
 ):
@@ -4198,6 +4478,10 @@ def _interactive_repl(
     skd0 = (skills_dir or "").strip()
     session_skills_dir = os.path.abspath(
         os.path.expanduser(skd0) if skd0 else _default_skills_dir()
+    )
+    tld0 = (tools_dir or "").strip()
+    session_tools_dir = os.path.abspath(
+        os.path.expanduser(tld0) if tld0 else _default_tools_dir()
     )
     skills_m = skills_map if isinstance(skills_map, dict) else {}
     templates = prompt_templates if isinstance(prompt_templates, dict) else _default_prompt_templates()
@@ -4219,8 +4503,9 @@ def _interactive_repl(
     context_cfg = context_cfg if isinstance(context_cfg, dict) else {}
     primary_profile = primary_profile or default_primary_llm_profile()
     enabled_tools = (
-        set(enabled_tools) if enabled_tools is not None else set(_KNOWN_TOOLS)
+        set(enabled_tools) if enabled_tools is not None else set(_CORE_TOOLS)
     )
+    enabled_toolsets = set(enabled_toolsets) if enabled_toolsets is not None else set()
     prim_line = (
         _describe_llm_profile_short(primary_profile)
         if primary_profile.backend == "hosted"
@@ -4247,9 +4532,9 @@ def _interactive_repl(
             f"Second-opinion default reviewer: {rev_line}\n"
             + (
                 "Tools: all enabled."
-                if len(enabled_tools) == len(_KNOWN_TOOLS)
+                if len(enabled_tools) == len(_CORE_TOOLS)
                 else "Tools disabled: "
-                + ", ".join(sorted(_KNOWN_TOOLS - enabled_tools))
+                + ", ".join(sorted(_CORE_TOOLS - enabled_tools))
             )
             + (
                 f"\nauto-save context: {session_save_path!r}"
@@ -4299,8 +4584,13 @@ def _interactive_repl(
             _agent_progress("/reuse-skill: using stored skill; starting…")
         else:
             _agent_progress("/use-skills: skill selected; starting…")
-        et_turn = _effective_enabled_tools_for_skill(
+        et_turn0 = _effective_enabled_tools_for_skill(
             frozenset(enabled_tools), skills_m, sid
+        )
+        et_turn = _effective_enabled_tools_for_turn(
+            base_enabled_tools=et_turn0,
+            enabled_toolsets=enabled_toolsets,
+            user_query=req,
         )
         rec = skills_m.get(sid) or {}
         skill_prompt = (rec.get("prompt") or "").strip() if isinstance(rec, dict) else ""
@@ -4700,10 +4990,75 @@ def _interactive_repl(
                 print(_verbose_ack_message(verbose))
                 continue
             if key == "tools":
-                if len(toks) != 2:
-                    print("Usage: /settings tools")
+                if len(toks) == 2 or (len(toks) >= 3 and toks[2].lower() in ("list", "ls", "show")):
+                    print(_format_settings_tools_list(enabled_tools))
+                    if _PLUGIN_TOOLSETS:
+                        lines = ["\nToolsets (plugins):"]
+                        for nm in sorted(_PLUGIN_TOOLSETS.keys()):
+                            on = "on" if nm in enabled_toolsets else "off"
+                            desc = str((_PLUGIN_TOOLSETS.get(nm) or {}).get("description") or "").strip()
+                            lines.append(f"  [{on}] {nm}" + (f" — {desc}" if desc else ""))
+                            # Show tools inside each toolset with effective availability.
+                            tnames = sorted(_plugin_tools_for_toolset(nm))
+                            for tid in tnames:
+                                td_on = (nm in enabled_toolsets) and (tid in enabled_tools)
+                                reason = ""
+                                if nm not in enabled_toolsets:
+                                    reason = " (toolset off)"
+                                elif tid not in enabled_tools:
+                                    reason = " (tool disabled)"
+                                lines.append(f"       - {'on' if td_on else 'off'} {tid}{reason}")
+                        lines.append("Enable a toolset:  /settings tools enable <toolset>")
+                        lines.append("Disable a toolset: /settings tools disable <toolset>")
+                        lines.append("Reload plugins:    /settings tools reload")
+                        lines.append("Describe a tool:   /settings tools describe <tool-id>")
+                        print("\n".join(lines))
                     continue
-                print(_format_settings_tools_list(enabled_tools))
+                if len(toks) >= 4 and toks[2].lower() in ("enable", "on"):
+                    nm = toks[3].strip().lower()
+                    if nm in _PLUGIN_TOOLSETS:
+                        enabled_toolsets.add(nm)
+                        # Enabling a toolset also enables its tools unless they were explicitly disabled.
+                        for tid in _plugin_tools_for_toolset(nm):
+                            enabled_tools.add(tid)
+                        print(f"Toolset enabled: {nm!r} (tools may be routed per request). Use /settings save to persist.")
+                    else:
+                        print(f"Unknown toolset {nm!r}. Try: /settings tools")
+                    continue
+                if len(toks) >= 4 and toks[2].lower() in ("disable", "off"):
+                    nm = toks[3].strip().lower()
+                    if nm in _PLUGIN_TOOLSETS:
+                        enabled_toolsets.discard(nm)
+                        # Also disable its tools explicitly if they were ever enabled individually.
+                        for tid in _plugin_tools_for_toolset(nm):
+                            enabled_tools.discard(tid)
+                        print(f"Toolset disabled: {nm!r}. Use /settings save to persist.")
+                    else:
+                        print(f"Unknown toolset {nm!r}. Try: /settings tools")
+                    continue
+                if len(toks) >= 3 and toks[2].lower() in ("reload", "refresh"):
+                    _load_plugin_toolsets(session_tools_dir)
+                    _register_tool_aliases()
+                    print(f"Reloaded plugin toolsets from {session_tools_dir!r}.")
+                    continue
+                if len(toks) >= 4 and toks[2].lower() in ("describe", "desc", "help"):
+                    tid = toks[3].strip()
+                    if not tid:
+                        print("Usage: /settings tools describe <tool-id>")
+                        continue
+                    # Allow toolset name too: describe the toolset and list its tools.
+                    nm = tid.strip().lower()
+                    if nm in _PLUGIN_TOOLSETS:
+                        rec = _PLUGIN_TOOLSETS.get(nm) or {}
+                        desc = str(rec.get("description") or "").strip()
+                        print(f"Toolset: {nm}\nDescription: {desc if desc else '(none)'}")
+                        print("Tools:")
+                        for one in sorted(_plugin_tools_for_toolset(nm)):
+                            print("  - " + one)
+                        continue
+                    print(_describe_tool_call_contract(tid))
+                    continue
+                print("Usage: /settings tools [list] | enable <toolset> | disable <toolset>")
                 continue
             if key == "system_prompt":
                 if len(toks) < 3:
@@ -4995,6 +5350,7 @@ def _interactive_repl(
                         second_opinion_on=second_opinion_on,
                         cloud_ai_enabled=cloud_ai_enabled,
                         enabled_tools=enabled_tools,
+                        enabled_toolsets=enabled_toolsets,
                         reviewer_hosted_profile=reviewer_hosted_profile,
                         reviewer_ollama_model=reviewer_ollama_model,
                         session_save_path=session_save_path,
@@ -5004,6 +5360,7 @@ def _interactive_repl(
                         prompt_template_default=template_default,
                         prompt_templates_dir=session_pt_dir,
                         skills_dir=session_skills_dir,
+                        tools_dir=session_tools_dir,
                         context_manager=context_cfg,
                         verbose_level=verbose,
                     )
@@ -5310,8 +5667,13 @@ def _interactive_repl(
             user_query = s
             deliverable_wanted = _user_wants_written_deliverable(user_query)
             sid0, tr0 = _match_skill_detail(user_query, skills_m)
-            et_turn = _effective_enabled_tools_for_skill(
+            et_turn0 = _effective_enabled_tools_for_skill(
                 frozenset(enabled_tools), skills_m, sid0
+            )
+            et_turn = _effective_enabled_tools_for_turn(
+                base_enabled_tools=et_turn0,
+                enabled_toolsets=enabled_toolsets,
+                user_query=user_query,
             )
             if verbose >= 1:
                 d0 = (
@@ -5606,7 +5968,7 @@ def _run_agent_conversation_turn(
             final_answer = str(err) if err is not None else None
             answered = True
             break
-        elif action == "tool_call" or action in _KNOWN_TOOLS:
+        elif action == "tool_call" or action in _all_known_tools():
             tool = response_data.get("tool")
             if tool == None:
                 tool = action
@@ -5637,7 +5999,7 @@ def _run_agent_conversation_turn(
                 if verbose < 1:
                     _agent_progress(_tool_progress_message(tool, params))
                 result = ""
-                if tool in _KNOWN_TOOLS and tool not in et:
+                if tool in _all_known_tools() and tool not in et:
                     policy_blocked = True
                     result = (
                         f"Tool error: {tool} is disabled for this run (tool policy). "
@@ -5679,6 +6041,8 @@ def _run_agent_conversation_turn(
                             )
                         elif tool == "call_python":
                             result = call_python(params.get("code"), params.get("globals"))
+                        elif tool in _PLUGIN_TOOL_HANDLERS:
+                            result = _PLUGIN_TOOL_HANDLERS[tool](params)
                         else:
                             result = f"Unknown tool: {tool}"
                     except KeyboardInterrupt:
@@ -5827,6 +6191,12 @@ def main():
     argv = _parse_and_apply_cli_config_flag(list(sys.argv[1:]))
     raw_prefs = _load_agent_prefs()
     st = _session_defaults_from_prefs(raw_prefs)
+    # Reload plugin toolsets after prefs/env are applied so AGENT_TOOLS_DIR / tools_dir override works.
+    try:
+        _load_plugin_toolsets(_resolved_tools_dir(raw_prefs))
+        _register_tool_aliases()
+    except Exception:
+        pass
     verbose = _coerce_verbose_level(st.get("verbose", 0))
     query_parts = []
     second_opinion_enabled = bool(st["second_opinion_enabled"])
@@ -5940,6 +6310,7 @@ def main():
             cloud_ai_enabled=cloud_ai_enabled,
             save_context_path=save_context_path,
             enabled_tools=frozenset(enabled_tools),
+            enabled_toolsets=st.get("enabled_toolsets"),
             primary_profile=primary_profile,
             reviewer_hosted_profile=reviewer_hosted_profile,
             reviewer_ollama_model=reviewer_ollama_model,
@@ -5950,6 +6321,7 @@ def main():
             prompt_template_default=st.get("prompt_template_default"),
             prompt_templates_dir=st.get("prompt_templates_dir"),
             skills_dir=st.get("skills_dir"),
+            tools_dir=st.get("tools_dir"),
             skills_map=st.get("skills"),
             context_cfg=st.get("context_manager"),
         )
@@ -5960,8 +6332,13 @@ def main():
     if not isinstance(skills_map_cli, dict):
         skills_map_cli = {}
     skill_id_cli, tr_cli = _match_skill_detail(user_query, skills_map_cli)
-    et_oneshot = _effective_enabled_tools_for_skill(
+    et_oneshot0 = _effective_enabled_tools_for_skill(
         frozenset(enabled_tools), skills_map_cli, skill_id_cli
+    )
+    et_oneshot = _effective_enabled_tools_for_turn(
+        base_enabled_tools=et_oneshot0,
+        enabled_toolsets=st.get("enabled_toolsets") or set(),
+        user_query=user_query,
     )
     if verbose >= 1:
         dcli = (
