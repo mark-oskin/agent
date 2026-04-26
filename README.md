@@ -55,6 +55,45 @@ To use a different config file:
 ./agent.py --config ./my-agent.json
 ```
 
+## Tools (enable/disable)
+
+The agent has a small built-in tool set (web search, fetch URL, git, filesystem, shell, etc).
+
+In the REPL:
+
+- `/settings tools` shows tool ids and whether they’re enabled
+- `/settings enable <tool or phrase>`
+- `/settings disable <tool or phrase>`
+
+Examples:
+
+```text
+/settings disable web search
+/settings enable shell
+```
+
+In one-shot mode you can also gate tools from the command line:
+
+```bash
+./agent.py -disable-tool search_web "answer without using the web"
+./agent.py -enable-tool run_command "run a command"
+```
+
+If a tool is disabled and the model tries to call it anyway, the tool call is **blocked** and the model receives a tool error string so it can recover.
+
+## Skills
+
+Skills are lightweight prompt “profiles” that help the model act like a specialist (e.g. debugging, docker, security audit) and optionally run a short workflow.
+
+In the REPL:
+
+- `/use-skills <request>` asks the model to pick a skill and then runs it
+- `/reuse-skill <request>` reuses the previously selected skill for a follow-up
+
+Skills live under `skills/` (JSON files). You can override the skills directory with:
+
+- `AGENT_SKILLS_DIR` (environment/config) or `/settings agent set SKILLS_DIR <path>` then `/settings save`
+
 ### Thinking / streaming thinking (Ollama)
 
 - `/settings thinking on|off`
@@ -71,5 +110,5 @@ uv run pytest
 
 ## License
 
-TBD (add a `LICENSE` file).
+MIT. See `LICENSE`.
 
