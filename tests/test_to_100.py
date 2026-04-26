@@ -661,6 +661,29 @@ def test_interactive_settings_llm_profiles(monkeypatch):
     assert "Primary LLM: local Ollama (uses OLLAMA_MODEL from the environment)." in out
 
 
+def test_interactive_show_model_and_reviewer(monkeypatch):
+    d = _d()
+    monkeypatch.setenv("OLLAMA_MODEL", "custom-llm:latest")
+    lines = ["/show model", "/show reviewer", "/quit"]
+    it = iter(lines)
+
+    def fake_input(_=""):
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        d._interactive_repl(
+            verbose=0,
+            second_opinion_enabled=False,
+            cloud_ai_enabled=False,
+            save_context_path=None,
+        )
+    out = buf.getvalue()
+    assert "Primary LLM: ollama (" in out and "custom-llm:latest" in out
+    assert "Second-opinion reviewer:" in out
+
+
 # --- transcripts ---
 
 

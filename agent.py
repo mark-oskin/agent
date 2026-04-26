@@ -88,6 +88,22 @@ def _describe_llm_profile_short(p: LlmProfile) -> str:
     return f"hosted {p.model!r} @ {p.base_url!r} (key: {p.api_key_env})"
 
 
+def _format_session_primary_llm_line(p: LlmProfile) -> str:
+    """One-line description of the primary LLM (REPL banner and /show model)."""
+    if p.backend == "hosted":
+        return _describe_llm_profile_short(p)
+    return f"ollama ({_ollama_model()!r})"
+
+
+def _format_session_reviewer_line(
+    hosted: Optional[LlmProfile], ollama_model: Optional[str]
+) -> str:
+    """One-line description of the second-opinion reviewer (banner and /show reviewer)."""
+    if hosted is not None and hosted.backend == "hosted":
+        return _describe_llm_profile_short(hosted)
+    return f"ollama ({(ollama_model or _ollama_second_opinion_model())!r})"
+
+
 # Core tools we implement in this script (Ollama may emit other native tool names — ignore those).
 _CORE_TOOLS = frozenset(
     {
@@ -4506,18 +4522,10 @@ def _interactive_repl(
         set(enabled_tools) if enabled_tools is not None else set(_CORE_TOOLS)
     )
     enabled_toolsets = set(enabled_toolsets) if enabled_toolsets is not None else set()
-    prim_line = (
-        _describe_llm_profile_short(primary_profile)
-        if primary_profile.backend == "hosted"
-        else f"ollama ({_ollama_model()!r})"
+    prim_line = _format_session_primary_llm_line(primary_profile)
+    rev_line = _format_session_reviewer_line(
+        reviewer_hosted_profile, reviewer_ollama_model
     )
-    if (
-        reviewer_hosted_profile is not None
-        and reviewer_hosted_profile.backend == "hosted"
-    ):
-        rev_line = _describe_llm_profile_short(reviewer_hosted_profile)
-    else:
-        rev_line = f"ollama ({(reviewer_ollama_model or _ollama_second_opinion_model())!r})"
     # Keep startup quiet at verbose=0; the detailed banner is still available at verbose>=1.
     if verbose >= 1:
         print(
@@ -4832,6 +4840,34 @@ def _interactive_repl(
             continue
         if low in ("/usage", "/tokens"):
             print(_format_last_ollama_usage_for_repl())
+            continue
+        if s.startswith("/show"):
+            try:
+                toks = shlex.split(s)
+            except ValueError as e:
+                print(f"/show: {e}")
+                continue
+            if len(toks) < 2 or toks[1].lower() in ("help", "-h", "--help"):
+                print(
+                    "Usage:\n"
+                    "  /show model      Primary LLM in use (Ollama or hosted)\n"
+                    "  /show reviewer   Second-opinion reviewer model\n"
+                    "\n"
+                    "Settings that already have a show line: /settings tools, /settings context show, "
+                    "/settings thinking show, /settings system_prompt show, /settings prompt_template show, "
+                    "/settings ollama|openai|agent show"
+                )
+                continue
+            sub = toks[1].lower().replace("-", "_")
+            if sub in ("model", "primary", "llm"):
+                print(f"Primary LLM: {_format_session_primary_llm_line(primary_profile)}")
+                continue
+            if sub in ("reviewer", "second_opinion", "2nd"):
+                print(
+                    f"Second-opinion reviewer: {_format_session_reviewer_line(reviewer_hosted_profile, reviewer_ollama_model)}"
+                )
+                continue
+            print("Unknown /show topic. Try: /show model   or   /show reviewer")
             continue
         if low.startswith("/use-skills"):
             # Model picks a skill, then we run the same pipeline as /reuse-skill.
@@ -5617,6 +5653,7 @@ def _interactive_repl(
                 "  /quit                    Exit\n"
                 "  /clear                   Clear in-memory conversation\n"
                 "  /models                  List local Ollama models (api/tags)\n"
+                "  /show model | /show reviewer   Current primary or second-opinion LLM (see /show help for details)\n"
                 "  /usage                   Last local Ollama prompt/completion token counts (from /api/chat)\n"
                 "  /use-skills <request>    Ask the model to pick a skill, then run it (multi-step if the skill supports it)\n"
                 "  /reuse-skill <request>     Follow-up using the same skill as the last /use-skills or /reuse-skill (no re-selection)\n"
