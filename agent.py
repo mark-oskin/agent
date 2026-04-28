@@ -525,8 +525,8 @@ def _print_cli_help() -> None:
         "  --model, -model <name>  Primary model: Ollama tag (sets OLLAMA_MODEL) or hosted model id when using hosted primary\n"
         "                          Also accepted: --model=<name> (same run only; does not update ~/.agent.json)\n"
         "\n"
-        "Config:   persist Ollama / OpenAI / process options in ~/.agent.json via  /settings ollama|openai|agent  in the REPL, "
-        "or use /help environment  (exporting variables still overrides the file for a one-off run).\n"
+        "Config:   persist Ollama / OpenAI / process options in ~/.agent.json via  /settings ollama|openai|agent  in the REPL "
+        "(exporting variables still overrides the file for a one-off run).\n"
     )
 
 
@@ -619,7 +619,10 @@ def _tool_progress_message(tool: str, params: dict) -> str:
     t = (tool or "").strip()
     p = params if isinstance(params, dict) else {}
     if t == "search_web":
-        return f"Tool: search_web query={_progress_clip(p.get('query'))!r}"
+        return (
+            f"Tool: search_web {_search_backend_banner_line()} "
+            f"query={_progress_clip(p.get('query'))!r}"
+        )
     if t == "fetch_page":
         return f"Tool: fetch_page url={_progress_clip(p.get('url'))!r}"
     if t == "read_file":
@@ -687,6 +690,8 @@ _AGENT_FILE_ENV_KEYS: Tuple[str, ...] = (
     "AGENT_SHOW_THINKING",
     "AGENT_STREAM_THINKING",
     "AGENT_SEARCH_WEB_MAX_RESULTS",
+    "AGENT_SEARCH_WEB_BACKEND",
+    "AGENT_SEARXNG_URL",
     "AGENT_AUTO_CONFIRM_TOOL_RETRY",
     "AGENT_CONTEXT_TOKENS",
     "AGENT_HOSTED_CONTEXT_TOKENS",
@@ -800,10 +805,46 @@ def _file_env_key_help_lines(kind: str) -> str:
         keys = _OPENAI_FILE_ENV_KEYS
     else:
         keys = _AGENT_FILE_ENV_KEYS
-    lines = []
+    # Short descriptions for keys to make /settings <group> keys self-explanatory.
+    desc: dict[str, str] = {
+        # Ollama
+        "OLLAMA_HOST": "Base URL for Ollama HTTP API (default http://localhost:11434)",
+        "OLLAMA_MODEL": "Primary local model tag",
+        "OLLAMA_SECOND_OPINION_MODEL": "Reviewer model tag for second opinion",
+        "OLLAMA_DEBUG": "1 enables extra debug logging for Ollama HTTP",
+        "OLLAMA_TOOL_OUTPUT_MAX": "Max chars of tool output forwarded to the model",
+        "OLLAMA_SEARCH_ENRICH": "0 disables present-day enrichment for some search queries",
+        # OpenAI / hosted
+        "OPENAI_API_KEY": "API key for hosted OpenAI-compatible backends",
+        "OPENAI_BASE_URL": "Base URL for OpenAI-compatible API (e.g. https://api.openai.com/v1)",
+        "OPENAI_CLOUD_MODEL": "Cloud reviewer model id (when cloud-ai enabled)",
+        "OPENAI_MODEL": "Default hosted model id (hosted primary)",
+        # Agent
+        "AGENT_QUIET": "1 disables progress heartbeats",
+        "AGENT_PROGRESS": "0 disables progress heartbeats (default 1)",
+        "AGENT_PROMPT_TEMPLATES_DIR": "Override prompt_templates directory path",
+        "AGENT_SKILLS_DIR": "Override skills directory path",
+        "AGENT_TOOLS_DIR": "Override tools (plugin toolsets) directory path",
+        "AGENT_AUTO_CONFIRM_TOOL_RETRY": "1 auto-confirms suggested tool retry prompts",
+        "AGENT_SEARCH_WEB_MAX_RESULTS": "1–30 max web results to include (default 5)",
+        "AGENT_SEARCH_WEB_BACKEND": "Web search backend: ddg (default) or searxng",
+        "AGENT_SEARXNG_URL": "SearXNG base URL (default https://searx.party)",
+        "AGENT_THINKING": "1 enables thinking (if model supports it); 0 disables",
+        "AGENT_THINKING_LEVEL": "low|medium|high (optional hint to model)",
+        "AGENT_STREAM_THINKING": "1 streams thinking; 0 disables (legacy: AGENT_SHOW_THINKING)",
+        "AGENT_SHOW_THINKING": "Legacy alias for AGENT_STREAM_THINKING",
+        "AGENT_DISABLE_CONTEXT_MANAGER": "1 disables context auto-compaction",
+        "AGENT_ROUTER_TRANSCRIPT_MAX_MESSAGES": "Max messages router sees for web-search decision (default 80)",
+    }
+    lines = ["Keys:"]
     for k in keys:
         short = _short_env_key_from_full(k, kind)
-        lines.append(f"    {short:35} ({pfx + short})")
+        full = pfx + short
+        d = desc.get(full, "")
+        if d:
+            lines.append(f"  {short:28} ({full})\n      {d}")
+        else:
+            lines.append(f"  {short:28} ({full})")
     return "\n".join(lines)
 
 
@@ -1443,6 +1484,10 @@ def _file_env_default_value_display(full: str) -> str:
         return "0"
     if full == "AGENT_SEARCH_WEB_MAX_RESULTS":
         return "5"
+    if full == "AGENT_SEARCH_WEB_BACKEND":
+        return "ddg"
+    if full == "AGENT_SEARXNG_URL":
+        return "https://searx.party"
     if full == "AGENT_AUTO_CONFIRM_TOOL_RETRY":
         return "0"
     if full == "AGENT_CONTEXT_TOKENS":
@@ -3189,6 +3234,76 @@ def _ddg_instant_answer(query: str) -> str:
         return ""
 
 
+def _search_web_backend() -> str:
+    """
+    Web search backend selector.
+    - default: "ddg" (DuckDuckGo)
+    - alternative: "searxng"
+    """
+    v = (os.environ.get("AGENT_SEARCH_WEB_BACKEND") or os.environ.get("AGENT_WEB_SEARCH_BACKEND") or "ddg").strip().lower()
+    v = v.replace("-", "_")
+    if v in ("searx", "searxng"):
+        return "searxng"
+    return "ddg"
+
+
+def _searxng_base_url() -> str:
+    """
+    Base URL for SearXNG.
+    Default: https://searx.party (public instance).
+    """
+    return (os.environ.get("AGENT_SEARXNG_URL") or "https://searx.party").strip().rstrip("/")
+
+
+def _search_backend_banner_line() -> str:
+    """Same banner prefix as prepended to search_web tool output."""
+    backend = _search_web_backend()
+    if backend == "searxng":
+        return f"[Search backend] searxng {_searxng_base_url()}"
+    return "[Search backend] ddg"
+
+
+def _searxng_search(query: str, *, max_results: int) -> str:
+    """
+    Query SearXNG JSON API and return rows in the same [Web results] format.
+    """
+    q = _scalar_to_str(query, "").strip()
+    if not q:
+        return ""
+    base = _searxng_base_url()
+    try:
+        r = requests.get(
+            f"{base}/search",
+            params={
+                "q": q,
+                "format": "json",
+                "language": "en-US",
+                "safesearch": 0,
+                "categories": "general",
+            },
+            headers={"Accept": "application/json", **_ddg_search_headers()},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list):
+            return ""
+        rows = []
+        for rec in results[: max(1, min(30, int(max_results)))]:
+            if not isinstance(rec, dict):
+                continue
+            url = _scalar_to_str(rec.get("url"), "").strip()
+            title = _scalar_to_str(rec.get("title"), "").strip()
+            snippet = _scalar_to_str(rec.get("content"), "").strip()
+            if not url:
+                continue
+            rows.append(f"Link: {url}\nTitle: {title}\nSnippet: {snippet}")
+        return "\n".join(rows) if rows else ""
+    except Exception:
+        return ""
+
+
 def _strip_html_fragment(s: str) -> str:
     s = re.sub(r"<[^>]+>", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -3337,7 +3452,7 @@ def _wikipedia_top_page_extract(query: str) -> str:
 
 def search_web(query, params: Optional[dict] = None) -> str:
     """
-    DuckDuckGo HTML results + fallbacks.
+    Web search results + fallbacks.
 
     Optional tool parameters (in ``params``): max_results (or max, num_results, n, limit) —
     number of DDG result rows to include, 1–30, default from env ``AGENT_SEARCH_WEB_MAX_RESULTS`` or 5.
@@ -3345,21 +3460,39 @@ def search_web(query, params: Optional[dict] = None) -> str:
     query = _scalar_to_str(query, "")
     query = _enrich_search_query_for_present_day(query)
     mr = _search_web_effective_max_results(params or {})
+    backend = _search_web_backend()
     parts = []
-    ia = _ddg_instant_answer(query)
-    if ia:
-        parts.append("[DuckDuckGo instant answer]\n" + ia)
-    page = _fetch_ddg_html(query)
-    blocked = "anomaly-modal" in page or "bots use DuckDuckGo" in page
-    rows = [] if blocked else _parse_ddg_html_results(page, max_results=mr)
-    if rows:
-        parts.append("[Web results]\n" + "\n".join(rows))
-    elif blocked:
-        parts.append(
-            "[Note] DuckDuckGo returned a bot-check page instead of HTML results "
-            "(common for datacenter IPs). Instant answer and Wikipedia fallback still apply."
-        )
-    if not rows:
+
+    parts.append(_search_backend_banner_line())
+    rows_text = ""
+    got_rows = False
+    if backend == "searxng":
+        rows_text = _searxng_search(query, max_results=mr)
+        if rows_text:
+            parts.append("[Web results]\n" + rows_text)
+            got_rows = True
+        else:
+            parts.append(
+                f"[Note] SearXNG returned no usable results (instance: {_searxng_base_url()!r}). "
+                "Falling back to DuckDuckGo instant answers and Wikipedia."
+            )
+
+    if backend != "searxng" or not got_rows:
+        ia = _ddg_instant_answer(query)
+        if ia:
+            parts.append("[DuckDuckGo instant answer]\n" + ia)
+        page = _fetch_ddg_html(query)
+        blocked = "anomaly-modal" in page or "bots use DuckDuckGo" in page
+        rows = [] if blocked else _parse_ddg_html_results(page, max_results=mr)
+        if rows:
+            parts.append("[Web results]\n" + "\n".join(rows))
+            got_rows = True
+        elif blocked:
+            parts.append(
+                "[Note] DuckDuckGo returned a bot-check page instead of HTML results "
+                "(common for datacenter IPs). Instant answer and Wikipedia fallback still apply."
+            )
+    if not got_rows:
         wiki = _wikipedia_opensearch(query, result_limit=mr)
         if wiki:
             parts.append("[Wikipedia search]\n" + wiki)
@@ -4819,7 +4952,7 @@ class AgentExecuteResult:
 def _agent_execute_help_text() -> str:
     return (
         "Commands:\n"
-        "  /help, /help environment\n"
+        "  /help\n"
         "  /quit, /clear, /models, /usage\n"
         "  /show ...\n"
         "  /settings ...   (try /settings help)\n"
@@ -4876,6 +5009,10 @@ _SETTINGS_HELP_TEXT = (
     "  /settings thinking show|on|off|level ...\n"
     "  /settings context show|on|off|...\n"
     "  /settings verbose 0|1|2|on|off\n\n"
+    "Environment-backed settings (stored in ~/.agent.json via /settings ollama|openai|agent ...):\n"
+    "  /settings ollama show|keys|set|unset\n"
+    "  /settings openai show|keys|set|unset\n"
+    "  /settings agent show|keys|set|unset\n\n"
     "Tip: use /skill help for skills.\n"
 )
 
@@ -5545,15 +5682,6 @@ def execute_agent_line(session: AgentSession, line: str) -> AgentExecuteResult:
         return AgentExecuteResult(output=_format_last_ollama_usage_for_repl())
     if low in ("/help", "/?"):
         return AgentExecuteResult(output=_agent_execute_help_text())
-    if low in ("/help environment", "/help env"):
-        # Reuse REPL text generator by calling the same block used in interactive mode.
-        return AgentExecuteResult(
-            output=(
-                "Ollama / OpenAI / agent options are stored in ~/.agent.json and edited with:\n"
-                "  /settings ollama show|keys|set|unset,  /settings openai …,  /settings agent …,  then  /settings save.\n"
-                "Precedence: if a full variable (e.g. OLLAMA_HOST) is set in the shell when the program starts, that value is kept.\n"
-            )
-        )
     if s.startswith("/show"):
         try:
             toks = shlex.split(s)
@@ -7055,7 +7183,7 @@ def _interactive_repl(
                 "Commands:\n"
                 "  /quit                    Exit\n"
                 "  /clear                   Clear in-memory conversation\n"
-                "  /help, /help environment  Help\n"
+                "  /help                    Help\n"
                 "  /models                  List local Ollama models\n"
                 "  /usage                   Last local Ollama usage\n"
                 "  /show ...                Show current state (try /show help)\n"
@@ -7064,21 +7192,6 @@ def _interactive_repl(
                 "  /settings ...            Configuration (try /settings help)\n"
                 "  /load_context <file>     Replace session messages from JSON\n"
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
-            )
-            continue
-        if low in ("/help environment", "/help env"):
-            print(
-                "Ollama / OpenAI / agent options are stored in ~/.agent.json (see objects ollama, openai, agent) and edited with:\n"
-                "  /settings ollama show|keys|set|unset,  /settings openai …,  /settings agent …,  then  /settings save  to write the file.\n"
-                "Each key (short: HOST, or full: OLLAMA_HOST) is applied to the process; save snapshots current environment values for known keys.\n"
-                "Precedence: if a full variable (e.g. OLLAMA_HOST) is set in the shell when the program starts, that value is kept and the file is not applied for that name.\n"
-                "\n"
-                "The same names also work as plain environment variables (e.g. for one-off  OLLAMA_HOST=…  python3 agent.py  ):\n"
-                "  OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_SECOND_OPINION_MODEL, OLLAMA_DEBUG, OLLAMA_TOOL_OUTPUT_MAX, OLLAMA_SEARCH_ENRICH\n"
-                "  OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_CLOUD_MODEL, OPENAI_MODEL\n"
-                "  AGENT_QUIET, AGENT_PROGRESS, AGENT_PROMPT_TEMPLATES_DIR, AGENT_SKILLS_DIR, AGENT_REPL_*,\n"
-                "  AGENT_AUTO_CONFIRM_TOOL_RETRY, AGENT_SEARCH_WEB_MAX_RESULTS, AGENT_THINKING, AGENT_THINKING_LEVEL, AGENT_STREAM_THINKING (or legacy AGENT_SHOW_THINKING),\n"
-                "  AGENT_CONTEXT_*, AGENT_DISABLE_CONTEXT_MANAGER, AGENT_ROUTER_TRANSCRIPT_MAX_MESSAGES\n"
             )
             continue
         if s.startswith("/"):
@@ -7140,6 +7253,22 @@ def _run_agent_conversation_turn(
         response_data = parse_agent_json(response_text)
         action = response_data.get("action")
         if action == "answer":
+            # Robustness: if the model attempted JSON-only but truncated/malformed its JSON,
+            # do not treat that as an answer. Ask for a clean retry.
+            rt = (response_text or "").strip()
+            if rt.startswith("{") and ("\"action\"" in rt or "'action'" in rt) and not rt.rstrip().endswith("}"):
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your last response looked like a JSON object but it was truncated/malformed "
+                            "(missing closing braces/quotes). Respond again with a SINGLE valid JSON object "
+                            "and no other text."
+                        ),
+                    }
+                )
+                continue
             if web_required and not saw_strong_web_result:
                 # If routing determined web is required, do not allow a final answer
                 # until we've observed at least one non-weak web result in this session.
@@ -7296,8 +7425,36 @@ def _run_agent_conversation_turn(
                 continue
             messages.append({"role": "assistant", "content": response_text})
             ans_out = response_data.get("answer")
+            if ans_out is None or (isinstance(ans_out, str) and not ans_out.strip()):
+                # Models sometimes include the final JSON inside a longer string; if parsing
+                # picked an incomplete object (e.g. {"action":"answer"}), recover.
+                extracted = _extract_json_object_from_text(response_text)
+                if extracted:
+                    try:
+                        recovered = parse_agent_json(extracted)
+                    except Exception:
+                        recovered = None
+                    if isinstance(recovered, dict) and recovered.get("action") == "answer":
+                        ra = recovered.get("answer")
+                        if isinstance(ra, str) and ra.strip():
+                            response_data = recovered
+                            ans_out = ra
+                if ans_out is None or (isinstance(ans_out, str) and not ans_out.strip()):
+                    # Treat as invalid agent JSON rather than printing "None" or echoing JSON back.
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                'Your JSON had action "answer" but was missing a non-empty string field "answer". '
+                                "Respond again with a SINGLE valid JSON object in this exact shape:\n"
+                                '{"action":"answer","answer":"..."}\n'
+                                "No other keys, and no other text."
+                            ),
+                        }
+                    )
+                    continue
             if print_answer:
-                print(ans_out)
+                print(ans_out if ans_out is not None else "")
             final_answer = ans_out if isinstance(ans_out, str) else str(ans_out)
             answered = True
             break
@@ -7328,7 +7485,12 @@ def _run_agent_conversation_turn(
                 if skipped_duplicate:
                     print(f"[*] Skipping duplicate tool: {tool} (same logical parameters as earlier)")
                 else:
-                    print(f"[*] Executing tool: {tool} with {params}")
+                    if tool == "search_web":
+                        print(
+                            f"[*] Executing tool: {tool} ({_search_backend_banner_line()}) with {params}"
+                        )
+                    else:
+                        print(f"[*] Executing tool: {tool} with {params}")
             if skipped_duplicate:
                 result = (
                     "[Duplicate call skipped: this tool was already run with the same parameters "

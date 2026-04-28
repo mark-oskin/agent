@@ -15,15 +15,19 @@
     "dataclass"
   ],
   "tools": [
+    "search_web",
+    "fetch_page",
     "read_file",
     "write_file",
     "list_directory",
+    "download_file",
+    "tail_file",
     "replace_text",
     "call_python",
     "run_command",
     "use_git"
   ],
-  "prompt": "Python programming skill (active):\n\n- Deliverable rule: if the user asks for a *program* or *script* to accomplish something, your job is to produce and run **Python source code** (e.g. a .py file) that does it. Do not satisfy that kind of request by only writing the *output artifact* (e.g. only requirements.txt) unless the user explicitly asked for just that file and not the automation.\n- Default workflow: clarify inputs/outputs → write minimal implementation → run it → add tests → iterate.\n- Prefer small pure functions and explicit data models (dataclasses / TypedDict) over deeply nested logic.\n- Use type hints and keep APIs stable. Add docstrings only when the intent/constraints are not obvious from code.\n\nExecution:\n- For tiny calculations, use call_python.\n- For real programs, write files then run with run_command (prefer `python3 -m ...` or `python3 path/to/script.py`).\n- Keep commands deterministic; avoid interactive prompts unless user asked.\n\nFiles and structure:\n- If it is a small utility: main.py + pyproject.toml optional.\n- If it is a package: src/<pkg>/__init__.py, src/<pkg>/__main__.py, and tests under tests/.\n\nQuality bar:\n- Handle errors explicitly (raise ValueError / return non-zero exit codes in CLIs).\n- Add a minimal test plan (even 2–5 tests) when appropriate.",
+  "prompt": "Python programming skill (active):\n\n- Deliverable rule: if the user asks for a *program* or *script*, your job is to produce **Python source code** (usually a .py file) that does it. Do not satisfy that kind of request by only writing a prose answer.\n- Default workflow: clarify inputs/outputs → (if needed) do quick web lookup for specs → write minimal implementation → run it → iterate.\n- Prefer small pure functions and explicit data models (dataclasses / TypedDict) over deeply nested logic.\n- Use type hints and keep APIs stable.\n\nWeb use:\n- If the task involves a niche protocol/format (e.g. QBSK31 / PSK31 details, framing, sample rates, symbol timing), prefer search_web + fetch_page to confirm the spec before coding.\n\nExecution:\n- For tiny calculations, use call_python.\n- For real programs, write files then run with run_command (prefer `python3 -m ...` or `python3 path/to/script.py`).\n- Keep commands deterministic; avoid interactive prompts unless user asked.\n\nQuality bar:\n- Handle errors explicitly (raise ValueError / return non-zero exit codes in CLIs).\n- Add a minimal test plan when appropriate.",
   "workflow": {
     "max_steps": 8,
     "planner_prompt": "Clarify the user's goal, then build a short step plan. If they asked for a *program* or *script* (automation, CLI, analyzer, generator, etc.), the first steps must create or update actual Python source file(s) that implement the automation. Only write secondary artifacts (e.g. requirements.txt) after the program exists or in a step that runs the program to produce them. Each step should end in something testable or runnable. Do not plan a step that is only a prose answer: each step is executed by the main agent with tools.",
