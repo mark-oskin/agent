@@ -4821,13 +4821,63 @@ def _agent_execute_help_text() -> str:
         "Commands:\n"
         "  /help, /help environment\n"
         "  /quit, /clear, /models, /usage\n"
-        "  /show model|reviewer\n"
-        "  /settings ... (same as REPL)\n"
-        "  /while [--max N] \"cond\" do \"prompt\" [, \"prompt\" ...]\n"
-        "  /use-skills <request>\n"
-        "  /reuse-skill <request>\n"
+        "  /show ...\n"
+        "  /settings ...   (try /settings help)\n"
+        "  /skill ...      (try /skill help)\n"
+        "  /while ...      (try /while help)\n"
     )
 
+
+_SKILL_HELP_TEXT = (
+    "/skill — run a skill\n\n"
+    "A skill is a task-specific mode: it adds an “Active skill” prompt suffix and may narrow tools "
+    "or run a multi-step workflow.\n\n"
+    "Subcommands:\n"
+    "  /skill list\n"
+    "  /skill <id> <request>     Run a specific skill id (must exist in skills_dir)\n"
+    "  /skill auto <request>     Ask the model to pick a skill, then run it\n"
+    "  /skill reuse <request>    Reuse the last skill id\n\n"
+    "See also: /settings prompt_template help\n"
+)
+
+
+_PROMPT_TEMPLATE_HELP_TEXT = (
+    "/settings prompt_template — manage prompt templates\n\n"
+    "A prompt_template is the session/run’s base system prompt (default behavior and tone for every turn).\n"
+    "A skill (/skill ...) is a task-specific overlay that can also narrow tools and run workflows.\n\n"
+    "Commands:\n"
+    "  /settings prompt_template list\n"
+    "  /settings prompt_template show\n"
+    "  /settings prompt_template use <name>\n"
+    "  /settings prompt_template default <name>\n"
+    "  /settings prompt_template set <name> <text>\n"
+    "  /settings prompt_template delete <name>\n\n"
+    "See also: /skill help\n"
+)
+
+
+_SETTINGS_HELP_TEXT = (
+    "/settings — session configuration\n\n"
+    "Top-level:\n"
+    "  /settings help\n"
+    "  /settings save\n\n"
+    "LLM selection:\n"
+    "  /settings model <ollama-model-name>\n"
+    "  /settings primary llm ollama|hosted ...\n"
+    "  /settings second_opinion llm ollama|hosted ...\n\n"
+    "Tools:\n"
+    "  /settings tools\n"
+    "  /settings enable <tool or phrase>\n"
+    "  /settings disable <tool or phrase>\n\n"
+    "Prompts:\n"
+    "  /settings prompt_template help\n"
+    "  /settings system_prompt show|reset|file|save|...\n\n"
+    "Other:\n"
+    "  /settings thinking show|on|off|level ...\n"
+    "  /settings context show|on|off|...\n"
+    "  /settings verbose 0|1|2|on|off\n\n"
+    "Tip: use /skill help for skills.\n"
+)
 
 def _execute_settings_command(session: AgentSession, s: str) -> str:
     """
@@ -4839,28 +4889,10 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
     except ValueError as e:
         return f"/settings: {e}"
     if len(toks) < 2:
-        return (
-            "Usage:\n"
-            "  /settings model <ollama-model-name>\n"
-            "  /settings primary llm ollama\n"
-            "  /settings primary llm hosted <base_url> <model> [api_key_env]\n"
-            "  /settings second_opinion llm ollama [ollama_model]\n"
-            "  /settings second_opinion llm hosted <base_url> <model> [api_key_env]\n"
-            "  /settings enable second_opinion\n"
-            "  /settings disable second_opinion\n"
-            "  /settings verbose 0|1|2|on|off\n"
-            "  /settings enable <tool or phrase>   /settings disable <tool or phrase>\n"
-            "  /settings tools          List tools, ids, and on/off for this session\n"
-            "  /settings system_prompt …  show | reset | file <path> | save <path> | <one-line text>\n"
-            "  /settings prompt_template …  list | use <name> | default <name> | show | set <name> <text> | delete <name>\n"
-            "  /settings context …  show | on|off | tokens <n> | trigger <0..1> | target <0..1> | keep_tail <n>\n"
-            "  /settings thinking …    show | on|off | level low|medium|high\n"
-            "  /settings ollama …       show|keys|set|unset\n"
-            "  /settings openai …        show|keys|set|unset\n"
-            "  /settings agent …         show|keys|set|unset\n"
-            "  /settings save            Write current settings to ~/.agent.json"
-        )
+        return _SETTINGS_HELP_TEXT
     key = toks[1].lower().replace("-", "_")
+    if key in ("help", "-h", "--help"):
+        return _SETTINGS_HELP_TEXT
 
     # Env-backed groups (same behavior as REPL; mutates process env).
     if key in ("ollama", "openai", "agent"):
@@ -4980,6 +5012,14 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
                 return "\n".join(lines)
             return _describe_tool_call_contract(tid)
         return "Usage: /settings tools [list] | enable <toolset> | disable <toolset> | reload | describe <tool-id>"
+
+    if key in ("prompt_template", "prompt_templates", "prompt"):
+        if len(toks) < 3:
+            return _PROMPT_TEMPLATE_HELP_TEXT
+        sub = toks[2].lower()
+        if sub in ("help", "-h", "--help", "explain"):
+            return _PROMPT_TEMPLATE_HELP_TEXT
+        return "Unsupported in embedded mode. Use /settings prompt_template help (or run interactively)."
 
     if key == "model":
         if len(toks) < 3:
@@ -5159,18 +5199,20 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
 def _execute_use_skills(session: AgentSession, req: str, *, reuse: bool) -> AgentExecuteResult:
     r = (req or "").strip()
     if not r:
-        return AgentExecuteResult(output="Usage: /use-skills <user request>" if not reuse else "Usage: /reuse-skill <follow-up request>")
+        return AgentExecuteResult(
+            output="Usage: /skill auto <request>" if not reuse else "Usage: /skill reuse <request>"
+        )
     skills_m = session.skills_map
     if reuse:
         sid = session.last_reuse_skill_id
         if not sid:
             return AgentExecuteResult(
-                output="/reuse-skill: no stored skill. Run /use-skills <request> first."
+                output="/skill reuse: no stored skill. Run /skill auto <request> or /skill <id> <request> first."
             )
         if sid not in skills_m:
             session.last_reuse_skill_id = None
             return AgentExecuteResult(
-                output=f"/reuse-skill: stored skill {sid!r} is not in the current skill set."
+                output=f"/skill reuse: stored skill {sid!r} is not in the current skill set."
             )
         why = "Follow-up; model skill selector skipped; same id as last skill run."
     else:
@@ -5178,7 +5220,7 @@ def _execute_use_skills(session: AgentSession, req: str, *, reuse: bool) -> Agen
             r, skills_m, primary_profile=session.primary_profile, verbose=session.verbose
         )
         if not sid:
-            return AgentExecuteResult(output=f"/use-skills: no skill selected. {why}".strip())
+            return AgentExecuteResult(output=f"/skill auto: no skill selected. {why}".strip())
         session.last_reuse_skill_id = sid
 
     rec = skills_m.get(sid) or {}
@@ -5286,9 +5328,9 @@ def _execute_use_skills(session: AgentSession, req: str, *, reuse: bool) -> Agen
                     }
                 )
         header = (
-            f"/reuse-skill: using skill {sid!r}. {why}"
+            f"/skill reuse: using skill {sid!r}. {why}"
             if reuse
-            else f"/use-skills selected {sid!r}. {why}"
+            else f"/skill auto selected {sid!r}. {why}"
         ).strip()
         return AgentExecuteResult(
             output=header + ("\n" + final_answer if final_answer else ""),
@@ -5299,10 +5341,141 @@ def _execute_use_skills(session: AgentSession, req: str, *, reuse: bool) -> Agen
     # No workflow: fallback to one normal turn.
     answered, fa = session.run_query(r)
     header2 = (
-        f"/reuse-skill: using skill {sid!r}. {why}"
+        f"/skill reuse: using skill {sid!r}. {why}"
         if reuse
-        else f"/use-skills selected {sid!r}. {why}"
+        else f"/skill auto selected {sid!r}. {why}"
     ).strip()
+    return AgentExecuteResult(
+        output=header2 + ("\n" + fa if fa else ""),
+        answered=answered,
+        answer=fa,
+    )
+
+
+def _execute_use_skill_explicit(
+    session: AgentSession, skill_id: str, req: str
+) -> AgentExecuteResult:
+    """Run a specific skill id; error if it is not present in the current skills map."""
+    sid = (skill_id or "").strip()
+    r = (req or "").strip()
+    if not sid or not r:
+        return AgentExecuteResult(output="Usage: /skill <skill> <request>")
+    skills_m = session.skills_map
+    if sid not in skills_m:
+        return AgentExecuteResult(
+            output=f"/skill: unknown skill {sid!r}. Check skills_dir or /settings save."
+        )
+    session.last_reuse_skill_id = sid
+    why = "Explicit skill id; model skill selection skipped."
+    # Delegate to the same runner as /use-skills by reusing the workflow/turn logic.
+    # This is similar to the reuse path, but uses a caller-provided sid.
+    rec = skills_m.get(sid) or {}
+    skill_prompt = (rec.get("prompt") or "").strip() if isinstance(rec, dict) else ""
+    today_str = datetime.date.today().strftime("%Y-%m-%d (%A)")
+    deliverable_wanted = _user_wants_written_deliverable(r)
+    et_turn0 = _effective_enabled_tools_for_skill(
+        frozenset(session.enabled_tools), skills_m, sid
+    )
+    et_turn = _effective_enabled_tools_for_turn(
+        base_enabled_tools=et_turn0,
+        enabled_toolsets=session.enabled_toolsets,
+        user_query=r,
+    )
+    router_query = _route_requires_websearch(
+        r,
+        today_str,
+        session.primary_profile,
+        et_turn,
+        transcript_messages=session.messages,
+    )
+    if _deliverable_skip_mandatory_web(r):
+        router_query = None
+    web_required = bool(router_query)
+    steps, _raw_plan = _skill_plan_steps(
+        user_request=r,
+        today_str=today_str,
+        skill_id=sid,
+        skills_map=skills_m,
+        primary_profile=session.primary_profile,
+        _enabled_tools=et_turn,
+        verbose=session.verbose,
+        _system_prompt_override=session.system_prompt_override,
+    )
+    if steps:
+        wf = ((rec.get("workflow") or {}) if isinstance(rec, dict) else {}) or {}
+        step_prompt = (wf.get("step_prompt") or "").strip()
+        final_answer = None
+        for i, st in enumerate(steps, start=1):
+            title = st.get("title") or f"step {i}"
+            details = st.get("details") or ""
+            success = st.get("success") or ""
+            step_user = (
+                f"{r}\n\n"
+                f"Step {i}/{len(steps)}: {title}\n"
+                + (f"Details: {details}\n" if details else "")
+                + (f"Success: {success}\n" if success else "")
+                + ("\n" + step_prompt if step_prompt else "")
+            )
+            et_step = _effective_enabled_tools_for_skill(
+                frozenset(session.enabled_tools), skills_m, sid
+            )
+            turn_msg = _interactive_turn_user_message(
+                step_user,
+                today_str,
+                session.second_opinion_enabled,
+                session.cloud_ai_enabled,
+                primary_profile=session.primary_profile,
+                reviewer_ollama_model=session.reviewer_ollama_model,
+                reviewer_hosted_profile=session.reviewer_hosted_profile,
+                enabled_tools=et_step,
+                system_instruction_override=session.system_prompt_override,
+                skill_suffix=skill_prompt,
+            )
+            session.messages.append({"role": "user", "content": turn_msg})
+            if router_query and "search_web" in et_step and i == 1:
+                session.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Before answering, you MUST call the tool search_web.\n"
+                            "Respond with JSON only in tool_call form.\n"
+                            f'Suggested query: "{router_query}"'
+                        ),
+                    }
+                )
+            answered, fa = _run_agent_conversation_turn(
+                session.messages,
+                step_user,
+                today_str,
+                web_required=web_required if i == 1 else False,
+                deliverable_wanted=deliverable_wanted,
+                verbose=session.verbose,
+                second_opinion_enabled=session.second_opinion_enabled,
+                cloud_ai_enabled=session.cloud_ai_enabled,
+                primary_profile=session.primary_profile,
+                reviewer_hosted_profile=session.reviewer_hosted_profile,
+                reviewer_ollama_model=session.reviewer_ollama_model,
+                enabled_tools=et_step,
+                interactive_tool_recovery=False,
+                context_cfg=session.context_cfg,
+                print_answer=False,
+            )
+            if fa:
+                final_answer = fa
+                session.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": json.dumps({"action": "answer", "answer": fa}),
+                    }
+                )
+        header = f"/skill: using skill {sid!r}. {why}".strip()
+        return AgentExecuteResult(
+            output=header + ("\n" + final_answer if final_answer else ""),
+            answered=bool(final_answer),
+            answer=final_answer,
+        )
+    answered, fa = session.run_query(r)
+    header2 = f"/skill: using skill {sid!r}. {why}".strip()
     return AgentExecuteResult(
         output=header2 + ("\n" + fa if fa else ""),
         answered=answered,
@@ -5361,7 +5534,7 @@ def execute_agent_line(session: AgentSession, line: str) -> AgentExecuteResult:
     if low == "/clear":
         session.messages.clear()
         session.last_reuse_skill_id = None
-        return AgentExecuteResult(output="Context cleared (including stored skill for /reuse-skill).")
+        return AgentExecuteResult(output="Context cleared (including stored skill for /skill reuse).")
     if low == "/models":
         try:
             names = _fetch_ollama_local_model_names()
@@ -5406,12 +5579,55 @@ def execute_agent_line(session: AgentSession, line: str) -> AgentExecuteResult:
         return AgentExecuteResult(output=_execute_settings_command(session, s))
     if low.startswith("/while"):
         return _execute_while(session, s)
+    if low.startswith("/skill"):
+        try:
+            toks = shlex.split(s)
+        except ValueError as e:
+            return AgentExecuteResult(output=f"/skill: {e}")
+        if len(toks) < 2:
+            return AgentExecuteResult(
+                output=_SKILL_HELP_TEXT
+            )
+        sub = toks[1].strip()
+        if sub.lower() in ("help", "-h", "--help", "explain"):
+            return AgentExecuteResult(output=_SKILL_HELP_TEXT)
+        if sub.lower() in ("list", "ls"):
+            skills = session.skills_map or {}
+            if not skills:
+                return AgentExecuteResult(output="(no skills loaded)")
+            lines = ["Skills:"]
+            for sid in sorted(skills.keys()):
+                rec = skills.get(sid) or {}
+                desc = (rec.get("description") or "").strip() if isinstance(rec, dict) else ""
+                lines.append(f"- {sid}" + (f": {desc}" if desc else ""))
+            return AgentExecuteResult(output="\n".join(lines))
+        if sub.lower() == "auto":
+            req = " ".join(toks[2:]).strip()
+            return _execute_use_skills(session, req, reuse=False)
+        if sub.lower() == "reuse":
+            req = " ".join(toks[2:]).strip()
+            return _execute_use_skills(session, req, reuse=True)
+        sid = sub
+        req = " ".join(toks[2:]).strip()
+        return _execute_use_skill_explicit(session, sid, req)
+
+    # Back-compat aliases (not documented):
     if low.startswith("/use-skills"):
         try:
             toks = shlex.split(s)
         except ValueError as e:
             return AgentExecuteResult(output=f"/use-skills: {e}")
         return _execute_use_skills(session, " ".join(toks[1:]), reuse=False)
+    if low.startswith("/use-skill"):
+        try:
+            toks = shlex.split(s)
+        except ValueError as e:
+            return AgentExecuteResult(output=f"/use-skill: {e}")
+        if len(toks) < 3:
+            return AgentExecuteResult(output="Usage: /use-skill <skill> <user request>")
+        sid = toks[1].strip()
+        req = " ".join(toks[2:]).strip()
+        return _execute_use_skill_explicit(session, sid, req)
     if low.startswith("/reuse-skill"):
         try:
             toks = shlex.split(s)
@@ -5500,7 +5716,7 @@ def _interactive_repl(
     # Keep startup quiet at verbose=0; the detailed banner is still available at verbose>=1.
     if verbose >= 1:
         print(
-            "Interactive mode. Commands: /help  /settings …  /use-skills  /reuse-skill  /quit\n"
+            "Interactive mode. Commands: /help  /settings …  /skill …  /quit\n"
             + (
                 f"(Loaded defaults from {_agent_prefs_path()})\n"
                 if prefs_loaded
@@ -5555,14 +5771,17 @@ def _interactive_repl(
     last_reuse_skill_id: Optional[str] = None
 
     def repl_run_with_selected_skill(
-        req: str, sid: str, *, from_reuse: bool, selection_rationale: str
+        req: str, sid: str, *, source: str, selection_rationale: str
     ) -> None:
         nonlocal last_reuse_skill_id
         last_reuse_skill_id = sid
-        if from_reuse:
-            _agent_progress("/reuse-skill: using stored skill; starting…")
+        src = (source or "").strip().lower()
+        if src == "reuse":
+            _agent_progress("/skill reuse: using stored skill; starting…")
+        elif src == "explicit":
+            _agent_progress("/skill: explicit skill selected; starting…")
         else:
-            _agent_progress("/use-skills: skill selected; starting…")
+            _agent_progress("/skill auto: skill selected; starting…")
         et_turn0 = _effective_enabled_tools_for_skill(
             frozenset(enabled_tools), skills_m, sid
         )
@@ -5573,24 +5792,30 @@ def _interactive_repl(
         )
         rec = skills_m.get(sid) or {}
         skill_prompt = (rec.get("prompt") or "").strip() if isinstance(rec, dict) else ""
-        if from_reuse:
+        if src == "reuse":
             print(
-                f"/reuse-skill: using skill {sid!r} (model skill selection skipped). "
+                f"/skill reuse: using skill {sid!r} (model skill selection skipped). "
                 f"{selection_rationale}".strip()
             )
+        elif src == "explicit":
+            print(f"/skill: using skill {sid!r}. {selection_rationale}".strip())
         else:
-            print(f"/use-skills selected {sid!r}. {selection_rationale}".strip())
+            print(f"/skill auto selected {sid!r}. {selection_rationale}".strip())
         if verbose >= 1:
             _print_skill_usage_verbose(
                 verbose,
-                source="reuse-skill" if from_reuse else "use-skills",
+                source=f"skill_{src or 'auto'}",
                 skill_id=sid,
                 base_tools=enabled_tools,
                 effective_tools=et_turn,
                 detail=(
-                    "reuse: same skill id as last /use-skills or /reuse-skill"
-                    if from_reuse
-                    else f"model skill_id (not trigger): rationale={selection_rationale!r}"
+                    "reuse: same skill id as last /skill auto|reuse|<id>"
+                    if src == "reuse"
+                    else (
+                        f"explicit skill id: {sid!r}"
+                        if src == "explicit"
+                        else f"model skill_id (not trigger): rationale={selection_rationale!r}"
+                    )
                 ),
             )
         today = datetime.date.today()
@@ -5884,7 +6109,7 @@ def _interactive_repl(
         if low == "/clear":
             messages.clear()
             last_reuse_skill_id = None
-            print("Context cleared (including stored skill for /reuse-skill).")
+            print("Context cleared (including stored skill for /skill reuse).")
             continue
         if low == "/models":
             try:
@@ -6004,8 +6229,91 @@ def _interactive_repl(
             except Exception as e:
                 print(f"/while error: {e}")
             continue
+        if low.startswith("/skill"):
+            try:
+                toks = shlex.split(s)
+            except ValueError as e:
+                print(f"/skill: {e}")
+                continue
+            if len(toks) < 2 or toks[1].lower() in ("help", "-h", "--help"):
+                print(_SKILL_HELP_TEXT)
+                continue
+            sub = toks[1].strip()
+            if sub.lower() in ("help", "-h", "--help", "explain"):
+                print(_SKILL_HELP_TEXT)
+                continue
+            if sub.lower() in ("list", "ls"):
+                if not skills_m:
+                    print("(no skills loaded)")
+                else:
+                    print("Skills:")
+                    for sid in sorted(skills_m.keys()):
+                        rec = skills_m.get(sid) or {}
+                        desc = (rec.get("description") or "").strip() if isinstance(rec, dict) else ""
+                        print(f"- {sid}" + (f": {desc}" if desc else ""))
+                continue
+            if sub.lower() == "auto":
+                req = " ".join(toks[2:]).strip()
+                if not req:
+                    print("Usage: /skill auto <request>")
+                    continue
+                sid, why = _ml_select_skill_id(
+                    req, skills_m, primary_profile=primary_profile, verbose=verbose
+                )
+                if not sid:
+                    print(f"/skill auto: no skill selected. {why}".strip())
+                    continue
+                repl_run_with_selected_skill(
+                    req, sid, source="auto", selection_rationale=why
+                )
+                continue
+            if sub.lower() == "reuse":
+                req = " ".join(toks[2:]).strip()
+                if not req:
+                    print("Usage: /skill reuse <request>")
+                    continue
+                if not last_reuse_skill_id:
+                    print(
+                        "/skill reuse: no stored skill. Run /skill auto <request> or /skill <id> <request> first."
+                    )
+                    continue
+                sid2 = last_reuse_skill_id
+                if sid2 not in skills_m:
+                    print(
+                        f"/skill reuse: stored skill {sid2!r} is not in the current skill set. "
+                        "Run /skill auto again (check skills_dir / /settings save)."
+                    )
+                    last_reuse_skill_id = None
+                    continue
+                repl_run_with_selected_skill(
+                    req,
+                    sid2,
+                    source="reuse",
+                    selection_rationale="Follow-up; model skill selector skipped; same id as last skill run.",
+                )
+                continue
+            # Explicit skill id
+            sid = sub
+            req = " ".join(toks[2:]).strip()
+            if not sid or not req:
+                print("Usage: /skill <skill> <request>")
+                continue
+            if sid not in skills_m:
+                print(
+                    f"/skill: unknown skill {sid!r}. "
+                    "Run /settings save if you changed skills_dir, or check your skills directory."
+                )
+                continue
+            repl_run_with_selected_skill(
+                req,
+                sid,
+                source="explicit",
+                selection_rationale="Explicit skill id; model skill selector skipped.",
+            )
+            continue
+
+        # Back-compat aliases (not documented):
         if low.startswith("/use-skills"):
-            # Model picks a skill, then we run the same pipeline as /reuse-skill.
             try:
                 toks = shlex.split(s)
             except ValueError as e:
@@ -6024,8 +6332,33 @@ def _interactive_repl(
             if not sid:
                 print(f"/use-skills: no skill selected. {why}".strip())
                 continue
+            repl_run_with_selected_skill(req, sid, source="auto", selection_rationale=why)
+            continue
+        if low.startswith("/use-skill"):
+            try:
+                toks = shlex.split(s)
+            except ValueError as e:
+                print(f"/use-skill: {e}")
+                continue
+            if len(toks) < 3:
+                print("Usage: /use-skill <skill> <user request>")
+                continue
+            sid = toks[1].strip()
+            req = " ".join(toks[2:]).strip()
+            if not sid or not req:
+                print("Usage: /use-skill <skill> <user request>")
+                continue
+            if sid not in skills_m:
+                print(
+                    f"/use-skill: unknown skill {sid!r}. "
+                    "Run /settings save if you changed skills_dir, or check your skills directory."
+                )
+                continue
             repl_run_with_selected_skill(
-                req, sid, from_reuse=False, selection_rationale=why
+                req,
+                sid,
+                source="explicit",
+                selection_rationale="Explicit skill id; model skill selector skipped.",
             )
             continue
         if low.startswith("/reuse-skill"):
@@ -6058,7 +6391,7 @@ def _interactive_repl(
             repl_run_with_selected_skill(
                 req,
                 sid2,
-                from_reuse=True,
+                source="reuse",
                 selection_rationale="Follow-up; model skill selector skipped; same id as last skill run.",
             )
             continue
@@ -6069,29 +6402,12 @@ def _interactive_repl(
                 print(f"/settings: {e}")
                 continue
             if len(toks) < 2:
-                print(
-                    "Usage:\n"
-                    "  /settings model <ollama-model-name>\n"
-                    "  /settings primary llm ollama\n"
-                    "  /settings primary llm hosted <base_url> <model> [api_key_env]\n"
-                    "  /settings second_opinion llm ollama [ollama_model]\n"
-                    "  /settings second_opinion llm hosted <base_url> <model> [api_key_env]\n"
-                    "  /settings enable second_opinion\n"
-                    "  /settings disable second_opinion\n"
-                    "  /settings verbose 0|1|2|on|off\n"
-                    "  /settings enable <tool or phrase>   /settings disable <tool or phrase>\n"
-                    "  /settings tools          List tools, ids, and on/off for this session\n"
-                    "  /settings system_prompt …  show | reset | file <path> | save <path> | <one-line text>\n"
-                    "  /settings prompt_template …  list | use <name> | default <name> | show | set <name> <text> | delete <name>\n"
-                    "  /settings context …  show | on|off | tokens <n> | trigger <0..1> | target <0..1> | keep_tail <n>\n"
-                    "  /settings thinking …    show | on|off | level low|medium|high\n"
-                    "  /settings ollama …       show|keys|set|unset  (OLLAMA_*; saved in ~/.agent.json)\n"
-                    "  /settings openai …        show|keys|set|unset  (OPENAI_*)\n"
-                    "  /settings agent …         show|keys|set|unset  (AGENT_*; shell env on start overrides the file)\n"
-                    "  /settings save            Write current settings to ~/.agent.json"
-                )
+                print(_SETTINGS_HELP_TEXT)
                 continue
             key = toks[1].lower().replace("-", "_")
+            if key in ("help", "-h", "--help"):
+                print(_SETTINGS_HELP_TEXT)
+                continue
             if key in ("ollama", "openai", "agent"):
                 if len(toks) < 3:
                     print(
@@ -6320,6 +6636,9 @@ def _interactive_repl(
                     )
                     continue
                 sub = toks[2].lower()
+                if sub in ("help", "-h", "--help", "explain"):
+                    print(_PROMPT_TEMPLATE_HELP_TEXT)
+                    continue
                 if sub == "list":
                     names = sorted(templates.keys())
                     if not names:
@@ -6787,32 +7106,15 @@ def _interactive_repl(
                 "Commands:\n"
                 "  /quit                    Exit\n"
                 "  /clear                   Clear in-memory conversation\n"
-                "  /models                  List local Ollama models (api/tags)\n"
-                "  /show model | /show reviewer   Current primary or second-opinion LLM (see /show help for details)\n"
-                "  /while [--max N] 'cond' do 'action'   while(cond): body — judge 1=true keep looping, 0=false exit (see /while help)\n"
-                "  /usage                   Last local Ollama prompt/completion token counts (from /api/chat)\n"
-                "  /use-skills <request>    Ask the model to pick a skill, then run it (multi-step if the skill supports it)\n"
-                "  /reuse-skill <request>     Follow-up using the same skill as the last /use-skills or /reuse-skill (no re-selection)\n"
-                "  After run_command/call_python errors: auto-retry once with model-proposed params in a TTY; "
-                "non-TTY uses AGENT_AUTO_CONFIRM_TOOL_RETRY=1 to enable recovery\n"
-                "  /settings model <name>   Set OLLAMA_MODEL (local Ollama primary)\n"
-                "  /settings primary llm ollama|hosted …   Primary (hosted = OpenAI-compatible /v1 URL + model + optional API key env name)\n"
-                "  /settings second_opinion llm ollama|hosted …   Second-opinion reviewer (independent from primary)\n"
-                "  /settings enable second_opinion\n"
-                "  /settings disable second_opinion\n"
-                "  /settings verbose 0|1|2|on|off\n"
-                "  /settings enable|disable <tool or phrase>  (e.g. web search, shell)\n"
-                "  /settings tools            List tools, internal ids, on/off\n"
-                "  /settings system_prompt …  show | reset | file <path> | save <path> | <one-line text>\n"
-                "  /settings prompt_template …  list | use <name> | default <name> | show | set <name> <text> | delete <name>\n"
-                "  /settings context …       show | on|off | tokens <n> | trigger <0..1> | target <0..1> | keep_tail <n>\n"
-                "  /settings thinking …      show | on|off | level low|medium|high\n"
-                "  /settings ollama|openai|agent …  show|keys|set|unset  (store OLLAMA/OPENAI/AGENT in ~/.agent.json; save to persist)\n"
-                "  /settings save             Persist settings to ~/.agent.json (can include prompt_templates_dir, skills_dir)\n"
+                "  /help, /help environment  Help\n"
+                "  /models                  List local Ollama models\n"
+                "  /usage                   Last local Ollama usage\n"
+                "  /show ...                Show current state (try /show help)\n"
+                "  /skill ...               Skills (try /skill help)\n"
+                "  /while ...               Loops (try /while help)\n"
+                "  /settings ...            Configuration (try /settings help)\n"
                 "  /load_context <file>     Replace session messages from JSON\n"
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
-                "  /help                    Show this help\n"
-                "  /help environment         How env vars interact with /settings ollama|openai|agent and ~/.agent.json\n"
             )
             continue
         if low in ("/help environment", "/help env"):

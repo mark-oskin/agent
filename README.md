@@ -92,12 +92,16 @@ Run `./agent.py --help` for the full text.
 |---------|---------|
 | `/help`, `/help environment` | Command list; how env vars interact with the config file |
 | `/quit` | Exit |
-| `/clear` | Clear in-memory messages (and the stored skill for `/reuse-skill`) |
+| `/clear` | Clear in-memory messages (and the stored skill for `/skill reuse`) |
 | `/models` | List local Ollama models (`/api/tags`) |
 | `/usage` | Show last Ollama prompt/completion usage from `/api/chat` |
 | `/show model` | Current **primary** LLM (Ollama or hosted) |
 | `/show reviewer` | Current **second-opinion** reviewer model |
 | `/while [--max N] 'condition' do 'prompt' [, 'prompt' …]` | Same idea as **`while (condition) { … }`**: judge **1** = condition **true** (stay in loop), **0** = **false** (exit). After each **true** check, runs every **comma-separated** body prompt as its own REPL turn (step 1/N …), then re-checks. Capped by **--max** (default 50). See `/while help`. |
+| `/skill list` | List available skills (ids) from the current `skills_dir`. |
+| `/skill <skill> <request>` | Run a **specific** skill id (must exist in `skills_dir`); no model selection is performed. |
+| `/skill auto <request>` | Ask the model to pick a skill, then run it (may be multi-step). |
+| `/skill reuse <request>` | Follow-up using the same skill as the last `/skill` command (no re-selection). |
 | `/settings …` | Model routing, tools, toolsets, thinking, system prompt, templates, context manager, `save`, etc. |
 
 At `verbose=0`, startup is minimal (`Interactive mode. Type /help for commands.`). Use `/settings verbose 1` or `2` for a richer startup banner and tool logging.
@@ -108,7 +112,7 @@ You can embed the agent in another Python program.
 
 - `AgentSession` is **stateful**: it keeps conversation history (`session.messages`) and session-local settings.
 - `session.run_query("...")` runs one normal agent turn (like a non-command REPL line).
-- `session.execute("...")` executes a **REPL-style line** (commands like `/settings ...`, `/while ...`, `/use-skills ...`, `/show ...`, etc.) and returns structured output.
+- `session.execute("...")` executes a **REPL-style line** (commands like `/settings ...`, `/while ...`, `/skill ...`, `/show ...`, etc.) and returns structured output.
 
 Example:
 
@@ -207,8 +211,9 @@ A typical skill object includes:
 
 **REPL flow:**
 
-- `/use-skills <request>` — asks the model to **pick** a skill, then runs the skill pipeline (including optional multi-step plans).
-- `/reuse-skill <request>` — reuses the **last** selected skill id without re-running selection (good for follow-ups).
+- `/skill auto <request>` — asks the model to **pick** a skill, then runs the skill pipeline (including optional multi-step plans).
+- `/skill <skill> <request>` — runs a specific skill id (no selection).
+- `/skill reuse <request>` — reuses the **last** selected skill id without re-running selection (good for follow-ups).
 
 One-shot mode can **auto-match** a skill from the user text using the same trigger machinery.
 

@@ -41,7 +41,7 @@ Key loaders / matchers:
 
 - `_load_skills_from_dir(...)`
 - `_match_skill_detail(...)`
-- `_ml_select_skill_id(...)` (model-assisted selection for `/use-skills`)
+- `_ml_select_skill_id(...)` (model-assisted selection for `/skill auto`)
 
 ## Tools
 

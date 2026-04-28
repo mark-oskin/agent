@@ -662,6 +662,106 @@ def test_interactive_settings_llm_profiles(monkeypatch):
     assert "Primary LLM: local Ollama (uses OLLAMA_MODEL from the environment)." in out
 
 
+def test_interactive_use_skill_unknown(monkeypatch):
+    d = _d()
+    lines = [
+        "/skill not_a_skill hello",
+        "/quit",
+    ]
+    it = iter(lines)
+
+    def fake_input(_=""):
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        d._interactive_repl(
+            verbose=0,
+            second_opinion_enabled=False,
+            cloud_ai_enabled=False,
+            save_context_path=None,
+        )
+    out = buf.getvalue().lower()
+    assert "unknown skill" in out
+
+
+def test_interactive_skill_list(monkeypatch):
+    d = _d()
+    lines = [
+        "/skill list",
+        "/quit",
+    ]
+    it = iter(lines)
+
+    def fake_input(_=""):
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        d._interactive_repl(
+            verbose=0,
+            second_opinion_enabled=False,
+            cloud_ai_enabled=False,
+            save_context_path=None,
+        )
+    out = buf.getvalue()
+    assert ("Skills:" in out) or ("(no skills loaded)" in out)
+
+
+def test_interactive_skill_help_and_prompt_template_help(monkeypatch):
+    d = _d()
+    lines = [
+        "/skill help",
+        "/settings prompt_template help",
+        "/quit",
+    ]
+    it = iter(lines)
+
+    def fake_input(_=""):
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        d._interactive_repl(
+            verbose=0,
+            second_opinion_enabled=False,
+            cloud_ai_enabled=False,
+            save_context_path=None,
+        )
+    out = buf.getvalue().lower()
+    assert "/skill" in out and "prompt_template" in out
+
+
+def test_interactive_help_is_top_level(monkeypatch):
+    d = _d()
+    lines = [
+        "/help",
+        "/quit",
+    ]
+    it = iter(lines)
+
+    def fake_input(_=""):
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        d._interactive_repl(
+            verbose=0,
+            second_opinion_enabled=False,
+            cloud_ai_enabled=False,
+            save_context_path=None,
+        )
+    out = buf.getvalue()
+    assert "/skill ..." in out
+    assert "/settings ..." in out
+    assert "try /skill help" in out.lower()
+    assert "try /settings help" in out.lower()
+
+
 def test_parse_while_repl_tokens_and_judge_bit():
     d = _d()
     toks = shlex.split('/while --max 3 "pytest ok" do "fix code"')

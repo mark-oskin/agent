@@ -48,3 +48,38 @@ def test_agent_session_execute_settings_and_show(monkeypatch):
     assert "Primary LLM:" in r3.output
 
 
+def test_agent_session_execute_use_skill_unknown(monkeypatch):
+    d = importlib.import_module("agent")
+    monkeypatch.setattr(d, "_route_requires_websearch", lambda *a, **k: None)
+    monkeypatch.setattr(d, "call_ollama_chat", lambda *a, **k: '{"action":"answer","answer":"ok"}')
+
+    s = d.AgentSession.from_prefs(None)
+    r = s.execute("/skill definitely_not_a_skill hello")
+    assert "unknown skill" in r.output.lower()
+
+
+def test_agent_session_execute_skill_list(monkeypatch):
+    d = importlib.import_module("agent")
+    s = d.AgentSession.from_prefs(None)
+    out = s.execute("/skill list").output
+    assert "Skills:" in out
+    assert "- python" in out or "- shell_scripting" in out
+
+
+def test_agent_session_execute_skill_and_prompt_template_help(monkeypatch):
+    d = importlib.import_module("agent")
+    s = d.AgentSession.from_prefs(None)
+    out1 = s.execute("/skill help").output.lower()
+    assert "skill" in out1 and "prompt_template" in out1
+    out2 = s.execute("/settings prompt_template help").output.lower()
+    assert "prompt_template" in out2 and "skill" in out2
+
+
+def test_agent_session_execute_help_is_top_level(monkeypatch):
+    d = importlib.import_module("agent")
+    s = d.AgentSession.from_prefs(None)
+    out = s.execute("/help").output.lower()
+    assert "/settings" in out and "try /settings help" in out
+    assert "/skill" in out and "try /skill help" in out
+
+
