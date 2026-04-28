@@ -77,6 +77,8 @@ def run_main(
         return route_after_answer
 
     d = reload_agent(monkeypatch, call_ollama_chat=fake_call_ollama_chat)
+    # Keep tests deterministic: ignore the developer's ~/.agent.json entirely.
+    monkeypatch.setattr(d, "_load_agent_prefs", lambda: None)
     monkeypatch.setattr(d, "_route_requires_websearch", fake_route_requires_websearch)
     monkeypatch.setattr(d, "_route_requires_websearch_after_answer", fake_route_after_answer)
     if stub_search_web is not None:

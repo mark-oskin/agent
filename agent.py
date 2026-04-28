@@ -5713,60 +5713,9 @@ def _interactive_repl(
     rev_line = _format_session_reviewer_line(
         reviewer_hosted_profile, reviewer_ollama_model
     )
-    # Keep startup quiet at verbose=0; the detailed banner is still available at verbose>=1.
-    if verbose >= 1:
-        print(
-            "Interactive mode. Commands: /help  /settings …  /skill …  /quit\n"
-            + (
-                f"(Loaded defaults from {_agent_prefs_path()})\n"
-                if prefs_loaded
-                else ""
-            )
-            + f"Primary LLM: {prim_line}\n"
-            f"second_opinion: {'on' if second_opinion_on else 'off'}\n"
-            f"Second-opinion default reviewer: {rev_line}\n"
-            + (
-                "Tools: all enabled."
-                if len(enabled_tools) == len(_CORE_TOOLS)
-                else "Tools disabled: "
-                + ", ".join(sorted(_CORE_TOOLS - enabled_tools))
-            )
-            + (
-                f"\nauto-save context: {session_save_path!r}"
-                if session_save_path
-                else "\nauto-save context: (not set)"
-            )
-            + f"\nverbose: {verbose} (0=off, 1=tool logs, 2=tools + streamed model JSON on local Ollama)"
-            + (
-                f"\nSystem prompt: custom ({len(_effective_system_instruction_text(session_system_prompt))} chars)"
-                + (
-                    f" from {session_system_prompt_path!r}"
-                    if session_system_prompt_path
-                    else (
-                        f" (template: {session_prompt_template!r})"
-                        if session_prompt_template
-                        else " (inline or prefs)"
-                    )
-                )
-                if session_system_prompt is not None
-                else "\nSystem prompt: built-in default"
-            )
-        )
-        if _interactive_repl_install_readline():
-            print(
-                "Line editing: arrow keys, Home/End, delete words, etc.; "
-                f"↑/↓ history (file: {_repl_history_path()!r}). "
-                "Bindings follow ~/.inputrc if present."
-            )
-        if sys.stdin.isatty() and _repl_env_flag_true("AGENT_REPL_BUFFERED_LINE", "0"):
-            print(
-                f"AGENT_REPL_BUFFERED_LINE=1: long single-line pastes via stdin buffer (up to "
-                f"{_repl_buffered_line_max_bytes()} bytes; no readline editing while typing). "
-                "Override size with AGENT_REPL_INPUT_MAX_BYTES."
-            )
-    else:
-        _interactive_repl_install_readline()
-        print("Interactive mode. Type /help for commands.")
+    # Keep startup minimal; /help and /show can reveal details.
+    _interactive_repl_install_readline()
+    print("Interactive mode. Type /help for commands.")
     messages: list = []
     last_reuse_skill_id: Optional[str] = None
 
@@ -7589,6 +7538,9 @@ def main():
     except Exception:
         pass
     verbose = _coerce_verbose_level(st.get("verbose", 0))
+    verbose_flag_set = False
+    second_opinion_flag_set = False
+    cloud_ai_flag_set = False
     query_parts = []
     second_opinion_enabled = bool(st["second_opinion_enabled"])
     cloud_ai_enabled = bool(st["cloud_ai_enabled"])
@@ -7663,12 +7615,15 @@ def main():
             else:
                 verbose = 2
                 i += 1
+            verbose_flag_set = True
             continue
         elif a in ("--second-opinion", "--second_opinion"):
             second_opinion_enabled = True
+            second_opinion_flag_set = True
             i += 1
         elif a in ("--cloud-ai", "--cloud_ai"):
             cloud_ai_enabled = True
+            cloud_ai_flag_set = True
             i += 1
         elif a in ("--load-context", "--load_context"):
             if i + 1 >= len(argv):
@@ -7691,6 +7646,14 @@ def main():
         else:
             query_parts.append(a)
             i += 1
+
+    # One-shot scripting mode: when stdout is redirected, default to quiet unless explicitly overridden.
+    if not sys.stdout.isatty() and not verbose_flag_set:
+        verbose = 0
+    if not sys.stdout.isatty() and not second_opinion_flag_set:
+        second_opinion_enabled = False
+    if not sys.stdout.isatty() and not cloud_ai_flag_set:
+        cloud_ai_enabled = False
     if not query_parts:
         if load_context_path:
             print("Error: --load_context requires a follow-up question on the command line.")
