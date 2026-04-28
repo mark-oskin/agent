@@ -9,6 +9,7 @@ import importlib
 import io
 import json
 import os
+import shlex
 import sys
 from contextlib import redirect_stdout
 
@@ -659,6 +660,26 @@ def test_interactive_settings_llm_profiles(monkeypatch):
     assert "https://review.example/v1" in out
     assert "tinyllama:latest" in out
     assert "Primary LLM: local Ollama (uses OLLAMA_MODEL from the environment)." in out
+
+
+def test_parse_while_repl_tokens_and_judge_bit():
+    d = _d()
+    toks = shlex.split('/while --max 3 "pytest ok" do "fix code"')
+    m, c, body = d._parse_while_repl_tokens(toks)
+    assert m == 3 and c == "pytest ok" and body == ["fix code"]
+    toks2 = shlex.split("/while 'x' do 'y'")
+    assert d._parse_while_repl_tokens(toks2) == (50, "x", ["y"])
+    toks3 = shlex.split('/while "c" do "p1", "p2"')
+    assert d._parse_while_repl_tokens(toks3)[2] == ["p1", "p2"]
+    toks4 = shlex.split('/while "c" do "a" , "b" , "c"')
+    assert d._parse_while_repl_tokens(toks4)[2] == ["a", "b", "c"]
+    with pytest.raises(ValueError):
+        d._parse_while_repl_tokens(["/while"])
+    with pytest.raises(ValueError):
+        d._parse_while_repl_tokens(shlex.split("/while --max 0 'a' do 'b'"))
+    assert d._parse_while_judge_bit("1") == 1
+    assert d._parse_while_judge_bit("0") == 0
+    assert d._parse_while_judge_bit("noise 1 trailing") == 1
 
 
 def test_interactive_show_model_and_reviewer(monkeypatch):

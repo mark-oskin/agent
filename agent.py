@@ -506,7 +506,7 @@ def _print_cli_help() -> None:
     """Print usage for non-interactive `python agent.py` invocation."""
     print(
         "Usage:\n"
-        "  agent.py [options] [question...]\n"
+        "  agent [options] [question...]\n"
         "  With no question and no action flags, start the interactive REPL.\n"
         "  With a question, run a single non-interactive turn (stdin need not be a TTY).\n"
         "\n"
@@ -1374,16 +1374,16 @@ def _agent_thinking_enabled_default_false() -> bool:
 
 def _ollama_request_think_value() -> object:
     """
-    Value for Ollama's request-level `think` field:
-    - If AGENT_THINKING_LEVEL is set: one of "low"|"medium"|"high"
-    - Else: boolean based on AGENT_THINKING (default False)
+    Value for Ollama's request-level `think` field.
+    When thinking is off, always return False so non–thinking models never receive
+    a string or true (a stale AGENT_THINKING_LEVEL alone must not enable think).
+    When on: use AGENT_THINKING_LEVEL if set, else bool or gpt-oss default level.
     """
+    if not _agent_thinking_enabled_default_false():
+        return False
     lvl = _agent_thinking_level()
     if lvl:
         return lvl
-    enabled = bool(_agent_thinking_enabled_default_false())
-    if not enabled:
-        return False
     # gpt-oss models ignore boolean think; they require a level string.
     try:
         mod = (_ollama_model() or "").strip().lower()
@@ -4462,6 +4462,977 @@ def _interactive_turn_user_message(
     return block
 
 
+_WHILE_JUDGE_SYSTEM = (
+    "You are a strict boolean judge for a /while command in a coding assistant.\n"
+    "The human gave a natural-language /while CONDITION (like C: while (CONDITION) { body }).\n"
+    "Decide whether that CONDITION is TRUE or FALSE right now, using ONLY the conversation excerpt below.\n"
+    "Reply with EXACTLY one character and nothing else: 0 or 1.\n"
+    "Meaning (must follow this mapping):\n"
+    "- 1 = the condition is TRUE — the /while should KEEP GOING (run the `do` body, then re-check).\n"
+    "- 0 = the condition is FALSE — the /while should EXIT (do not run the body; stop the loop).\n"
+    "Do not output markdown, words, explanations, or whitespace around the digit."
+)
+
+
+def _while_conversation_excerpt_for_judge(messages: list, max_chars: int = 12000) -> str:
+    """Compact transcript text for condition judging (truncate per message)."""
+    if not messages:
+        return "(empty conversation)"
+    chunks: list[str] = []
+    remaining = max_chars
+    per_cap = max(400, max_chars // max(6, len(messages)))
+    for m in messages[-40:]:
+        role = str((m or {}).get("role") or "?")
+        content = _scalar_to_str((m or {}).get("content"), "")[:per_cap]
+        piece = f"[{role}]:\n{content}"
+        if len(piece) > remaining:
+            piece = piece[: max(0, remaining - 1)] + "…"
+        chunks.append(piece)
+        remaining -= len(piece) + 2
+        if remaining <= 0:
+            break
+    body = "\n\n".join(chunks)
+    if len(body) > max_chars:
+        body = body[: max_chars - 1] + "…"
+    return body
+
+
+def _parse_while_judge_bit(text: str) -> int:
+    """Extract first 0 or 1 from model output; default 0 (false / exit) if ambiguous."""
+    t = (text or "").strip()
+    if not t:
+        return 0
+    # Prefer first line / first alphanumeric scan
+    for chunk in (t.splitlines()[0], t):
+        for c in chunk.strip():
+            if c == "1":
+                return 1
+            if c == "0":
+                return 0
+    return 0
+
+
+def _post_do_tokens_to_body_prompts(post_do_tokens: list[str]) -> list[str]:
+    """
+    Build prompt strings after `do`. Commas separate prompts.
+
+    shlex often attaches a comma to the previous token (`"p1", "p2"` -> `p1,`, `p2`).
+    Split those so comma becomes its own delimiter between prompts.
+    """
+    expanded: list[str] = []
+    for t in post_do_tokens:
+        s = str(t)
+        while s.endswith(","):
+            core = s[:-1].strip()
+            if core:
+                expanded.append(core)
+            expanded.append(",")
+            s = ""
+        if s.strip():
+            expanded.append(s.strip())
+    groups: list[list[str]] = []
+    cur: list[str] = []
+    for t in expanded:
+        if t == ",":
+            groups.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    groups.append(cur)
+    prompts: list[str] = []
+    for g in groups:
+        if not g:
+            continue
+        if len(g) != 1:
+            raise ValueError(
+                "each /while body prompt must be one quoted phrase; separate prompts with commas "
+                '(example: /while "c" do "step one", "step two")'
+            )
+        prompts.append(g[0])
+    if not prompts:
+        raise ValueError("missing body prompts after do")
+    return prompts
+
+
+def _parse_while_repl_tokens(toks: list[str]) -> Tuple[int, str, list[str]]:
+    """
+    Parse shlex tokens after splitting the full REPL line.
+    Expected: ['/while', optional --max N, ...condition..., 'do', ...body tokens...]
+    Body: one or more comma-separated quoted prompts (space before comma optional).
+    """
+    if not toks or toks[0].lower() != "/while":
+        raise ValueError("internal: not a /while command")
+    i = 1
+    max_iter = 50
+    if i + 1 < len(toks) and toks[i] == "--max":
+        try:
+            max_iter = int(toks[i + 1], 10)
+        except (ValueError, TypeError) as e:
+            raise ValueError("--max must be followed by a positive integer") from e
+        if max_iter < 1:
+            raise ValueError("--max must be at least 1")
+        i += 2
+    rest = toks[i:]
+    if len(rest) < 3:
+        raise ValueError("missing condition, 'do', or body")
+    do_idx = None
+    for j, t in enumerate(rest):
+        if str(t).lower() == "do":
+            do_idx = j
+            break
+    if do_idx is None:
+        raise ValueError(
+            "missing literal 'do' between condition and body "
+            '(example: /while \"tests still failing\" do \"fix failures and rerun\")'
+        )
+    if do_idx == 0 or do_idx >= len(rest) - 1:
+        raise ValueError("condition and body must be non-empty")
+    condition = " ".join(rest[:do_idx]).strip()
+    post_do = rest[do_idx + 1 :]
+    if not post_do:
+        raise ValueError("missing body after do")
+    if not condition:
+        raise ValueError("condition must be non-empty")
+    body_prompts = _post_do_tokens_to_body_prompts(post_do)
+    return max_iter, condition, body_prompts
+
+
+def _call_while_condition_judge(
+    condition: str,
+    messages: list,
+    *,
+    primary_profile: Optional[LlmProfile],
+    verbose: int,
+) -> int:
+    excerpt = _while_conversation_excerpt_for_judge(messages)
+    user_body = (
+        "Evaluate this /while CONDITION as TRUE or FALSE right now "
+        "(reply 1 if TRUE — keep looping; 0 if FALSE — exit):\n"
+        f"{condition}\n\n"
+        "--- Conversation excerpt (may be truncated) ---\n"
+        f"{excerpt}"
+    )
+    judge_msgs = [
+        {"role": "system", "content": _WHILE_JUDGE_SYSTEM},
+        {"role": "user", "content": user_body},
+    ]
+    prof = primary_profile or default_primary_llm_profile()
+    if prof.backend == "hosted":
+        raw = call_hosted_chat_plain(judge_msgs, prof)
+    else:
+        raw = call_ollama_plaintext(judge_msgs, _ollama_model())
+    bit = _parse_while_judge_bit(raw)
+    if verbose >= 1:
+        preview = (raw or "").replace("\n", " ").strip()
+        if len(preview) > 200:
+            preview = preview[:199] + "…"
+        print(f"[/while judge] model={prof.backend!r} raw={preview!r} -> {bit}")
+    return bit
+
+
+@dataclass
+class AgentSession:
+    """
+    Programmatic, stateful interface for embedding the agent in other Python programs.
+
+    Notes:
+    - This object keeps conversation history in-memory (self.messages).
+    - Most settings are session-local (stored on this object), but some toggles in the
+      current codebase still rely on process environment variables (AGENT_* / OLLAMA_*).
+      If you need multiple sessions concurrently, avoid mutating process env in parallel.
+    """
+
+    # Core session state
+    messages: list
+    verbose: int
+    second_opinion_enabled: bool
+    cloud_ai_enabled: bool
+    enabled_tools: set
+    enabled_toolsets: set
+    primary_profile: LlmProfile
+    reviewer_hosted_profile: Optional[LlmProfile]
+    reviewer_ollama_model: Optional[str]
+    system_prompt_override: Optional[str]
+    context_cfg: dict
+
+    # Content libraries / dirs (used for skill matching and prompt templates)
+    prompt_templates: dict
+    prompt_template_default: str
+    skills_map: dict
+
+    # Optional persistence for interactive-like runs
+    save_context_path: Optional[str] = None
+    last_reuse_skill_id: Optional[str] = None
+
+    @classmethod
+    def from_prefs(
+        cls,
+        prefs: Optional[dict] = None,
+        *,
+        messages: Optional[list] = None,
+    ) -> "AgentSession":
+        """
+        Create a session using the same defaults logic as the CLI/REPL.
+        Passing prefs=None uses built-in defaults (and applies any process env overrides).
+        """
+        st = _session_defaults_from_prefs(prefs)
+        return cls(
+            messages=list(messages) if isinstance(messages, list) else [],
+            verbose=_coerce_verbose_level(st.get("verbose", 0)),
+            second_opinion_enabled=bool(st.get("second_opinion_enabled", False)),
+            cloud_ai_enabled=bool(st.get("cloud_ai_enabled", False)),
+            enabled_tools=set(st.get("enabled_tools") or set(_CORE_TOOLS)),
+            enabled_toolsets=set(st.get("enabled_toolsets") or set()),
+            primary_profile=st.get("primary_profile") or default_primary_llm_profile(),
+            reviewer_hosted_profile=st.get("reviewer_hosted_profile"),
+            reviewer_ollama_model=st.get("reviewer_ollama_model"),
+            system_prompt_override=st.get("system_prompt"),
+            context_cfg=dict(st.get("context_manager") or {}),
+            prompt_templates=dict(st.get("prompt_templates") or _default_prompt_templates()),
+            prompt_template_default=str(st.get("prompt_template_default") or "coding"),
+            skills_map=dict(st.get("skills") or {}),
+            save_context_path=st.get("save_context_path"),
+        )
+
+    # ---- programmatic settings ----
+
+    def set_ollama_model(self, name: str) -> None:
+        """Set the local Ollama model tag for this process (affects Ollama backend sessions)."""
+        os.environ["OLLAMA_MODEL"] = (name or "").strip()
+
+    def set_primary_llm_ollama(self) -> None:
+        self.primary_profile = default_primary_llm_profile()
+
+    def set_primary_llm_hosted(self, base_url: str, model: str, api_key_env: str = "OPENAI_API_KEY") -> None:
+        self.primary_profile = LlmProfile(
+            backend="hosted",
+            base_url=str(base_url),
+            model=str(model),
+            api_key_env=str(api_key_env or "OPENAI_API_KEY"),
+        )
+
+    def enable_tool(self, tool: str) -> None:
+        tn = _normalize_tool_name(tool)
+        if not tn:
+            raise ValueError(_format_unknown_tool_hint(tool))
+        self.enabled_tools.add(tn)
+
+    def disable_tool(self, tool: str) -> None:
+        tn = _normalize_tool_name(tool)
+        if not tn:
+            raise ValueError(_format_unknown_tool_hint(tool))
+        self.enabled_tools.discard(tn)
+
+    # ---- main entry points ----
+
+    def run_query(self, user_query: str) -> Tuple[bool, Optional[str]]:
+        """Run one agent turn (like a normal REPL line). Returns (answered, final_answer)."""
+        today_str = datetime.date.today().strftime("%Y-%m-%d (%A)")
+        uq = (user_query or "").strip()
+        if not uq:
+            return False, None
+
+        deliverable_wanted = _user_wants_written_deliverable(uq)
+        sid0, _tr0 = _match_skill_detail(uq, self.skills_map)
+        et_turn0 = _effective_enabled_tools_for_skill(
+            frozenset(self.enabled_tools), self.skills_map, sid0
+        )
+        et_turn = _effective_enabled_tools_for_turn(
+            base_enabled_tools=et_turn0,
+            enabled_toolsets=self.enabled_toolsets,
+            user_query=uq,
+        )
+        sprompt0 = (self.skills_map.get(sid0) or {}).get("prompt") if sid0 else None
+        router_query = _route_requires_websearch(
+            uq,
+            today_str,
+            self.primary_profile,
+            et_turn,
+            transcript_messages=self.messages,
+        )
+        if _deliverable_skip_mandatory_web(uq):
+            router_query = None
+        web_required = bool(router_query)
+
+        turn_msg = _interactive_turn_user_message(
+            uq,
+            today_str,
+            self.second_opinion_enabled,
+            self.cloud_ai_enabled,
+            primary_profile=self.primary_profile,
+            reviewer_ollama_model=self.reviewer_ollama_model,
+            reviewer_hosted_profile=self.reviewer_hosted_profile,
+            enabled_tools=et_turn,
+            system_instruction_override=self.system_prompt_override,
+            skill_suffix=sprompt0,
+        )
+        self.messages.append({"role": "user", "content": turn_msg})
+        if router_query and "search_web" in et_turn:
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Before answering, you MUST call the tool search_web.\n"
+                        "Respond with JSON only in tool_call form.\n"
+                        f'Suggested query: "{router_query}"'
+                    ),
+                }
+            )
+
+        answered, final_answer = _run_agent_conversation_turn(
+            self.messages,
+            uq,
+            today_str,
+            web_required=web_required,
+            deliverable_wanted=deliverable_wanted,
+            verbose=self.verbose,
+            second_opinion_enabled=self.second_opinion_enabled,
+            cloud_ai_enabled=self.cloud_ai_enabled,
+            primary_profile=self.primary_profile,
+            reviewer_hosted_profile=self.reviewer_hosted_profile,
+            reviewer_ollama_model=self.reviewer_ollama_model,
+            enabled_tools=et_turn,
+            interactive_tool_recovery=False,
+            context_cfg=self.context_cfg,
+            print_answer=False,
+        )
+        if self.save_context_path:
+            try:
+                _save_context_bundle(
+                    self.save_context_path, self.messages, uq, final_answer, answered
+                )
+            except OSError:
+                pass
+        return answered, final_answer
+
+
+@dataclass
+class AgentExecuteResult:
+    """Result of AgentSession.execute(...)."""
+
+    output: str = ""
+    answered: bool = False
+    answer: Optional[str] = None
+    quit: bool = False
+
+
+def _agent_execute_help_text() -> str:
+    return (
+        "Commands:\n"
+        "  /help, /help environment\n"
+        "  /quit, /clear, /models, /usage\n"
+        "  /show model|reviewer\n"
+        "  /settings ... (same as REPL)\n"
+        "  /while [--max N] \"cond\" do \"prompt\" [, \"prompt\" ...]\n"
+        "  /use-skills <request>\n"
+        "  /reuse-skill <request>\n"
+    )
+
+
+def _execute_settings_command(session: AgentSession, s: str) -> str:
+    """
+    Session-scoped implementation of the REPL /settings command.
+    Mirrors the interactive behavior, but returns strings instead of printing.
+    """
+    try:
+        toks = shlex.split(s)
+    except ValueError as e:
+        return f"/settings: {e}"
+    if len(toks) < 2:
+        return (
+            "Usage:\n"
+            "  /settings model <ollama-model-name>\n"
+            "  /settings primary llm ollama\n"
+            "  /settings primary llm hosted <base_url> <model> [api_key_env]\n"
+            "  /settings second_opinion llm ollama [ollama_model]\n"
+            "  /settings second_opinion llm hosted <base_url> <model> [api_key_env]\n"
+            "  /settings enable second_opinion\n"
+            "  /settings disable second_opinion\n"
+            "  /settings verbose 0|1|2|on|off\n"
+            "  /settings enable <tool or phrase>   /settings disable <tool or phrase>\n"
+            "  /settings tools          List tools, ids, and on/off for this session\n"
+            "  /settings system_prompt …  show | reset | file <path> | save <path> | <one-line text>\n"
+            "  /settings prompt_template …  list | use <name> | default <name> | show | set <name> <text> | delete <name>\n"
+            "  /settings context …  show | on|off | tokens <n> | trigger <0..1> | target <0..1> | keep_tail <n>\n"
+            "  /settings thinking …    show | on|off | level low|medium|high\n"
+            "  /settings ollama …       show|keys|set|unset\n"
+            "  /settings openai …        show|keys|set|unset\n"
+            "  /settings agent …         show|keys|set|unset\n"
+            "  /settings save            Write current settings to ~/.agent.json"
+        )
+    key = toks[1].lower().replace("-", "_")
+
+    # Env-backed groups (same behavior as REPL; mutates process env).
+    if key in ("ollama", "openai", "agent"):
+        if len(toks) < 3:
+            return (
+                f"Usage: /settings {key} show | keys | set <name> <value> | unset <name>\n"
+                + _file_env_key_help_lines(key)
+            )
+        sub = toks[2].lower()
+        if sub in ("show", "list"):
+            try:
+                return _format_file_env_group_show(key)
+            except (ValueError, OSError) as e:
+                return f"/settings {key} show: {e}"
+        if sub in ("keys", "key", "help"):
+            try:
+                return _file_env_key_help_lines(key)
+            except (ValueError, OSError) as e:
+                return f"/settings {key} keys: {e}"
+        if sub == "set":
+            if len(toks) < 4:
+                return f"Usage: /settings {key} set <name> <value (optional, quote spaces with shlex)>"
+            raw_k = toks[3]
+            value = " ".join(toks[4:]) if len(toks) > 4 else ""
+            try:
+                full = _file_env_set_process(key, raw_k, value)
+            except ValueError as e:
+                return f"/settings {key} set: {e}"
+            return f"{full} = {value!r} in this process. Use /settings save to write ~/.agent.json."
+        if sub in ("unset", "delete", "clear"):
+            if len(toks) < 4:
+                return f"Usage: /settings {key} unset <name>"
+            try:
+                full = _file_env_unset_process(key, toks[3])
+            except ValueError as e:
+                return f"/settings {key} unset: {e}"
+            return (
+                f"{full} removed from the process. Use /settings save; on next start missing keys use built-in or file defaults."
+            )
+        return f"Unknown /settings {key} subcommand. Try: /settings {key} show | set | unset | keys"
+
+    if key == "verbose":
+        if len(toks) != 3:
+            return "Usage: /settings verbose 0|1|2|on|off"
+        tok = toks[2].strip().lower()
+        if tok == "on":
+            session.verbose = 2
+        elif tok == "off":
+            session.verbose = 0
+        elif tok in ("0", "1", "2"):
+            session.verbose = int(tok)
+        else:
+            return "Usage: /settings verbose 0|1|2|on|off"
+        return _verbose_ack_message(session.verbose)
+
+    if key == "tools":
+        # Keep this aligned with the REPL: core list + plugin toolsets.
+        if len(toks) == 2 or (len(toks) >= 3 and toks[2].lower() in ("list", "ls", "show")):
+            out = [_format_settings_tools_list(session.enabled_tools)]
+            if _PLUGIN_TOOLSETS:
+                lines = ["\nToolsets (plugins):"]
+                for nm in sorted(_PLUGIN_TOOLSETS.keys()):
+                    on = "on" if nm in session.enabled_toolsets else "off"
+                    desc = str((_PLUGIN_TOOLSETS.get(nm) or {}).get("description") or "").strip()
+                    lines.append(f"  [{on}] {nm}" + (f" — {desc}" if desc else ""))
+                    tnames = sorted(_plugin_tools_for_toolset(nm))
+                    for tid in tnames:
+                        td_on = (nm in session.enabled_toolsets) and (tid in session.enabled_tools)
+                        reason = ""
+                        if nm not in session.enabled_toolsets:
+                            reason = " (toolset off)"
+                        elif tid not in session.enabled_tools:
+                            reason = " (tool disabled)"
+                        lines.append(f"       - {'on' if td_on else 'off'} {tid}{reason}")
+                lines.append("Enable a toolset:  /settings tools enable <toolset>")
+                lines.append("Disable a toolset: /settings tools disable <toolset>")
+                lines.append("Reload plugins:    /settings tools reload")
+                lines.append("Describe a tool:   /settings tools describe <tool-id>")
+                out.append("\n".join(lines))
+            return "\n".join(out).rstrip()
+        if len(toks) >= 4 and toks[2].lower() in ("enable", "on"):
+            nm = toks[3].strip().lower()
+            if nm in _PLUGIN_TOOLSETS:
+                session.enabled_toolsets.add(nm)
+                for tid in _plugin_tools_for_toolset(nm):
+                    session.enabled_tools.add(tid)
+                return f"Toolset enabled: {nm!r} (tools may be routed per request)."
+            return f"Unknown toolset {nm!r}. Try: /settings tools"
+        if len(toks) >= 4 and toks[2].lower() in ("disable", "off"):
+            nm = toks[3].strip().lower()
+            if nm in _PLUGIN_TOOLSETS:
+                session.enabled_toolsets.discard(nm)
+                for tid in _plugin_tools_for_toolset(nm):
+                    session.enabled_tools.discard(tid)
+                return f"Toolset disabled: {nm!r}."
+            return f"Unknown toolset {nm!r}. Try: /settings tools"
+        if len(toks) >= 3 and toks[2].lower() in ("reload", "refresh"):
+            # Use resolved tools_dir from current process prefs/env.
+            try:
+                td = _resolved_tools_dir(_load_agent_prefs())
+            except Exception:
+                td = _default_tools_dir()
+            _load_plugin_toolsets(td)
+            _register_tool_aliases()
+            return f"Reloaded plugin toolsets from {td!r}."
+        if len(toks) >= 4 and toks[2].lower() in ("describe", "desc", "help"):
+            tid = toks[3].strip()
+            if not tid:
+                return "Usage: /settings tools describe <tool-id>"
+            nm = tid.strip().lower()
+            if nm in _PLUGIN_TOOLSETS:
+                rec = _PLUGIN_TOOLSETS.get(nm) or {}
+                desc = str(rec.get("description") or "").strip()
+                lines = [f"Toolset: {nm}", f"Description: {desc if desc else '(none)'}", "Tools:"]
+                for one in sorted(_plugin_tools_for_toolset(nm)):
+                    lines.append("  - " + one)
+                return "\n".join(lines)
+            return _describe_tool_call_contract(tid)
+        return "Usage: /settings tools [list] | enable <toolset> | disable <toolset> | reload | describe <tool-id>"
+
+    if key == "model":
+        if len(toks) < 3:
+            return "Usage: /settings model <ollama-model-name>"
+        name = toks[2].strip()
+        if not name:
+            return "Usage: /settings model <ollama-model-name>"
+        os.environ["OLLAMA_MODEL"] = name
+        return f"OLLAMA_MODEL set to {name!r} (this process only)."
+
+    if key == "primary" and len(toks) >= 4 and toks[2].lower() == "llm":
+        sub = toks[3].lower()
+        if sub == "ollama":
+            session.primary_profile = default_primary_llm_profile()
+            return "Primary LLM: local Ollama (uses OLLAMA_MODEL from the environment)."
+        if sub == "hosted":
+            if len(toks) < 6:
+                return "Usage: /settings primary llm hosted <base_url> <model> [api_key_env]"
+            bu, mod = toks[4], toks[5]
+            keyenv = toks[6] if len(toks) > 6 else "OPENAI_API_KEY"
+            if not bu.startswith(("http://", "https://")):
+                return "base_url must start with http:// or https://"
+            session.primary_profile = LlmProfile(
+                backend="hosted",
+                base_url=bu,
+                model=mod,
+                api_key_env=keyenv,
+            )
+            msg = "Primary LLM: hosted OpenAI-compatible API " f"({_describe_llm_profile_short(session.primary_profile)})."
+            if not _read_api_key(keyenv):
+                msg = f"Note: {keyenv} is not set; hosted primary calls will fail until it is.\n" + msg
+            return msg
+        return "Usage: /settings primary llm ollama|hosted …"
+
+    if key in ("second_opinion", "second-opinion") and len(toks) >= 4 and toks[2].lower() == "llm":
+        sub = toks[3].lower()
+        if sub == "ollama":
+            session.reviewer_hosted_profile = None
+            session.reviewer_ollama_model = toks[4] if len(toks) > 4 else None
+            om = session.reviewer_ollama_model or _ollama_second_opinion_model()
+            return f"Second-opinion reviewer: local Ollama, model {om!r}."
+        if sub == "hosted":
+            if len(toks) < 6:
+                return "Usage: /settings second_opinion llm hosted <base_url> <model> [api_key_env]"
+            bu, mod = toks[4], toks[5]
+            keyenv = toks[6] if len(toks) > 6 else "OPENAI_API_KEY"
+            if not bu.startswith(("http://", "https://")):
+                return "base_url must start with http:// or https://"
+            session.reviewer_hosted_profile = LlmProfile(
+                backend="hosted",
+                base_url=bu,
+                model=mod,
+                api_key_env=keyenv,
+            )
+            session.reviewer_ollama_model = None
+            msg = "Second-opinion reviewer: hosted " f"({_describe_llm_profile_short(session.reviewer_hosted_profile)})."
+            if not _read_api_key(keyenv):
+                msg = f"Note: {keyenv} is not set; hosted second opinion will fail until it is.\n" + msg
+            return msg
+        return "Usage: /settings second_opinion llm ollama|hosted …"
+
+    if key == "enable":
+        if len(toks) < 3:
+            return (
+                "Usage: /settings enable second_opinion|<tool or phrase>\n"
+                "  Examples: /settings enable web search   /settings enable shell   /settings enable stream_thinking\n"
+                "  See: /settings tools"
+            )
+        phrase = " ".join(toks[2:])
+        feat = _canonicalize_user_tool_phrase(phrase)
+        if feat == "second_opinion":
+            session.second_opinion_enabled = True
+            return "second_opinion enabled for this session."
+        if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
+            os.environ["AGENT_STREAM_THINKING"] = "1"
+            return "stream_thinking enabled for this session."
+        if feat == "verbose":
+            session.verbose = 2
+            return _verbose_ack_message(session.verbose)
+        tn = _normalize_tool_name(phrase)
+        if tn:
+            session.enabled_tools.add(tn)
+            return f"Tool enabled: {tn}"
+        return _format_unknown_tool_hint(phrase)
+
+    if key == "disable":
+        if len(toks) < 3:
+            return (
+                "Usage: /settings disable second_opinion|<tool or phrase>\n"
+                "  Examples: /settings disable web search   /settings disable shell   /settings disable stream_thinking\n"
+                "  See: /settings tools"
+            )
+        phrase = " ".join(toks[2:])
+        feat = _canonicalize_user_tool_phrase(phrase)
+        if feat == "second_opinion":
+            session.second_opinion_enabled = False
+            return "second_opinion disabled for this session."
+        if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
+            os.environ["AGENT_STREAM_THINKING"] = "0"
+            return "stream_thinking disabled for this session."
+        if feat == "verbose":
+            session.verbose = 0
+            return _verbose_ack_message(session.verbose)
+        tn = _normalize_tool_name(phrase)
+        if tn:
+            session.enabled_tools.discard(tn)
+            return f"Tool disabled: {tn}"
+        return _format_unknown_tool_hint(phrase)
+
+    if key == "thinking":
+        if len(toks) < 3:
+            return (
+                "Usage:\n"
+                "  /settings thinking show\n"
+                "  /settings thinking on|off\n"
+                "  /settings thinking level low|medium|high\n"
+            )
+        sub = toks[2].lower()
+        if sub == "show":
+            think_v = _ollama_request_think_value()
+            lvl = _agent_thinking_level()
+            on = _agent_thinking_enabled_default_false()
+            st = "on" if on else "off"
+            return (
+                f"thinking: {st}; level: {lvl or '(none)'}; "
+                f"ollama think value: {think_v!r}; stream_thinking: {_agent_stream_thinking_enabled()}"
+            )
+        if sub in ("on", "enable", "enabled", "true"):
+            os.environ["AGENT_THINKING"] = "1"
+            os.environ["AGENT_STREAM_THINKING"] = "1"
+            return "thinking enabled for this session (and stream_thinking enabled)."
+        if sub in ("off", "disable", "disabled", "false"):
+            os.environ["AGENT_THINKING"] = "0"
+            os.environ["AGENT_THINKING_LEVEL"] = ""
+            os.environ["AGENT_STREAM_THINKING"] = "0"
+            return "thinking disabled for this session (and stream_thinking disabled)."
+        if sub == "level":
+            if len(toks) < 4:
+                return "Usage: /settings thinking level low|medium|high"
+            lvl = toks[3].strip().lower()
+            if lvl not in ("low", "medium", "high"):
+                return "thinking level must be one of: low, medium, high"
+            os.environ["AGENT_THINKING_LEVEL"] = lvl
+            os.environ["AGENT_THINKING"] = "1"
+            os.environ["AGENT_STREAM_THINKING"] = "1"
+            return f"thinking level set to {lvl!r} for this session (and stream_thinking enabled)."
+        return "Unknown /settings thinking subcommand. Try: /settings thinking show | on | off | level …"
+
+    # For embedded mode, most remaining /settings subcommands are not critical; keep discoverable.
+    if key == "save":
+        # Writes the current process-backed prefs; matches REPL.
+        payload = _build_agent_prefs_payload(
+            primary_profile=session.primary_profile,
+            second_opinion_on=session.second_opinion_enabled,
+            cloud_ai_enabled=session.cloud_ai_enabled,
+            enabled_tools=session.enabled_tools,
+            enabled_toolsets=session.enabled_toolsets,
+            reviewer_hosted_profile=session.reviewer_hosted_profile,
+            reviewer_ollama_model=session.reviewer_ollama_model,
+            session_save_path=session.save_context_path,
+            system_prompt_override=session.system_prompt_override,
+            system_prompt_path_override=None,
+            prompt_templates=session.prompt_templates,
+            prompt_template_default=session.prompt_template_default,
+            prompt_templates_dir=_resolved_prompt_templates_dir(_load_agent_prefs()),
+            skills_dir=_resolved_skills_dir(_load_agent_prefs()),
+            tools_dir=_resolved_tools_dir(_load_agent_prefs()),
+            context_manager=session.context_cfg,
+            verbose_level=session.verbose,
+        )
+        _write_agent_prefs_file(payload)
+        return f"Saved settings to {_agent_prefs_path()!r}."
+
+    return "Unknown /settings subcommand. Try /help."
+
+
+def _execute_use_skills(session: AgentSession, req: str, *, reuse: bool) -> AgentExecuteResult:
+    r = (req or "").strip()
+    if not r:
+        return AgentExecuteResult(output="Usage: /use-skills <user request>" if not reuse else "Usage: /reuse-skill <follow-up request>")
+    skills_m = session.skills_map
+    if reuse:
+        sid = session.last_reuse_skill_id
+        if not sid:
+            return AgentExecuteResult(
+                output="/reuse-skill: no stored skill. Run /use-skills <request> first."
+            )
+        if sid not in skills_m:
+            session.last_reuse_skill_id = None
+            return AgentExecuteResult(
+                output=f"/reuse-skill: stored skill {sid!r} is not in the current skill set."
+            )
+        why = "Follow-up; model skill selector skipped; same id as last skill run."
+    else:
+        sid, why = _ml_select_skill_id(
+            r, skills_m, primary_profile=session.primary_profile, verbose=session.verbose
+        )
+        if not sid:
+            return AgentExecuteResult(output=f"/use-skills: no skill selected. {why}".strip())
+        session.last_reuse_skill_id = sid
+
+    rec = skills_m.get(sid) or {}
+    skill_prompt = (rec.get("prompt") or "").strip() if isinstance(rec, dict) else ""
+    today_str = datetime.date.today().strftime("%Y-%m-%d (%A)")
+    deliverable_wanted = _user_wants_written_deliverable(r)
+
+    # Tools for this skill (plus toolset routing).
+    et_turn0 = _effective_enabled_tools_for_skill(
+        frozenset(session.enabled_tools), skills_m, sid
+    )
+    et_turn = _effective_enabled_tools_for_turn(
+        base_enabled_tools=et_turn0,
+        enabled_toolsets=session.enabled_toolsets,
+        user_query=r,
+    )
+    router_query = _route_requires_websearch(
+        r,
+        today_str,
+        session.primary_profile,
+        et_turn,
+        transcript_messages=session.messages,
+    )
+    if _deliverable_skip_mandatory_web(r):
+        router_query = None
+    web_required = bool(router_query)
+
+    steps, _raw_plan = _skill_plan_steps(
+        user_request=r,
+        today_str=today_str,
+        skill_id=sid,
+        skills_map=skills_m,
+        primary_profile=session.primary_profile,
+        _enabled_tools=et_turn,
+        verbose=session.verbose,
+        _system_prompt_override=session.system_prompt_override,
+    )
+
+    # Workflow: execute steps, return the final step answer as the visible output.
+    if steps:
+        wf = ((rec.get("workflow") or {}) if isinstance(rec, dict) else {}) or {}
+        step_prompt = (wf.get("step_prompt") or "").strip()
+        final_answer = None
+        for i, st in enumerate(steps, start=1):
+            title = st.get("title") or f"step {i}"
+            details = st.get("details") or ""
+            success = st.get("success") or ""
+            step_user = (
+                f"{r}\n\n"
+                f"Step {i}/{len(steps)}: {title}\n"
+                + (f"Details: {details}\n" if details else "")
+                + (f"Success: {success}\n" if success else "")
+                + ("\n" + step_prompt if step_prompt else "")
+            )
+            et_step = _effective_enabled_tools_for_skill(
+                frozenset(session.enabled_tools), skills_m, sid
+            )
+            turn_msg = _interactive_turn_user_message(
+                step_user,
+                today_str,
+                session.second_opinion_enabled,
+                session.cloud_ai_enabled,
+                primary_profile=session.primary_profile,
+                reviewer_ollama_model=session.reviewer_ollama_model,
+                reviewer_hosted_profile=session.reviewer_hosted_profile,
+                enabled_tools=et_step,
+                system_instruction_override=session.system_prompt_override,
+                skill_suffix=skill_prompt,
+            )
+            session.messages.append({"role": "user", "content": turn_msg})
+            if router_query and "search_web" in et_step and i == 1:
+                session.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Before answering, you MUST call the tool search_web.\n"
+                            "Respond with JSON only in tool_call form.\n"
+                            f'Suggested query: "{router_query}"'
+                        ),
+                    }
+                )
+            answered, fa = _run_agent_conversation_turn(
+                session.messages,
+                step_user,
+                today_str,
+                web_required=web_required if i == 1 else False,
+                deliverable_wanted=deliverable_wanted,
+                verbose=session.verbose,
+                second_opinion_enabled=session.second_opinion_enabled,
+                cloud_ai_enabled=session.cloud_ai_enabled,
+                primary_profile=session.primary_profile,
+                reviewer_hosted_profile=session.reviewer_hosted_profile,
+                reviewer_ollama_model=session.reviewer_ollama_model,
+                enabled_tools=et_step,
+                interactive_tool_recovery=False,
+                context_cfg=session.context_cfg,
+                print_answer=False,
+            )
+            if fa:
+                final_answer = fa
+                session.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": json.dumps({"action": "answer", "answer": fa}),
+                    }
+                )
+        header = (
+            f"/reuse-skill: using skill {sid!r}. {why}"
+            if reuse
+            else f"/use-skills selected {sid!r}. {why}"
+        ).strip()
+        return AgentExecuteResult(
+            output=header + ("\n" + final_answer if final_answer else ""),
+            answered=bool(final_answer),
+            answer=final_answer,
+        )
+
+    # No workflow: fallback to one normal turn.
+    answered, fa = session.run_query(r)
+    header2 = (
+        f"/reuse-skill: using skill {sid!r}. {why}"
+        if reuse
+        else f"/use-skills selected {sid!r}. {why}"
+    ).strip()
+    return AgentExecuteResult(
+        output=header2 + ("\n" + fa if fa else ""),
+        answered=answered,
+        answer=fa,
+    )
+
+
+def _execute_while(session: AgentSession, s: str) -> AgentExecuteResult:
+    try:
+        wtoks = shlex.split(s)
+    except ValueError as e:
+        return AgentExecuteResult(output=f"/while: {e}")
+    if len(wtoks) == 1 or (len(wtoks) == 2 and wtoks[1].lower() in ("help", "-h", "--help")):
+        return AgentExecuteResult(
+            output=(
+                "Usage:\n"
+                "  /while [--max N] <condition> do <prompt> [, <prompt> ...]\n"
+                "  <condition> and each <prompt> are shlex-quoted; use double or single quotes.\n"
+                "  Judge returns 1 if condition is TRUE (keep looping), 0 if FALSE (exit).\n"
+                "  Each iteration runs each body prompt as its own REPL turn.\n"
+                "  Default --max is 50.\n"
+            )
+        )
+    try:
+        max_while, cond, body_prompts = _parse_while_repl_tokens(wtoks)
+    except ValueError as e:
+        return AgentExecuteResult(output=f"/while: {e}")
+    lines: list[str] = []
+    for wit in range(1, max_while + 1):
+        bit = _call_while_condition_judge(cond, session.messages, primary_profile=session.primary_profile, verbose=session.verbose)
+        if bit == 0:
+            lines.append(f"/while: condition false (judge 0). Exiting after check {wit}/{max_while}.")
+            break
+        n = len(body_prompts)
+        for si, bp in enumerate(body_prompts, start=1):
+            uq = f"[ /while iteration {wit}/{max_while} step {si}/{n} ]\n{bp}"
+            answered, fa = session.run_query(uq)
+            if fa:
+                lines.append(fa)
+    else:
+        lines.append(f"/while: reached --max {max_while} without judge returning 0 (exit).")
+    return AgentExecuteResult(output="\n".join([x for x in lines if x]).strip())
+
+
+def execute_agent_line(session: AgentSession, line: str) -> AgentExecuteResult:
+    """
+    Public helper: execute a REPL-like line against a session.
+    This is used by AgentSession.execute() and can be called directly.
+    """
+    s = (line or "").strip()
+    if not s:
+        return AgentExecuteResult(output="")
+    low = s.lower()
+    if low in ("/quit", "/exit", "/q"):
+        return AgentExecuteResult(output="", quit=True)
+    if low == "/clear":
+        session.messages.clear()
+        session.last_reuse_skill_id = None
+        return AgentExecuteResult(output="Context cleared (including stored skill for /reuse-skill).")
+    if low == "/models":
+        try:
+            names = _fetch_ollama_local_model_names()
+            return AgentExecuteResult(output="\n".join(names) if names else "(no models returned)")
+        except Exception as e:
+            return AgentExecuteResult(output=f"/models error: {e}")
+    if low in ("/usage", "/tokens"):
+        return AgentExecuteResult(output=_format_last_ollama_usage_for_repl())
+    if low in ("/help", "/?"):
+        return AgentExecuteResult(output=_agent_execute_help_text())
+    if low in ("/help environment", "/help env"):
+        # Reuse REPL text generator by calling the same block used in interactive mode.
+        return AgentExecuteResult(
+            output=(
+                "Ollama / OpenAI / agent options are stored in ~/.agent.json and edited with:\n"
+                "  /settings ollama show|keys|set|unset,  /settings openai …,  /settings agent …,  then  /settings save.\n"
+                "Precedence: if a full variable (e.g. OLLAMA_HOST) is set in the shell when the program starts, that value is kept.\n"
+            )
+        )
+    if s.startswith("/show"):
+        try:
+            toks = shlex.split(s)
+        except ValueError as e:
+            return AgentExecuteResult(output=f"/show: {e}")
+        if len(toks) < 2 or toks[1].lower() in ("help", "-h", "--help"):
+            return AgentExecuteResult(
+                output=(
+                    "Usage:\n"
+                    "  /show model      Primary LLM in use (Ollama or hosted)\n"
+                    "  /show reviewer   Second-opinion reviewer model\n"
+                )
+            )
+        sub = toks[1].lower().replace("-", "_")
+        if sub in ("model", "primary", "llm"):
+            return AgentExecuteResult(output=f"Primary LLM: {_format_session_primary_llm_line(session.primary_profile)}")
+        if sub in ("reviewer", "second_opinion", "2nd"):
+            return AgentExecuteResult(
+                output=f"Second-opinion reviewer: {_format_session_reviewer_line(session.reviewer_hosted_profile, session.reviewer_ollama_model)}"
+            )
+        return AgentExecuteResult(output="Unknown /show topic. Try: /show model   or   /show reviewer")
+    if low.startswith("/settings"):
+        return AgentExecuteResult(output=_execute_settings_command(session, s))
+    if low.startswith("/while"):
+        return _execute_while(session, s)
+    if low.startswith("/use-skills"):
+        try:
+            toks = shlex.split(s)
+        except ValueError as e:
+            return AgentExecuteResult(output=f"/use-skills: {e}")
+        return _execute_use_skills(session, " ".join(toks[1:]), reuse=False)
+    if low.startswith("/reuse-skill"):
+        try:
+            toks = shlex.split(s)
+        except ValueError as e:
+            return AgentExecuteResult(output=f"/reuse-skill: {e}")
+        return _execute_use_skills(session, " ".join(toks[1:]), reuse=True)
+    if s.startswith("/"):
+        return AgentExecuteResult(output=f"Unknown command {s.split()[0]!r}. Try /help.")
+
+    answered, fa = session.run_query(s)
+    return AgentExecuteResult(output=fa or "", answered=answered, answer=fa)
+
+
+def _agent_session_execute(self: AgentSession, line: str) -> AgentExecuteResult:
+    return execute_agent_line(self, line)
+
+
+# Attach method without changing dataclass field order above.
+AgentSession.execute = _agent_session_execute  # type: ignore[attr-defined]
+
+
 def _interactive_repl(
     *,
     verbose: int,
@@ -4807,6 +5778,93 @@ def _interactive_repl(
             print("\n[Cancelled]\n")
             return
 
+    def repl_run_normal_user_request(user_query: str) -> None:
+        """One normal REPL turn: append messages and run the agent loop."""
+        today = datetime.date.today()
+        today_str = today.strftime("%Y-%m-%d (%A)")
+        deliverable_wanted = _user_wants_written_deliverable(user_query)
+        sid0, tr0 = _match_skill_detail(user_query, skills_m)
+        et_turn0 = _effective_enabled_tools_for_skill(
+            frozenset(enabled_tools), skills_m, sid0
+        )
+        et_turn = _effective_enabled_tools_for_turn(
+            base_enabled_tools=et_turn0,
+            enabled_toolsets=enabled_toolsets,
+            user_query=user_query,
+        )
+        if verbose >= 1:
+            d0 = (
+                f"trigger match: longest substring {tr0!r} (skill {sid0!r})"
+                if sid0 and tr0
+                else "trigger match: no skill (no trigger substring matched)"
+            )
+            _print_skill_usage_verbose(
+                verbose,
+                source="repl",
+                skill_id=sid0,
+                base_tools=enabled_tools,
+                effective_tools=et_turn,
+                detail=d0,
+            )
+        sprompt0 = (skills_m.get(sid0) or {}).get("prompt") if sid0 else None
+        router_query = _route_requires_websearch(
+            user_query,
+            today_str,
+            primary_profile,
+            et_turn,
+            transcript_messages=messages,
+        )
+        if _deliverable_skip_mandatory_web(user_query):
+            router_query = None
+        web_required = bool(router_query)
+        turn_msg = _interactive_turn_user_message(
+            user_query,
+            today_str,
+            second_opinion_on,
+            cloud_ai_enabled,
+            primary_profile=primary_profile,
+            reviewer_ollama_model=reviewer_ollama_model,
+            reviewer_hosted_profile=reviewer_hosted_profile,
+            enabled_tools=et_turn,
+            system_instruction_override=session_system_prompt,
+            skill_suffix=sprompt0,
+        )
+        messages.append({"role": "user", "content": turn_msg})
+        if router_query and "search_web" in et_turn:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Before answering, you MUST call the tool search_web.\n"
+                        "Respond with JSON only in tool_call form.\n"
+                        f'Suggested query: "{router_query}"'
+                    ),
+                }
+            )
+        answered, final_answer = _run_agent_conversation_turn(
+            messages,
+            user_query,
+            today_str,
+            web_required=web_required,
+            deliverable_wanted=deliverable_wanted,
+            verbose=verbose,
+            second_opinion_enabled=second_opinion_on,
+            cloud_ai_enabled=cloud_ai_enabled,
+            primary_profile=primary_profile,
+            reviewer_hosted_profile=reviewer_hosted_profile,
+            reviewer_ollama_model=reviewer_ollama_model,
+            enabled_tools=et_turn,
+            interactive_tool_recovery=True,
+            context_cfg=context_cfg,
+        )
+        if session_save_path:
+            try:
+                _save_context_bundle(
+                    session_save_path, messages, user_query, final_answer, answered
+                )
+            except OSError as e:
+                print(f"Warning: could not save context: {e}", file=sys.stderr)
+
     while True:
         try:
             line = _repl_read_line("> ")
@@ -4868,6 +5926,83 @@ def _interactive_repl(
                 )
                 continue
             print("Unknown /show topic. Try: /show model   or   /show reviewer")
+            continue
+        if s.startswith("/while"):
+            try:
+                wtoks = shlex.split(s)
+            except ValueError as e:
+                print(f"/while: {e}")
+                continue
+            if len(wtoks) == 1 or (
+                len(wtoks) == 2 and wtoks[1].lower() in ("help", "-h", "--help")
+            ):
+                print(
+                    "Usage:\n"
+                    "  /while [--max N] <condition> do <action>\n"
+                    "  <condition> and <action> are shlex-quoted; use double or single quotes (use the other kind for quotes inside).\n"
+                    "  Like C while (CONDITION) { … }: the judge returns whether CONDITION is TRUE or FALSE right now.\n"
+                    "    1 = TRUE — stay in the loop (run <action>, then re-check).\n"
+                    "    0 = FALSE — exit the loop (do not run <action>).\n"
+                    "  Default --max is 50 iterations (each iteration: one judge + at most one body).\n"
+                    "\n"
+                    "  Body: one or more comma-separated quoted prompts (shlex; add a space before each comma if your\n"
+                    "  shell glues commas, e.g.  \"a\" , \"b\"  or  \"a\", \"b\"  both work).\n"
+                    "  Examples:\n"
+                    '    /while "pytest is still failing" do "fix from output and run pytest"\n'
+                    "    /while 'work remains' do 'step A', 'step B', 'step C'\n"
+                    "    /while --max 10 'server not yet returning 200' do 'patch and curl until OK'\n"
+                )
+                continue
+            try:
+                max_while, while_cond, body_prompts = _parse_while_repl_tokens(wtoks)
+            except ValueError as e:
+                print(f"/while: {e}")
+                continue
+            try:
+                abort_while = False
+                for wit in range(1, max_while + 1):
+                    try:
+                        bit = _call_while_condition_judge(
+                            while_cond,
+                            messages,
+                            primary_profile=primary_profile,
+                            verbose=verbose,
+                        )
+                    except KeyboardInterrupt:
+                        _agent_progress("Cancelled /while (condition check).")
+                        print("\n[Cancelled]\n")
+                        break
+                    if bit == 0:
+                        print(
+                            f"/while: condition false (judge returned 0). "
+                            f"Exiting after check {wit}/{max_while}."
+                        )
+                        break
+                    n_steps = len(body_prompts)
+                    for si, bp in enumerate(body_prompts, start=1):
+                        uq = (
+                            f"[ /while iteration {wit}/{max_while} "
+                            f"step {si}/{n_steps} ]\n"
+                            f"{bp}"
+                        )
+                        _agent_progress(
+                            f"/while: iteration {wit}/{max_while} step {si}/{n_steps}"
+                        )
+                        try:
+                            repl_run_normal_user_request(uq)
+                        except KeyboardInterrupt:
+                            _agent_progress("Cancelled /while (body).")
+                            print("\n[Cancelled]\n")
+                            abort_while = True
+                            break
+                    if abort_while:
+                        break
+                else:
+                    print(
+                        f"/while: reached --max {max_while} without judge returning 0 (exit)."
+                    )
+            except Exception as e:
+                print(f"/while error: {e}")
             continue
         if low.startswith("/use-skills"):
             # Model picks a skill, then we run the same pipeline as /reuse-skill.
@@ -5654,6 +6789,7 @@ def _interactive_repl(
                 "  /clear                   Clear in-memory conversation\n"
                 "  /models                  List local Ollama models (api/tags)\n"
                 "  /show model | /show reviewer   Current primary or second-opinion LLM (see /show help for details)\n"
+                "  /while [--max N] 'cond' do 'action'   while(cond): body — judge 1=true keep looping, 0=false exit (see /while help)\n"
                 "  /usage                   Last local Ollama prompt/completion token counts (from /api/chat)\n"
                 "  /use-skills <request>    Ask the model to pick a skill, then run it (multi-step if the skill supports it)\n"
                 "  /reuse-skill <request>     Follow-up using the same skill as the last /use-skills or /reuse-skill (no re-selection)\n"
@@ -5699,91 +6835,7 @@ def _interactive_repl(
             continue
 
         try:
-            today = datetime.date.today()
-            today_str = today.strftime("%Y-%m-%d (%A)")
-            user_query = s
-            deliverable_wanted = _user_wants_written_deliverable(user_query)
-            sid0, tr0 = _match_skill_detail(user_query, skills_m)
-            et_turn0 = _effective_enabled_tools_for_skill(
-                frozenset(enabled_tools), skills_m, sid0
-            )
-            et_turn = _effective_enabled_tools_for_turn(
-                base_enabled_tools=et_turn0,
-                enabled_toolsets=enabled_toolsets,
-                user_query=user_query,
-            )
-            if verbose >= 1:
-                d0 = (
-                    f"trigger match: longest substring {tr0!r} (skill {sid0!r})"
-                    if sid0 and tr0
-                    else "trigger match: no skill (no trigger substring matched)"
-                )
-                _print_skill_usage_verbose(
-                    verbose,
-                    source="repl",
-                    skill_id=sid0,
-                    base_tools=enabled_tools,
-                    effective_tools=et_turn,
-                    detail=d0,
-                )
-            sprompt0 = (skills_m.get(sid0) or {}).get("prompt") if sid0 else None
-            router_query = _route_requires_websearch(
-                user_query,
-                today_str,
-                primary_profile,
-                et_turn,
-                transcript_messages=messages,
-            )
-            if _deliverable_skip_mandatory_web(user_query):
-                router_query = None
-            web_required = bool(router_query)
-            turn_msg = _interactive_turn_user_message(
-                user_query,
-                today_str,
-                second_opinion_on,
-                cloud_ai_enabled,
-                primary_profile=primary_profile,
-                reviewer_ollama_model=reviewer_ollama_model,
-                reviewer_hosted_profile=reviewer_hosted_profile,
-                enabled_tools=et_turn,
-                system_instruction_override=session_system_prompt,
-                skill_suffix=sprompt0,
-            )
-            messages.append({"role": "user", "content": turn_msg})
-            if router_query and "search_web" in et_turn:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Before answering, you MUST call the tool search_web.\n"
-                            "Respond with JSON only in tool_call form.\n"
-                            f'Suggested query: "{router_query}"'
-                        ),
-                    }
-                )
-            answered, final_answer = _run_agent_conversation_turn(
-                messages,
-                user_query,
-                today_str,
-                web_required=web_required,
-                deliverable_wanted=deliverable_wanted,
-                verbose=verbose,
-                second_opinion_enabled=second_opinion_on,
-                cloud_ai_enabled=cloud_ai_enabled,
-                primary_profile=primary_profile,
-                reviewer_hosted_profile=reviewer_hosted_profile,
-                reviewer_ollama_model=reviewer_ollama_model,
-                enabled_tools=et_turn,
-                interactive_tool_recovery=True,
-                context_cfg=context_cfg,
-            )
-            if session_save_path:
-                try:
-                    _save_context_bundle(
-                        session_save_path, messages, user_query, final_answer, answered
-                    )
-                except OSError as e:
-                    print(f"Warning: could not save context: {e}", file=sys.stderr)
+            repl_run_normal_user_request(s)
         except KeyboardInterrupt:
             _agent_progress("Cancelled current request (Ctrl-C).")
             print("\n[Cancelled]\n")

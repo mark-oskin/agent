@@ -108,6 +108,14 @@ def test_ollama_request_think_value_gpt_oss_defaults_to_medium(monkeypatch):
     assert d._ollama_request_think_value() == "medium"
 
 
+def test_ollama_request_think_false_when_disabled_even_if_level_set(monkeypatch):
+    """Stale AGENT_THINKING_LEVEL must not send think= to Ollama when thinking is off."""
+    d = importlib.import_module("agent")
+    monkeypatch.setenv("AGENT_THINKING", "0")
+    monkeypatch.setenv("AGENT_THINKING_LEVEL", "high")
+    assert d._ollama_request_think_value() is False
+
+
 def test_stream_thinking_prints_done_thinking_separator(monkeypatch):
     d = importlib.import_module("agent")
     monkeypatch.setenv("AGENT_STREAM_THINKING", "1")

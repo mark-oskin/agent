@@ -1,0 +1,3 @@
+# Keep sdists lean (wheel already excludes these via package discovery).
+recursive-exclude tests *
+recursive-exclude subtest *

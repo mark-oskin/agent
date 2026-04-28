@@ -14,24 +14,53 @@ It can run as:
 - **Plugin toolsets** add optional tools from a `tools/` directory, gated by your settings and per-request routing.
 - **Skills** (JSON in `skills/`) specialize behavior with extra prompt text, optional **multi-step workflows**, and a tighter **tool allowlist** when a skill matches.
 - A **context window** helper can summarize older turns when the transcript grows; settings live in `~/.agent.json` and the REPL.
+- The agent can also be **embedded** in other Python programs via a **stateful** `AgentSession` object (see **Embedding / Python API**).
 
 ## Install
 
 The project uses [`uv`](https://github.com/astral-sh/uv).
+
+### Develop / run from a clone
 
 ```bash
 brew install uv   # or install uv by another method
 uv sync
 ```
 
+Use `./agent.py` or `uv run python agent.py` (see **Run** below).
+
+### Put `agent` on your `PATH` (`uv tool install`)
+
+From the repository root, install an isolated tool environment with the `agent` console script:
+
+```bash
+uv tool install .
+```
+
+Then use the **`agent`** command anywhere (same flags as `./agent.py`). **`uv`** prints where executables are linked (often `~/.local/bin`; ensure that directory is on your `PATH`).
+
+Updates after pulling git changes:
+
+```bash
+uv tool install --reinstall .
+```
+
+Remove the tool:
+
+```bash
+uv tool uninstall agent
+```
+
+When this package is published to an index, you will also be able to run `uv tool install agent` (the PyPI/name story may evolve; installing from a path remains the reliable option for this repo).
+
 ## Run
 
 | Mode | Command |
 |------|---------|
-| Interactive REPL | `./agent.py` or `uv run python agent.py` |
-| One-shot | `./agent.py "your question here"` |
-| Help | `./agent.py --help` |
-| List tools and on/off state | `./agent.py --list-tools` |
+| Interactive REPL | `./agent.py` · `uv run python agent.py` · or **`agent`** after `uv tool install .` |
+| One-shot | `./agent.py "…"` · or **`agent` "…"` |
+| Help | `./agent.py --help` · or **`agent --help`** |
+| List tools and on/off state | `./agent.py --list-tools` · or **`agent --list-tools`** |
 
 ## CLI options (summary)
 
@@ -68,9 +97,38 @@ Run `./agent.py --help` for the full text.
 | `/usage` | Show last Ollama prompt/completion usage from `/api/chat` |
 | `/show model` | Current **primary** LLM (Ollama or hosted) |
 | `/show reviewer` | Current **second-opinion** reviewer model |
+| `/while [--max N] 'condition' do 'prompt' [, 'prompt' …]` | Same idea as **`while (condition) { … }`**: judge **1** = condition **true** (stay in loop), **0** = **false** (exit). After each **true** check, runs every **comma-separated** body prompt as its own REPL turn (step 1/N …), then re-checks. Capped by **--max** (default 50). See `/while help`. |
 | `/settings …` | Model routing, tools, toolsets, thinking, system prompt, templates, context manager, `save`, etc. |
 
 At `verbose=0`, startup is minimal (`Interactive mode. Type /help for commands.`). Use `/settings verbose 1` or `2` for a richer startup banner and tool logging.
+
+## Embedding / Python API
+
+You can embed the agent in another Python program.
+
+- `AgentSession` is **stateful**: it keeps conversation history (`session.messages`) and session-local settings.
+- `session.run_query("...")` runs one normal agent turn (like a non-command REPL line).
+- `session.execute("...")` executes a **REPL-style line** (commands like `/settings ...`, `/while ...`, `/use-skills ...`, `/show ...`, etc.) and returns structured output.
+
+Example:
+
+```python
+import agent
+
+s = agent.AgentSession.from_prefs()   # load defaults (and apply env overrides)
+
+print(s.execute("/settings verbose 1").output)
+print(s.execute("/settings model llama3.2:latest").output)
+print(s.execute("/show model").output)
+
+r = s.run_query("Explain how toolsets are routed per request.")
+print(r)
+```
+
+Notes:
+
+- Some options (notably `AGENT_*` and `OLLAMA_*`) are still backed by **process environment variables** in the current implementation, so avoid mutating those concurrently across multiple sessions in different threads.
+- For deeper extension / internals, see `DEVELOPERS.md`.
 
 ## Core behavior
 
