@@ -217,122 +217,36 @@ _TOOL_ENTRIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
 )
 
 
+from agentlib.tools import plugins as _tool_plugins
+from agentlib.tools import routing as _tool_routing
+
 # Plugin toolsets (loaded from tools/ directory).
 # Toolsets are off by default and can be enabled by the user.
-_PLUGIN_TOOLSETS: dict[str, dict] = {}
-_PLUGIN_TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {}
-_PLUGIN_TOOL_TO_TOOLSET: dict[str, str] = {}
-_PLUGIN_TOOLSET_TRIGGERS: dict[str, list[str]] = {}
+_PLUGIN_TOOLSETS = _tool_plugins.PLUGIN_TOOLSETS
+_PLUGIN_TOOL_HANDLERS = _tool_plugins.PLUGIN_TOOL_HANDLERS
+_PLUGIN_TOOL_TO_TOOLSET = _tool_plugins.PLUGIN_TOOL_TO_TOOLSET
+_PLUGIN_TOOLSET_TRIGGERS = _tool_plugins.PLUGIN_TOOLSET_TRIGGERS
 
 
 def _load_plugin_toolsets(tools_dir: Optional[str] = None) -> None:
-    """
-    Load plugin toolsets from the local `tools/` directory.
-
-    Each plugin module must define:
-      TOOLSET = {
-        "name": "dev" | "web" | ...,
-        "description": "…",
-        "triggers": ["keyword", "regex:..."] (optional),
-        "tools": [
-          {"id": "run_pytest", "description": "...", "aliases": ["pytest", ...], "handler": callable},
-          ...
-        ],
-      }
-    """
-    _PLUGIN_TOOLSETS.clear()
-    _PLUGIN_TOOL_HANDLERS.clear()
-    _PLUGIN_TOOL_TO_TOOLSET.clear()
-    _PLUGIN_TOOLSET_TRIGGERS.clear()
-    base0 = (tools_dir or "").strip()
-    base = os.path.abspath(os.path.expanduser(base0)) if base0 else _default_tools_dir()
-    if not os.path.isdir(base):
-        return
-    # Support loading plugin modules from a custom directory:
-    # - if base == default tools dir: import from tools.<modname>
-    # - else: import by file path under a unique module name prefix
-    use_pkg_import = os.path.abspath(base) == os.path.abspath(_default_tools_dir())
-    for fn in sorted(os.listdir(base)):
-        if not fn.endswith(".py") or fn.startswith("_"):
-            continue
-        modname = os.path.splitext(fn)[0]
-        try:
-            if use_pkg_import:
-                m = importlib.import_module(f"tools.{modname}")
-            else:
-                path = os.path.join(base, fn)
-                spec = importlib.util.spec_from_file_location(f"agent_tools_{modname}", path)
-                if spec is None or spec.loader is None:
-                    continue
-                m = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(m)
-        except Exception:
-            continue
-        ts = getattr(m, "TOOLSET", None)
-        if not isinstance(ts, dict):
-            continue
-        nm = str(ts.get("name") or "").strip().lower()
-        if not nm:
-            continue
-        tools = ts.get("tools")
-        if not isinstance(tools, list) or not tools:
-            continue
-        _PLUGIN_TOOLSETS[nm] = ts
-        tr = ts.get("triggers")
-        if isinstance(tr, list):
-            _PLUGIN_TOOLSET_TRIGGERS[nm] = [str(x) for x in tr if str(x).strip()]
-        else:
-            _PLUGIN_TOOLSET_TRIGGERS[nm] = []
-        for td in tools:
-            if not isinstance(td, dict):
-                continue
-            tid = str(td.get("id") or "").strip()
-            if not tid or tid in _CORE_TOOLS:
-                continue
-            h = td.get("handler")
-            if not callable(h):
-                continue
-            _PLUGIN_TOOL_HANDLERS[tid] = h
-            _PLUGIN_TOOL_TO_TOOLSET[tid] = nm
+    _tool_plugins.load_plugin_toolsets(
+        tools_dir=tools_dir,
+        default_tools_dir=_default_tools_dir(),
+    )
 
 
 def _plugin_tool_entries() -> Tuple[Tuple[str, str, Tuple[str, ...]], ...]:
-    entries = []
-    for ts in _PLUGIN_TOOLSETS.values():
-        tools = ts.get("tools") if isinstance(ts, dict) else None
-        if not isinstance(tools, list):
-            continue
-        for td in tools:
-            if not isinstance(td, dict):
-                continue
-            tid = str(td.get("id") or "").strip()
-            if not tid:
-                continue
-            desc = str(td.get("description") or "").strip() or "Plugin tool"
-            aliases = td.get("aliases")
-            if not isinstance(aliases, (list, tuple)):
-                aliases = ()
-            aliases_t = tuple(str(a) for a in aliases if str(a).strip())
-            entries.append((tid, desc, aliases_t))
-    return tuple(entries)
+    return _tool_plugins.plugin_tool_entries()
 
-_TOOL_ALIASES: dict[str, str] = {}
+_TOOL_ALIASES = _tool_routing.TOOL_ALIASES
 
 
 def _canonicalize_user_tool_phrase(phrase: str) -> str:
-    s = (phrase or "").strip().lower()
-    s = re.sub(r"\s+", "_", s)
-    s = s.replace("-", "_")
-    return s
+    return _tool_routing.canonicalize_user_tool_phrase(phrase)
 
 
 def _register_tool_aliases() -> None:
-    _TOOL_ALIASES.clear()
-    for internal, _label, aliases in (*_TOOL_ENTRIES, *_plugin_tool_entries()):
-        for phrase in (internal, *aliases):
-            key = _canonicalize_user_tool_phrase(phrase)
-            if key:
-                _TOOL_ALIASES[key] = internal
+    _tool_routing.register_tool_aliases()
 
 
 
@@ -346,62 +260,20 @@ def _coerce_enabled_tools(ets: Optional[AbstractSet[str]]):
 
 
 def _resolve_tool_token(phrase: str) -> Optional[str]:
-    c = _canonicalize_user_tool_phrase(phrase)
-    if not c:
-        return None
-    if c in _all_known_tools():
-        return c
-    return _TOOL_ALIASES.get(c)
+    return _tool_routing.resolve_tool_token(phrase)
 
 
 def _normalize_tool_name(token: str) -> Optional[str]:
     """Map user text or internal id to canonical tool name."""
-    return _resolve_tool_token(token)
+    return _tool_routing.normalize_tool_name(token)
 
 
 def _plugin_tools_for_toolset(toolset: str) -> set[str]:
-    nm = (toolset or "").strip().lower()
-    out: set[str] = set()
-    for tid, ts in _PLUGIN_TOOL_TO_TOOLSET.items():
-        if ts == nm:
-            out.add(tid)
-    return out
+    return _tool_plugins.plugin_tools_for_toolset(toolset)
 
 
 def _route_active_toolsets_for_request(user_query: str, enabled_toolsets: AbstractSet[str]) -> set[str]:
-    """
-    Select which enabled toolsets to expose for a specific request (to avoid tool overload).
-    Heuristic: match toolset triggers (keywords or regex: patterns) against the user query.
-    """
-    ets = {str(x).strip().lower() for x in (enabled_toolsets or set()) if str(x).strip()}
-    if not ets:
-        return set()
-    if len(ets) == 1:
-        return set(ets)
-    q = (user_query or "").strip().lower()
-    if not q:
-        return set(ets)
-    active: set[str] = set()
-    for ts in sorted(ets):
-        tr = _PLUGIN_TOOLSET_TRIGGERS.get(ts) or []
-        for one in tr:
-            s = str(one).strip()
-            if not s:
-                continue
-            if s.startswith("regex:"):
-                pat = s[len("regex:") :].strip()
-                if pat:
-                    try:
-                        if re.search(pat, q, flags=re.I):
-                            active.add(ts)
-                            break
-                    except re.error:
-                        continue
-            else:
-                if s.lower() in q:
-                    active.add(ts)
-                    break
-    return active or set(ets)
+    return _tool_routing.route_active_toolsets_for_request(user_query, enabled_toolsets)
 
 
 def _effective_enabled_tools_for_turn(
@@ -410,18 +282,11 @@ def _effective_enabled_tools_for_turn(
     enabled_toolsets: AbstractSet[str],
     user_query: str,
 ) -> frozenset[str]:
-    """
-    Tools exposed for one model turn:
-    - always include base_enabled_tools (core tools minus any user-disabled tools)
-    - include plugin tools only from router-selected active toolsets (subset of enabled_toolsets)
-    """
-    base = set(base_enabled_tools or set())
-    active_ts = _route_active_toolsets_for_request(user_query, enabled_toolsets)
-    for ts in active_ts:
-        base.update(_plugin_tools_for_toolset(ts))
-    # Only allow tools we actually know about.
-    base = base & set(_all_known_tools())
-    return frozenset(base)
+    return _tool_routing.effective_enabled_tools_for_turn(
+        base_enabled_tools=base_enabled_tools,
+        enabled_toolsets=enabled_toolsets,
+        user_query=user_query,
+    )
 
 
 def _all_tool_name_suggestion_pool() -> list[str]:
@@ -432,107 +297,19 @@ def _all_tool_name_suggestion_pool() -> list[str]:
 
 
 def _format_unknown_tool_hint(phrase: str) -> str:
-    c = _canonicalize_user_tool_phrase(phrase)
-    lines = [f"Unknown tool {phrase!r}."]
-    if c:
-        near = difflib.get_close_matches(c, _all_tool_name_suggestion_pool(), n=4, cutoff=0.55)
-        if near:
-            bits = []
-            for m in near:
-                if m == "second_opinion":
-                    bits.append("second_opinion (feature, not a tool)")
-                    continue
-                internal = _resolve_tool_token(m) or m
-                bits.append(f"{m} → {internal}" if m != internal else internal)
-            lines.append("Did you mean: " + ", ".join(bits) + "?")
-    lines.append("Run /settings tools (or --list-tools) for every tool and its id.")
-    return "\n".join(lines)
+    return _tool_routing.format_unknown_tool_hint(phrase)
 
 
 def _format_settings_tools_list(enabled_tools: AbstractSet[str]) -> str:
-    lines = ["Core tools for this session (id in parentheses, use either):"]
-    for internal, label, _aliases in _TOOL_ENTRIES:
-        on = "on" if internal in enabled_tools else "off"
-        lines.append(f"  [{on}] {label}  ({internal})")
-    lines.append(
-        "You can use plain phrases, e.g. /settings disable web search  "
-        "or  -disable_tool shell"
-    )
-    return "\n".join(lines)
+    return _tool_routing.format_settings_tools_list(enabled_tools)
 
 
 def _describe_tool_call_contract(tool_id: str) -> str:
-    """
-    Human-readable contract for a tool: what params it accepts and what it returns.
-    For plugins, this is read from the TOOLSET metadata when present.
-    """
-    tid = (tool_id or "").strip()
-    if not tid:
-        return "Unknown tool."
-    # Plugin tool
-    if tid in _PLUGIN_TOOL_HANDLERS:
-        ts = _PLUGIN_TOOL_TO_TOOLSET.get(tid) or ""
-        rec = _PLUGIN_TOOLSETS.get(ts) or {}
-        tools = rec.get("tools") if isinstance(rec, dict) else None
-        td = None
-        if isinstance(tools, list):
-            for one in tools:
-                if isinstance(one, dict) and str(one.get("id") or "").strip() == tid:
-                    td = one
-                    break
-        desc = str((td or {}).get("description") or "").strip() if isinstance(td, dict) else ""
-        aliases = (td or {}).get("aliases") if isinstance(td, dict) else None
-        if not isinstance(aliases, (list, tuple)):
-            aliases = ()
-        params = (td or {}).get("params") if isinstance(td, dict) else None
-        returns = str((td or {}).get("returns") or "").strip() if isinstance(td, dict) else ""
-        out = [f"Tool: {tid} (plugin toolset {ts!r})"]
-        if desc:
-            out.append(f"Description: {desc}")
-        if aliases:
-            out.append("Aliases: " + ", ".join(str(a) for a in aliases))
-        if isinstance(params, dict) and params:
-            out.append("Parameters:")
-            for k, v in params.items():
-                out.append(f"  - {k}: {str(v).strip()}")
-        else:
-            out.append("Parameters: (tool-specific; accepts a JSON object in parameters)")
-        out.append("Returns: " + (returns if returns else "string (tool output)"))
-        return "\n".join(out)
-
-    # Core tool (fixed contract)
-    core = {
-        "search_web": "parameters.query (string); optional max_results (1–30). Returns: formatted web results string.",
-        "fetch_page": "parameters.url (http/https URL). Returns: fetched page text (string).",
-        "run_command": "parameters.command (shell command). Returns: STDOUT/STDERR string.",
-        "use_git": "parameters.op plus additional fields (status|log|diff|add|commit|push|pull|branch). Returns: git output string.",
-        "write_file": "parameters.path, parameters.content. Returns: success/error string.",
-        "read_file": "parameters.path. Returns: file contents string (or error).",
-        "list_directory": "parameters.path. Returns: JSON-ish list string (or error).",
-        "download_file": "parameters.url, parameters.path. Returns: success/error string.",
-        "tail_file": "parameters.path, optional lines. Returns: tail text string.",
-        "replace_text": "parameters.path, pattern, replacement, optional replace_all. Returns: success/error string.",
-        "call_python": "parameters.code, optional globals. Returns: stdout + locals JSON string (or error).",
-    }
-    if tid in core:
-        return f"Tool: {tid} (core)\nContract: {core[tid]}"
-    return "Unknown tool."
+    return _tool_routing.describe_tool_call_contract(tool_id)
 
 
 def _tool_policy_runner_text(ets: Optional[AbstractSet[str]]) -> str:
-    """Non-empty when some tools are disabled for this session."""
-    e = set(_coerce_enabled_tools(ets))
-    if e == set(_all_known_tools()):
-        return ""
-    disabled = sorted(_all_known_tools() - e)
-    allowed = sorted(e & _all_known_tools())
-    return (
-        "Runner: tool policy — you MUST NOT use tool_call for: "
-        + ", ".join(disabled)
-        + ". Only these tools may be invoked: "
-        + ", ".join(allowed)
-        + "."
-    )
+    return _tool_routing.tool_policy_runner_text(ets)
 
 
 def _strip_leading_dashes_flag(a: str) -> str:
@@ -772,158 +549,27 @@ def _load_prompt_templates_from_dir(dir_path: str) -> dict:
 
 
 def _safe_path_under_dir(base_dir: str, relpath: str) -> Optional[str]:
-    """
-    Join base_dir with relpath and return the path only if it stays under base_dir
-    (prevents path traversal in reference_files).
-    """
-    base_dir = os.path.abspath(base_dir)
-    if not relpath or not isinstance(relpath, str):
-        return None
-    rp = relpath.strip()
-    if not rp or ".." in rp.split(os.sep):
-        return None
-    cand = os.path.normpath(os.path.join(base_dir, rp))
-    if cand != base_dir and not cand.startswith(base_dir + os.sep):
-        return None
-    return cand
+    from agentlib.skills.loader import safe_path_under_dir
+
+    return safe_path_under_dir(base_dir, relpath)
 
 
 def _expand_skill_artifacts(skills_dir: str, meta: dict, base_prompt: str) -> str:
-    """
-    Append bundled reference file bodies and optional doc URLs / grounding commands
-    to the skill prompt. reference_files are paths **relative to the skills_dir**
-    (e.g. "references/helm_cheatsheet.md").
-    """
-    parts: list = []
-    if (base_prompt or "").strip():
-        parts.append((base_prompt or "").strip())
-    ref_files = meta.get("reference_files")
-    if isinstance(ref_files, list) and ref_files:
-        for rel in ref_files:
-            if not isinstance(rel, str) or not str(rel).strip():
-                continue
-            abs_p = _safe_path_under_dir(skills_dir, rel.strip())
-            if abs_p is None or not os.path.isfile(abs_p):
-                parts.append(
-                    f"--- Reference file (missing or invalid path under skills dir): {rel} ---\n"
-                )
-                continue
-            try:
-                with open(abs_p, "r", encoding="utf-8") as f:
-                    body = f.read()
-            except OSError as e:
-                body = f"(unreadable: {e})"
-            parts.append(
-                f"--- Bundled reference file: {rel} ---\n" + (body or "").rstrip() + "\n"
-            )
-    urls = meta.get("doc_urls")
-    if isinstance(urls, list) and urls:
-        lines = [str(u).strip() for u in urls if isinstance(u, str) and u.strip()]
-        if lines:
-            parts.append(
-                "--- External docs (fetch with fetch_page when online; do not trust memory alone) ---\n"
-                + "\n".join(f"- {u}" for u in lines)
-                + "\n"
-            )
-    gcmds = meta.get("grounding_commands")
-    if isinstance(gcmds, list) and gcmds:
-        lines = [str(c).strip() for c in gcmds if isinstance(c, str) and c.strip()]
-        if lines:
-            parts.append(
-                "--- Suggested grounding commands (run small steps; capture output) ---\n"
-                + "\n".join(f"- `{c}`" for c in lines)
-                + "\n"
-            )
-    return "\n\n".join(p for p in parts if p and str(p).strip()).strip()
+    from agentlib.skills.loader import expand_skill_artifacts
+
+    return expand_skill_artifacts(skills_dir, meta, base_prompt)
 
 
 def _load_skills_from_dir(dir_path: str) -> dict:
-    """
-    One skill per JSON file: skills/<id>.json
-    Optional keys: description, triggers, tools, prompt, workflow,
-    reference_files (list of paths under skills_dir), doc_urls, grounding_commands.
-    (same structure as the former skill.json + prompt.txt, merged).
-    """
-    out: dict = {}
-    if not os.path.isdir(dir_path):
-        return out
-    for fn in sorted(os.listdir(dir_path)):
-        if not fn.endswith(".json") or fn.startswith("."):
-            continue
-        name, _ = os.path.splitext(fn)
-        name = (name or "").strip()
-        if not name:
-            continue
-        path = os.path.join(dir_path, fn)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(raw, dict):
-            continue
-        meta = raw
-        base_prompt = (meta.get("prompt") or "").strip() if isinstance(meta.get("prompt"), str) else ""
-        prompt = _expand_skill_artifacts(dir_path, meta, base_prompt)
-        tr = meta.get("triggers")
-        if not isinstance(tr, list) or not tr:
-            tr = [name]
-        triggers = [str(t).strip() for t in tr if str(t).strip()]
-        tools = meta.get("tools")
-        if tools is not None and not isinstance(tools, list):
-            tools = None
-        workflow = meta.get("workflow")
-        if workflow is not None and not isinstance(workflow, dict):
-            workflow = None
-        ref_files = meta.get("reference_files")
-        if ref_files is not None and not isinstance(ref_files, list):
-            ref_files = None
-        doc_u = meta.get("doc_urls")
-        if doc_u is not None and not isinstance(doc_u, list):
-            doc_u = None
-        gcmds = meta.get("grounding_commands")
-        if gcmds is not None and not isinstance(gcmds, list):
-            gcmds = None
-        out[name] = {
-            "id": name,
-            "path": path,
-            "description": (meta.get("description") or "").strip()
-            if isinstance(meta.get("description"), str)
-            else "",
-            "triggers": triggers,
-            "tools": tools,
-            "prompt": prompt,
-            "workflow": workflow,
-            "reference_files": ref_files,
-            "doc_urls": doc_u,
-            "grounding_commands": gcmds,
-        }
-    return out
+    from agentlib.skills.loader import load_skills_from_dir
+
+    return load_skills_from_dir(dir_path)
 
 
 def _format_skills_for_selector(skills_map: dict) -> str:
-    lines = []
-    for sid in sorted(skills_map.keys()):
-        rec = skills_map.get(sid) or {}
-        desc = (rec.get("description") or "").strip() if isinstance(rec, dict) else ""
-        w = (rec.get("workflow") or {}) if isinstance(rec, dict) else {}
-        multi = bool(isinstance(w, dict) and w)
-        has_art = False
-        if isinstance(rec, dict):
-            has_art = bool(
-                (isinstance(rec.get("reference_files"), list) and rec.get("reference_files"))
-                or (isinstance(rec.get("doc_urls"), list) and rec.get("doc_urls"))
-                or (
-                    isinstance(rec.get("grounding_commands"), list)
-                    and rec.get("grounding_commands")
-                )
-            )
-        lines.append(
-            f"- id: {sid}\n  description: {desc}\n"
-            f"  supports_multi_step: {str(multi).lower()}\n"
-            f"  has_bundled_grounding: {str(has_art).lower()}"
-        )
-    return "\n".join(lines)
+    from agentlib.skills.selection import format_skills_for_selector
+
+    return format_skills_for_selector(skills_map)
 
 
 def _ml_select_skill_id(
@@ -933,51 +579,18 @@ def _ml_select_skill_id(
     primary_profile: Optional[LlmProfile],
     verbose: int,
 ) -> Tuple[Optional[str], str]:
-    """
-    Ask the current primary model to choose the best skill id for the request.
-    Returns (skill_id or None, rationale).
-    """
-    if not isinstance(skills_map, dict) or not skills_map:
-        return None, "No skills loaded."
-    req = (user_request or "").strip()
-    if not req:
-        return None, "Request is empty."
-    skill_listing = _format_skills_for_selector(skills_map)
-    selector_sys = (
-        "You are a skill selector for a coding assistant.\n"
-        "Given the user request and the available skills, pick the single best skill id.\n"
-        "Respond with JSON only. No Markdown, no code fences.\n"
-        'Output schema: {"skill_id":"<id or empty>","rationale":"short"}\n'
-        "- Use exactly those two keys. Do not use action, tool, or answer.\n"
-        "- Choose exactly one skill_id from the list.\n"
-        "- If none are suitable, set skill_id to empty string.\n"
+    from agentlib.skills.selection import ml_select_skill_id
+
+    return ml_select_skill_id(
+        user_request,
+        skills_map,
+        primary_profile=primary_profile,
+        verbose=verbose,
+        call_llm_json_content=call_llm_json_content,
+        agent_progress=_agent_progress,
+        try_json_loads_object=_try_json_loads_object,
+        parse_json_with_skill_id=_parse_json_with_skill_id,
     )
-    msgs = [
-        {"role": "system", "content": selector_sys},
-        {
-            "role": "user",
-            "content": (
-                f"User request:\n{req}\n\n"
-                f"Available skills:\n{skill_listing}\n\n"
-                "Pick the best skill_id."
-            ),
-        },
-    ]
-    _agent_progress("Selecting skill (model)…")
-    raw = call_llm_json_content(msgs, primary_profile, verbose=verbose)
-    first = _try_json_loads_object(raw)
-    if isinstance(first, dict) and first.get("_call_error"):
-        return None, str(first.get("_call_error") or "LLM call failed.")
-    obj = _parse_json_with_skill_id(raw)
-    if not isinstance(obj, dict) or "skill_id" not in obj:
-        return None, "Model did not return valid JSON with skill_id."
-    sid = (obj.get("skill_id") or "").strip() if isinstance(obj, dict) else ""
-    rat = (obj.get("rationale") or "").strip() if isinstance(obj, dict) else ""
-    if not sid:
-        return None, rat or "Model did not select a skill."
-    if sid not in skills_map:
-        return None, (rat + " " if rat else "") + f"Model selected unknown skill {sid!r}."
-    return sid, rat or f"Selected {sid!r}."
 
 
 def _skill_plan_steps(
@@ -991,122 +604,38 @@ def _skill_plan_steps(
     verbose: int,
     _system_prompt_override: Optional[str],
 ) -> Tuple[Optional[list], str]:
-    """
-    If the selected skill declares a workflow, ask the model for a step plan.
-    Returns (steps or None, planner_raw_text_or_error).
+    from agentlib.skills.planner import skill_plan_steps
 
-    Uses a dedicated planner system prompt and raw JSON content (not call_ollama_chat),
-    so the model is not coerced into the main agent {action, answer} format.
-    """
-    # enabled_tools / system_prompt_override are intentionally unused here: the planner
-    # is isolated from the main agent and must not see the long tool/JSON contract.
-    rec = skills_map.get(skill_id) or {}
-    wf = (rec.get("workflow") or {}) if isinstance(rec, dict) else {}
-    if not isinstance(wf, dict) or not wf:
-        return None, "Skill has no workflow."
-    planner = (wf.get("planner_prompt") or "").strip()
-    if not planner:
-        return None, "Skill workflow missing planner_prompt."
-    max_steps = _scalar_to_int(wf.get("max_steps"), 8)
-    if max_steps < 1:
-        max_steps = 8
-    max_steps = min(max_steps, 20)
-    skill_prompt = (rec.get("prompt") or "").strip() if isinstance(rec, dict) else ""
-    # Planner only — do not prepend the main agent system instructions; they push action/answer JSON.
-    plan_sys = (
-        "You are a workflow planner, not the main coding agent.\n"
-        "Reply with a single JSON object. No Markdown, no code fences, no action/answer format.\n"
-        "Forbidden top-level keys: action, tool, tool_call, parameters, answer, next_action.\n"
-        "Required top-level shape:\n"
-        '{"questions":[],"steps":[{"title":"string","details":"string","success":"string"}]}\n'
-        f"- questions: optional; may be [].\n"
-        f"- steps: at least 1, at most {max_steps}. Each title must be non-empty.\n"
+    return skill_plan_steps(
+        user_request=user_request,
+        today_str=today_str,
+        skill_id=skill_id,
+        skills_map=skills_map,
+        primary_profile=primary_profile,
+        enabled_tools=_enabled_tools,
+        verbose=verbose,
+        system_prompt_override=_system_prompt_override,
+        agent_progress=_agent_progress,
+        call_llm_json_content=call_llm_json_content,
+        try_json_loads_object=_try_json_loads_object,
+        parse_workflow_plan_dict=_parse_workflow_plan_dict,
+        scalar_to_int=_scalar_to_int,
+        scalar_to_str=_scalar_to_str,
     )
-    if skill_prompt:
-        plan_sys += "\n--- Skill context ---\n" + skill_prompt + "\n"
-    plan_sys += (
-        "\n--- Planner instructions ---\n"
-        + planner
-        + f"\n\nContext: today's date (system clock) is {today_str}.\n"
-        "If the user is vague, list questions and still provide a best-guess step plan (do not block on clarification)."
-    )
-    user_body = f"User request:\n{user_request}"
-    msgs: list = [
-        {"role": "system", "content": plan_sys},
-        {"role": "user", "content": user_body},
-    ]
-    _agent_progress("Planning workflow (model)…")
-    raw = call_llm_json_content(msgs, primary_profile, verbose=verbose)
-    err0 = _try_json_loads_object(raw)
-    if isinstance(err0, dict) and err0.get("_call_error"):
-        return None, str(err0.get("_call_error") or "Planner call failed.")
-    plan_obj = _parse_workflow_plan_dict(raw)
-    if plan_obj is None and (raw or "").strip():
-        repair = (
-            "Your last reply was not a valid plan JSON (must include a non-empty \"steps\" array "
-            "with {title, details, success} objects). Do not use action, answer, or tool. "
-            "Output ONE json object only. Previous output:\n"
-        )
-        cap = 3200
-        repair += (raw[:cap] + ("…" if len(raw) > cap else ""))
-        msgs2 = list(msgs) + [{"role": "user", "content": repair}]
-        _agent_progress("Re-asking model for valid step plan…")
-        raw2 = call_llm_json_content(msgs2, primary_profile, verbose=verbose)
-        err1 = _try_json_loads_object(raw2)
-        if isinstance(err1, dict) and err1.get("_call_error"):
-            return None, str(err1.get("_call_error") or "Planner retry failed.")
-        plan_obj = _parse_workflow_plan_dict(raw2)
-        if plan_obj is not None:
-            raw = raw2
-    if plan_obj is None:
-        return None, raw
-    steps = plan_obj.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return None, raw
-    out_steps = []
-    for st in steps:
-        if not isinstance(st, dict):
-            continue
-        title = _scalar_to_str(st.get("title"), "").strip()
-        details = _scalar_to_str(st.get("details"), "").strip()
-        success = _scalar_to_str(st.get("success"), "").strip()
-        if not title:
-            continue
-        out_steps.append({"title": title, "details": details, "success": success})
-        if len(out_steps) >= max_steps:
-            break
-    return out_steps or None, raw
 
 
 def _match_skill_detail(
     user_text: str, skills: Optional[dict]
 ) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Trigger-based skill match: pick the skill whose trigger substring is longest match in user_text.
-    Returns (skill_id, winning_trigger) or (None, None).
-    """
-    if not user_text or not skills:
-        return None, None
-    low = (user_text or "").lower()
-    best_sid: Optional[str] = None
-    best_tr: Optional[str] = None
-    best_len = 0
-    for sid, data in skills.items():
-        d = data if isinstance(data, dict) else {}
-        for tr in d.get("triggers") or [sid]:
-            t = (str(tr) or "").lower().strip()
-            if not t:
-                continue
-            if t in low and len(t) > best_len:
-                best_len = len(t)
-                best_sid = str(sid)
-                best_tr = t
-    return best_sid, best_tr
+    from agentlib.skills.selection import match_skill_detail
+
+    return match_skill_detail(user_text, skills)
 
 
 def _match_skill_id(user_text: str, skills: Optional[dict]) -> Optional[str]:
-    sid, _ = _match_skill_detail(user_text, skills)
-    return sid
+    from agentlib.skills.selection import match_skill_id
+
+    return match_skill_id(user_text, skills)
 
 
 def _print_skill_usage_verbose(
@@ -1537,38 +1066,21 @@ def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
 
 
 def _default_search_web_max_results() -> int:
-    """Default max DDG result rows: prefs/CLI agent.search_web_max_results, else 5, clamped 1–30."""
-    v = _settings_get_int(("agent", "search_web_max_results"), 5)
-    return max(1, min(30, int(v)))
+    from agentlib.tools.websearch import default_search_web_max_results
+
+    return default_search_web_max_results(_SETTINGS_OBJ)
 
 
 def _search_web_max_results_clamped(n: object, *, fallback: int) -> int:
-    if n is None or isinstance(n, bool):
-        return fallback
-    try:
-        v = int(float(n))
-    except (TypeError, ValueError):
-        t = _scalar_to_str(n, "").strip()
-        if not t:
-            return fallback
-        try:
-            v = int(float(t))
-        except (TypeError, ValueError):
-            return fallback
-    return max(1, min(30, v))
+    from agentlib.tools.websearch import search_web_max_results_clamped
+
+    return search_web_max_results_clamped(n, fallback=fallback)
 
 
 def _search_web_effective_max_results(params: object) -> int:
-    """
-    max_results (or max / num_results / n / limit) in tool parameters;
-    if absent, use AGENT_SEARCH_WEB_MAX_RESULTS / 5.
-    """
-    p = params if isinstance(params, dict) else {}
-    d = _default_search_web_max_results()
-    for k in ("max_results", "max", "num_results", "n", "limit"):
-        if p.get(k) is not None:
-            return _search_web_max_results_clamped(p.get(k), fallback=d)
-    return d
+    from agentlib.tools.websearch import search_web_effective_max_results
+
+    return search_web_effective_max_results(params, settings=_SETTINGS_OBJ)
 
 
 def _merge_tool_param_aliases(tool: str, params: dict) -> dict:
@@ -1648,43 +1160,9 @@ def _ensure_tool_defaults(tool: str, params: dict, user_query: str) -> dict:
 
 
 def _enrich_search_query_for_present_day(query: str) -> str:
-    """
-    Bias web search toward the present when the query asks who holds a role but omits
-    words like 'current' (weak models often mirror the user literally and get stale hits).
-    """
-    if not _settings_get_bool(("ollama", "search_enrich"), True):
-        return query
-    q = (query or "").strip()
-    if not q:
-        return q
-    low = q.lower()
-    # Historical / ordinal / past-focused — do not rewrite
-    if re.search(
-        r"\b(who was|who were|first |second |third |fourth |fifth |"
-        r"\d{1,2}(st|nd|rd|th) |original |founding )\b",
-        low,
-    ):
-        return q
-    if re.search(r"\b(in 19[0-9]{2}|in 20[01][0-9])\b", low):
-        return q
-    # Already has a present-day or year hint
-    if re.search(r"\b(current|today|now|present|incumbent|latest)\b", low):
-        # If the user asked for "current/today/latest" but didn't anchor a year,
-        # append the system year to reduce stale hits and improve consistency.
-        if not re.search(r"\b20[0-9]{2}\b", low):
-            y = datetime.date.today().year
-            return f"{q.rstrip('.')} {y}"
-        return q
-    if re.search(r"\b20[2-9][0-9]\b", low):
-        return q
-    if re.search(r"\b(who is|who's|who are)\b", low) and re.search(
-        r"\b(president|prime minister|governor|mayor|senator|representative|"
-        r"ceo|chancellor|speaker|chief justice|king|queen)\b",
-        low,
-    ):
-        y = datetime.date.today().year
-        return f"{q.rstrip('.')} current {y}"
-    return q
+    from agentlib.tools.websearch import enrich_search_query_for_present_day
+
+    return enrich_search_query_for_present_day(query, settings=_SETTINGS_OBJ)
 
 
 def _merge_tool_arguments_delta(old_a, new_a):
@@ -3202,123 +2680,21 @@ def _wikipedia_top_page_extract(query: str) -> str:
     return f"Top result URL: {url}\nExtract: {page[:1200]}"
 
 def search_web(query, params: Optional[dict] = None) -> str:
-    """
-    Web search results + fallbacks.
+    from agentlib.tools.builtins import search_web as _impl
 
-    Optional tool parameters (in ``params``): max_results (or max, num_results, n, limit) —
-    number of DDG result rows to include, 1–30, default from env ``AGENT_SEARCH_WEB_MAX_RESULTS`` or 5.
-    """
-    query = _scalar_to_str(query, "")
-    query = _enrich_search_query_for_present_day(query)
-    mr = _search_web_effective_max_results(params or {})
-    backend = _search_web_backend()
-    parts = []
-
-    parts.append(_search_backend_banner_line())
-    rows_text = ""
-    got_rows = False
-    if backend == "searxng":
-        rows_text = _searxng_search(query, max_results=mr)
-        if rows_text:
-            parts.append("[Web results]\n" + rows_text)
-            got_rows = True
-        else:
-            parts.append(
-                f"[Note] SearXNG returned no usable results (instance: {_searxng_base_url()!r}). "
-                "Falling back to DuckDuckGo instant answers and Wikipedia."
-            )
-
-    if backend != "searxng" or not got_rows:
-        ia = _ddg_instant_answer(query)
-        if ia:
-            parts.append("[DuckDuckGo instant answer]\n" + ia)
-        page = _fetch_ddg_html(query)
-        blocked = "anomaly-modal" in page or "bots use DuckDuckGo" in page
-        rows = [] if blocked else _parse_ddg_html_results(page, max_results=mr)
-        if rows:
-            parts.append("[Web results]\n" + "\n".join(rows))
-            got_rows = True
-        elif blocked:
-            parts.append(
-                "[Note] DuckDuckGo returned a bot-check page instead of HTML results "
-                "(common for datacenter IPs). Instant answer and Wikipedia fallback still apply."
-            )
-    if not got_rows:
-        wiki = _wikipedia_opensearch(query, result_limit=mr)
-        if wiki:
-            parts.append("[Wikipedia search]\n" + wiki)
-        # If we still don't have real snippets, fetch the top Wikipedia page for an extract.
-        # This reduces the chance that a stale instant answer is the only signal.
-        wiki_extract = _wikipedia_top_page_extract(query)
-        if wiki_extract:
-            parts.append("[Wikipedia top result extract]\n" + wiki_extract)
-    if not parts:
-        return (
-            "No results found for this search. "
-            "Try search_web again with a shorter or alternate query, a product/site/organization name, "
-            "or a year (e.g. 2026) for time-sensitive topics. If the user provided a URL, use fetch_page on that URL."
-        )
-    return "\n\n".join(parts)
+    return _impl(query, params=params, settings=_SETTINGS_OBJ)
 
 
 def fetch_page(url):
-    url = _scalar_to_str(url, "").strip()
-    if not url:
-        return "Fetch error: empty url string."
-    if not re.match(r"^https?://", url, re.IGNORECASE):
-        return f"Fetch error: URL must start with http:// or https:// (got {url!r})."
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
-    last_exc: Optional[BaseException] = None
-    for attempt in (0, 1):
-        timeout = 12.0 if attempt == 0 else 22.0
-        try:
-            resp = requests.get(
-                url, headers=headers, timeout=timeout, allow_redirects=True
-            )
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-            last_exc = e
-            if attempt == 0:
-                time.sleep(0.35)
-                continue
-            return f"Fetch error: {e}"
-        except requests.exceptions.RequestException as e:
-            return f"Fetch error: {e}"
-        st = int(resp.status_code)
-        if st in (429, 500, 502, 503, 504) and attempt == 0:
-            time.sleep(0.4)
-            continue
-        if st >= 400:
-            return (
-                f"Fetch error: HTTP {st} for this URL. "
-                "If access is denied, try a different page (docs, help, or search_web for an official link). "
-                "Do not use run_command with curl."
-            )
-        final_url = resp.url
-        text = re.sub(r"<[^>]*>", " ", resp.text)
-        text = re.sub(r"\s+", " ", text).strip()
-        prefix = f"Fetched URL: {url}\nFinal URL: {final_url}\n\n"
-        if attempt == 1:
-            prefix = "[After automatic retry] " + prefix
-        return prefix + text[:5000]
-    if last_exc is not None:
-        return f"Fetch error: {last_exc}"
-    return f"Fetch error: could not retrieve {url!r} after retry."
+    from agentlib.tools.builtins import fetch_page as _impl
+
+    return _impl(url)
 
 
 def run_command(command):
-    command = _scalar_to_str(command, "")
-    try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=60
-        )
-        return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-    except Exception as e:
-        return f"Command error: {e}"
+    from agentlib.tools.builtins import run_command as _impl
+
+    return _impl(command)
 
 
 def _tool_fault_result(tool: str, exc: BaseException) -> str:
@@ -3332,234 +2708,51 @@ def _tool_fault_result(tool: str, exc: BaseException) -> str:
 
 
 def use_git(params) -> str:
-    """Vetted git operations via argument lists (no shell)."""
-    p = params if isinstance(params, dict) else {}
-    op = _scalar_to_str(p.get("op") or p.get("operation"), "").strip().lower()
-    wt = _scalar_to_str(
-        p.get("worktree") or p.get("cwd") or p.get("path") or "", ""
-    ).strip()
-    try:
-        cwd0 = os.path.abspath(os.path.expanduser(wt)) if wt else os.getcwd()
-    except Exception:
-        cwd0 = os.getcwd()
-    if not os.path.isdir(cwd0):
-        return f"use_git error: worktree is not a directory: {cwd0}"
+    from agentlib.tools.builtins import use_git as _impl
 
-    def _git_run(args: list, timeout: int = 180) -> str:
-        try:
-            r = subprocess.run(
-                ["git", *args],
-                cwd=cwd0,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            out = (r.stdout or "").rstrip()
-            err = (r.stderr or "").rstrip()
-            lines = []
-            if out:
-                lines.append(out)
-            if err:
-                lines.append("STDERR:\n" + err)
-            lines.append(f"(exit {r.returncode})")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"use_git error: {e}"
-
-    check = subprocess.run(
-        ["git", "-C", cwd0, "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
-    if check.returncode != 0:
-        return (
-            f"use_git error: not a git work tree (or git missing): {cwd0}\n"
-            f"{(check.stderr or check.stdout or '').strip()}"
-        )
-
-    def _repo_path(one: str) -> str:
-        s = str(one).strip()
-        if not s:
-            return s
-        p = os.path.expanduser(s)
-        if not os.path.isabs(p):
-            p = os.path.join(cwd0, p)
-        return os.path.normpath(p)
-
-    if not op:
-        return "use_git error: parameters.op is required (status, log, diff, add, commit, push, pull, branch)."
-    if op in ("status", "st"):
-        return _git_run(["status", "-sb"])
-    if op == "log":
-        n = _scalar_to_int(p.get("n") or p.get("lines"), 20)
-        if n is None or n < 1:
-            n = 20
-        n = min(int(n), 200)
-        return _git_run(["log", "--oneline", f"-n{n}"])
-    if op == "diff":
-        stg = p.get("staged")
-        if isinstance(stg, str):
-            stg = stg.strip().lower() in ("1", "true", "yes", "on")
-        return _git_run(["diff", "--staged"] if stg else ["diff"])
-    if op == "add":
-        paths = p.get("paths")
-        if paths is None and p.get("path"):
-            paths = [p.get("path")]
-        if isinstance(paths, str):
-            paths = [paths]
-        if not isinstance(paths, list) or not paths:
-            return "use_git error: add requires parameters.paths (non-empty list of path strings)."
-        args = ["add", "--"]
-        for one in paths:
-            args.append(_repo_path(str(one)))
-        return _git_run(args)
-    if op == "commit":
-        msg = _scalar_to_str(p.get("message") or p.get("m"), "").strip()
-        if not msg:
-            return "use_git error: commit requires parameters.message."
-        return _git_run(["commit", "-m", msg], timeout=120)
-    if op == "push":
-        rem = _scalar_to_str(p.get("remote"), "origin").strip() or "origin"
-        br = _scalar_to_str(p.get("branch"), "").strip()
-        args = ["push", rem]
-        if br:
-            args.append(br)
-        return _git_run(args, timeout=300)
-    if op == "pull":
-        rem = _scalar_to_str(p.get("remote"), "origin").strip() or "origin"
-        br = _scalar_to_str(p.get("branch"), "").strip()
-        args = ["pull", rem]
-        if br:
-            args.append(br)
-        return _git_run(args, timeout=300)
-    if op in ("branch", "branches"):
-        return _git_run(["branch", "-a", "-vv"])
-    return f"use_git error: unknown op {op!r} (try status, log, diff, add, commit, push, pull, branch)."
+    return _impl(params)
 
 
 def write_file(path, content):
-    path = _scalar_to_str(path, "")
-    content = _scalar_to_str(content, "")
-    if not path.strip():
-        return "Write error: path is empty."
-    if not content.strip():
-        return (
-            "Write error: parameters.content is required (non-empty string) with the full file body. "
-            "Do not call write_file with only a path; for a letter or document, put the entire text in content."
-        )
-    try:
-        with open(path, "w") as f:
-            f.write(content)
-        return f"File {path} written successfully."
-    except Exception as e:
-        return f"Write error: {e}"
+    from agentlib.tools.builtins import write_file as _impl
+
+    return _impl(path, content)
 
 
 def list_directory(path):
-    path = _scalar_to_str(path, "")
-    try:
-        entries = os.listdir(path)
-        return json.dumps(entries)
-    except Exception as e:
-        return f"List dir error: {e}"
+    from agentlib.tools.builtins import list_directory as _impl
+
+    return _impl(path)
 
 
 def read_file(path):
-    path = _scalar_to_str(path, "")
-    try:
-        with open(path, "r") as f:
-            return f.read()
-    except Exception as e:
-        return f"Read error: {e}"
+    from agentlib.tools.builtins import read_file as _impl
+
+    return _impl(path)
 
 
 def download_file(url, path):
-    url = _scalar_to_str(url, "")
-    path = _scalar_to_str(path, "")
-    try:
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-        with open(path, "wb") as f:
-            f.write(resp.content)
-        return f"File downloaded to {path}."
-    except Exception as e:
-        return f"Download error: {e}"
+    from agentlib.tools.builtins import download_file as _impl
+
+    return _impl(url, path)
 
 
 def tail_file(path, lines=20):
-    path = _scalar_to_str(path, "")
-    lines = _scalar_to_int(lines, 20)
-    if lines < 1:
-        lines = 20
-    try:
-        with open(path, "r") as f:
-            content = f.readlines()[-lines:]
-        return "".join(content)
-    except Exception as e:
-        return f"Tail error: {e}"
+    from agentlib.tools.builtins import tail_file as _impl
+
+    return _impl(path, lines=lines)
 
 
 def replace_text(path, pattern, replacement, replace_all=True):
-    path = _scalar_to_str(path, "")
-    pattern = _scalar_to_str(pattern, "")
-    replacement = _scalar_to_str(replacement, "")
-    if replace_all is None:
-        replace_all = True
-    if isinstance(replace_all, str):
-        replace_all = replace_all.strip().lower() in ("1", "true", "yes", "on")
-    try:
-        with open(path, "r") as f:
-            text = f.read()
-        flags = 0
-        if not replace_all:
-            flags = 1
-        new_text = re.sub(pattern, replacement, text, flags=flags)
-        with open(path, "w") as f:
-            f.write(new_text)
-        return f"Replaced text in {path}."
-    except Exception as e:
-        return f"Replace error: {e}"
+    from agentlib.tools.builtins import replace_text as _impl
+
+    return _impl(path, pattern, replacement, replace_all=replace_all)
 
 
 def call_python(code, globals=None):
-    code = _scalar_to_str(code, "")
-    if not code.strip():
-        return "Exec error: empty code string."
-    try:
-        compiled = compile(code, "<call_python>", "exec")
-    except SyntaxError as e:
-        return (
-            "Exec error: not valid Python source (call_python only runs Python, not shell scripts or prose). "
-            f"{e.msg} at line {e.lineno}. For letters, essays, or files use write_file, "
-            'or answer with {"action":"answer","answer":"..."}.'
-        )
-    except Exception as e:
-        return f"Exec error: could not compile code: {e}"
-    g = dict(globals) if isinstance(globals, dict) else {}
-    local_vars: dict = {}
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf):
-            exec(compiled, g, local_vars)
-    except Exception as e:
-        out = buf.getvalue()
-        prefix = f"STDOUT (partial, before error):\n{out.rstrip()}\n\n" if out.strip() else ""
-        return f"{prefix}Exec error: {e}"
-    out = buf.getvalue().rstrip()
-    # Names bound by exec; omit dunder keys from the summary (e.g. __builtins__ in edge cases).
-    to_dump = {
-        k: v
-        for k, v in local_vars.items()
-        if not (isinstance(k, str) and k.startswith("__"))
-    }
-    try:
-        j = json.dumps(to_dump, default=str, ensure_ascii=False, indent=2, sort_keys=True)
-    except Exception as e:
-        j = f"(error encoding locals as JSON: {e}; keys: {list(to_dump.keys())!r})"
-    if not out:
-        return j
-    return f"STDOUT:\n{out}\n\n--- locals (JSON) ---\n{j}"
+    from agentlib.tools.builtins import call_python as _impl
+
+    return _impl(code, globals=globals)
 
 
 def clean_json_response(resp_text):
@@ -4325,8 +3518,12 @@ def _interactive_turn_user_message(
     skill_suffix: Optional[str] = None,
 ) -> str:
     si = _effective_system_instruction_text(system_instruction_override)
+    from agentlib.skills.prompting import apply_skill_prompt_overlay
+
+    si = apply_skill_prompt_overlay(si, skill_id=None, skills_map=None)  # no-op for API symmetry
     suff = (skill_suffix or "").strip()
     if suff:
+        # Preserve existing call-site behavior: skill_suffix is already the resolved prompt text.
         si = si + "\n\n--- Active skill ---\n" + suff
     block = (
         f"{si}\n\n"
