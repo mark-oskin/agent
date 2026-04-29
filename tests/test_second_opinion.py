@@ -109,8 +109,6 @@ def test_second_opinion_cloud_invokes_openai(monkeypatch):
         called.append(messages)
         return "Cloud reviewer: add caveat on edge case."
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-placeholder")
-
     fin = json.dumps(
         {
             "action": "answer",
@@ -166,6 +164,11 @@ def _run_with_seq(
         return responses[idx]
 
     d = reload_agent(monkeypatch, call_ollama_chat=fake_chat)
+    # Reset module settings for deterministic behavior.
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    # Provide a placeholder API key when cloud-ai is enabled so hosted reviewer paths are "ready".
+    if cloud:
+        d._settings_set(("openai", "api_key"), "sk-test-placeholder")
     monkeypatch.setattr(
         d,
         "_route_requires_websearch",

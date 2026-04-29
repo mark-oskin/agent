@@ -138,12 +138,10 @@ def test_enrich_who_is_president_appends_current_year(monkeypatch):
 
 def test_enrich_respects_ollama_search_enrich_off(monkeypatch):
     d = _d()
-    monkeypatch.setenv("OLLAMA_SEARCH_ENRICH", "0")
-    try:
-        q = "Who is the president of France?"
-        assert d._enrich_search_query_for_present_day(q) == q
-    finally:
-        monkeypatch.delenv("OLLAMA_SEARCH_ENRICH", raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("ollama", "search_enrich"), False)
+    q = "Who is the president of France?"
+    assert d._enrich_search_query_for_present_day(q) == q
 
 
 # --- CLI usage ---
@@ -166,7 +164,7 @@ def test_main_interactive_mode_exits_on_eof(monkeypatch):
 
 def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
     d = _d()
-    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
     ctx_file = tmp_path / "ctx.json"
     ctx_file.write_text(
         json.dumps([{"role": "user", "content": "hi from file"}]),
@@ -197,7 +195,7 @@ def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
             save_context_path=None,
         )
     out = buf.getvalue()
-    assert os.environ.get("OLLAMA_MODEL") == "repl-test-model"
+    assert d._settings_get_str(("ollama", "model"), "") == "repl-test-model"
     assert "second_opinion enabled" in out
     assert "second_opinion disabled" in out
     assert "Loaded 1 message" in out
@@ -239,6 +237,7 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
     d = _d()
     pref_path = tmp_path / ".agent.json"
     monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(pref_path))
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
     payload = d._build_agent_prefs_payload(
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=True,
@@ -266,34 +265,35 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
     assert st["context_manager"]["enabled"] is False
     assert st["context_manager"]["tokens"] == 1234
     data = json.loads(pref_path.read_text(encoding="utf-8"))
-    assert data["version"] == 3
+    assert data["version"] == 4
     assert data.get("system_prompt") is None
     assert data.get("system_prompt_path") is None
     assert data.get("verbose") == 1
 
 
-def test_prefs_ollama_openai_agent_blobs_apply_when_env_unset(monkeypatch):
+def test_prefs_ollama_openai_agent_blobs_apply_to_settings(monkeypatch):
     d = _d()
-    for k in ("OLLAMA_HOST", "OPENAI_BASE_URL", "AGENT_PROGRESS"):
-        monkeypatch.delenv(k, raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
     prefs = {
-        "version": 3,
+        "version": 4,
         "ollama": {"HOST": "http://o.test:11434"},
         "openai": {"BASE_URL": "https://api.x/v1"},
         "agent": {"PROGRESS": "0"},
     }
     d._session_defaults_from_prefs(prefs)
-    assert os.environ.get("OLLAMA_HOST") == "http://o.test:11434"
-    assert os.environ.get("OPENAI_BASE_URL") == "https://api.x/v1"
-    assert os.environ.get("AGENT_PROGRESS") == "0"
+    assert d._settings_get_str(("ollama", "host"), "") == "http://o.test:11434"
+    assert d._settings_get_str(("openai", "base_url"), "") == "https://api.x/v1"
+    assert d._settings_get_bool(("agent", "progress"), True) is False
 
 
-def test_prefs_stored_env_does_not_override_preexisting_process_env(monkeypatch):
+def test_prefs_stored_env_overrides_existing_settings(monkeypatch):
     d = _d()
-    monkeypatch.setenv("OLLAMA_HOST", "http://from-shell:1")
-    prefs = {"version": 3, "ollama": {"HOST": "http://from-file:2"}}
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("ollama", "host"), "http://from-shell:1")
+    prefs = {"version": 4, "ollama": {"HOST": "http://from-file:2"}}
     d._session_defaults_from_prefs(prefs)
-    assert os.environ.get("OLLAMA_HOST") == "http://from-shell:1"
+    # Prefs apply (no shell env precedence anymore).
+    assert d._settings_get_str(("ollama", "host"), "") == "http://from-file:2"
 
 
 def test_cli_config_overrides_default_agent_json_path(tmp_path, monkeypatch):
@@ -374,11 +374,12 @@ def test_interactive_settings_ollama_show_renders(tmp_path, monkeypatch):
             prefs_loaded=False,
         )
     out = buf.getvalue()
-    assert "OLLAMA" in out and "HOST" in out
+    assert '"host"' in out and '"model"' in out
 
 
 def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch):
     d = _d()
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
     monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(tmp_path / "x.json"))
     lines = [
         "/settings thinking show",
@@ -406,8 +407,8 @@ def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch
         )
     out = buf.getvalue()
     assert "thinking:" in out
-    assert os.environ.get("AGENT_THINKING_LEVEL") in ("high", "")
-    assert os.environ.get("AGENT_STREAM_THINKING") in ("0", "1")
+    assert d._settings_get_str(("agent", "thinking_level"), "") in ("high", "")
+    assert isinstance(d._settings_get_bool(("agent", "stream_thinking"), False), bool)
 
 
 def test_interactive_settings_tools_lists_toolsets_and_describe(tmp_path, monkeypatch):
@@ -462,7 +463,7 @@ def test_interactive_settings_save_command(tmp_path, monkeypatch):
         )
     assert "Saved settings" in buf.getvalue()
     data = json.loads(pref_path.read_text(encoding="utf-8"))
-    assert data["version"] == 3
+    assert data["version"] == 4
     assert data["second_opinion_enabled"] is True
 
 
@@ -633,9 +634,8 @@ def test_route_requires_websearch_skips_when_search_web_disabled(monkeypatch):
 
 def test_interactive_settings_llm_profiles(monkeypatch):
     d = _d()
-    monkeypatch.setenv("FAKE_KEY_ENV", "secret")
     lines = [
-        "/settings primary llm hosted https://api.example/v1 fake-model FAKE_KEY_ENV",
+        "/settings primary llm hosted https://api.example/v1 fake-model sk-test",
         "/settings second_opinion llm ollama tinyllama:latest",
         "/settings second_opinion llm hosted https://review.example/v1 rev-model",
         "/settings primary llm ollama",
@@ -659,7 +659,7 @@ def test_interactive_settings_llm_profiles(monkeypatch):
     assert "https://api.example/v1" in out
     assert "https://review.example/v1" in out
     assert "tinyllama:latest" in out
-    assert "Primary LLM: local Ollama (uses OLLAMA_MODEL from the environment)." in out
+    assert "Primary LLM: local Ollama." in out
 
 
 def test_interactive_use_skill_unknown(monkeypatch):
@@ -784,7 +784,8 @@ def test_parse_while_repl_tokens_and_judge_bit():
 
 def test_interactive_show_model_and_reviewer(monkeypatch):
     d = _d()
-    monkeypatch.setenv("OLLAMA_MODEL", "custom-llm:latest")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("ollama", "model"), "custom-llm:latest")
     lines = ["/show model", "/show reviewer", "/quit"]
     it = iter(lines)
 

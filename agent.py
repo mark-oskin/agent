@@ -27,13 +27,118 @@ warnings.filterwarnings(
 
 import requests
 
+#
+# Settings
+# --------
+# This codebase intentionally does NOT read configuration from environment variables.
+# All settings come from ~/.agent.json (prefs) and/or CLI flags (process-local).
+#
+
+_DEFAULT_SETTINGS = {
+    "ollama": {
+        "host": "http://localhost:11434",
+        "model": "gemma4:e4b",
+        "second_opinion_model": "llama3.2:latest",
+        "debug": False,
+        "tool_output_max": 14000,
+        "search_enrich": True,
+    },
+    "openai": {
+        "api_key": "",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "cloud_model": "gpt-4o-mini",
+    },
+    "agent": {
+        "quiet": False,
+        "progress": True,
+        "prompt_templates_dir": "",
+        "skills_dir": "",
+        "tools_dir": "",
+        "repl_history": "",
+        "repl_input_max_bytes": 0,  # 0 means use built-in default
+        "repl_buffered_line": False,
+        "thinking": False,
+        "thinking_level": "",
+        "stream_thinking": False,
+        "search_web_max_results": 5,
+        "search_web_backend": "ddg",
+        "searxng_url": "https://searx.party",
+        "auto_confirm_tool_retry": False,
+        "context_tokens": 0,
+        "hosted_context_tokens": 0,
+        "ollama_context_tokens": 0,
+        "disable_context_manager": False,
+        "context_trigger_frac": 0.75,
+        "context_target_frac": 0.55,
+        "context_keep_tail_messages": 12,
+        "router_transcript_max_messages": 80,
+    },
+}
+
+# Module-global settings state (defaults until main()/AgentSession.from_prefs applies prefs/CLI).
+_SETTINGS: dict = json.loads(json.dumps(_DEFAULT_SETTINGS))
+
+
+def _settings_get(path: Tuple[str, str]):
+    grp, key = path
+    g = _SETTINGS.get(grp) if isinstance(_SETTINGS, dict) else None
+    if not isinstance(g, dict):
+        return None
+    return g.get(key)
+
+
+def _settings_get_str(path: Tuple[str, str], default: str = "") -> str:
+    v = _settings_get(path)
+    s = str(v) if v is not None else ""
+    s = s.strip()
+    return s if s else default
+
+
+def _settings_get_bool(path: Tuple[str, str], default: bool = False) -> bool:
+    v = _settings_get(path)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "y", "on")
+    return default
+
+
+def _settings_get_int(path: Tuple[str, str], default: int = 0) -> int:
+    v = _settings_get(path)
+    try:
+        if v is None:
+            return int(default)
+        return int(str(v).strip(), 10)
+    except Exception:
+        return int(default)
+
+
+def _settings_get_float(path: Tuple[str, str], default: float = 0.0) -> float:
+    v = _settings_get(path)
+    try:
+        if v is None:
+            return float(default)
+        return float(str(v).strip())
+    except Exception:
+        return float(default)
+
+
+def _settings_set(path: Tuple[str, str], value) -> None:
+    grp, key = path
+    if grp not in _SETTINGS or not isinstance(_SETTINGS.get(grp), dict):
+        _SETTINGS[grp] = {}
+    _SETTINGS[grp][key] = value
+
 
 def _ollama_base_url():
-    return os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    return _settings_get_str(("ollama", "host"), "http://localhost:11434").rstrip("/")
 
 
 def _ollama_model():
-    return os.environ.get("OLLAMA_MODEL", "gemma4:e4b")
+    return _settings_get_str(("ollama", "model"), "gemma4:e4b")
 
 
 @dataclass
@@ -43,7 +148,7 @@ class LlmProfile:
     backend: str  # "ollama" | "hosted"
     base_url: str = ""
     model: str = ""
-    api_key_env: str = "OPENAI_API_KEY"
+    api_key: str = ""
 
 
 def default_primary_llm_profile() -> LlmProfile:
@@ -52,31 +157,33 @@ def default_primary_llm_profile() -> LlmProfile:
 
 def _apply_cli_primary_model(name: str, profile: LlmProfile) -> LlmProfile:
     """
-    --model override for this process: for local Ollama, set OLLAMA_MODEL; for hosted primary,
-    set LlmProfile.model.
+    --model override for this process: for local Ollama, set the session/prefs model; for hosted
+    primary, set LlmProfile.model.
     """
     s = (name or "").strip()
     if not s:
         return profile
     if profile.backend == "hosted":
         return replace(profile, model=s)
-    os.environ["OLLAMA_MODEL"] = s
+    _settings_set(("ollama", "model"), s)
     return profile
 
 
 def _read_api_key(env_name: str) -> str:
-    return (os.environ.get(env_name) or "").strip()
+    # Environment variables are intentionally not used for settings; keep this helper name for
+    # legacy call sites but interpret the argument as the key itself.
+    return (env_name or "").strip()
 
 
 def _hosted_review_ready(
     cloud_ai_enabled: bool, reviewer_hosted_profile: Optional[LlmProfile]
 ) -> bool:
-    if cloud_ai_enabled and _openai_api_key():
+    if cloud_ai_enabled and _settings_get_str(("openai", "api_key"), ""):
         return True
     if (
         reviewer_hosted_profile is not None
         and reviewer_hosted_profile.backend == "hosted"
-        and _read_api_key(reviewer_hosted_profile.api_key_env)
+        and (reviewer_hosted_profile.api_key or "").strip()
     ):
         return True
     return False
@@ -85,7 +192,8 @@ def _hosted_review_ready(
 def _describe_llm_profile_short(p: LlmProfile) -> str:
     if p.backend != "hosted":
         return "ollama"
-    return f"hosted {p.model!r} @ {p.base_url!r} (key: {p.api_key_env})"
+    key = "set" if (p.api_key or "").strip() else "missing"
+    return f"hosted {p.model!r} @ {p.base_url!r} (api_key: {key})"
 
 
 def _format_session_primary_llm_line(p: LlmProfile) -> str:
@@ -594,10 +702,9 @@ def _agent_progress_enabled() -> bool:
     Short progress lines to stderr for long multi-step or tool-heavy work at verbose=0.
     Disable with AGENT_PROGRESS=0 or AGENT_QUIET=1.
     """
-    if (os.environ.get("AGENT_QUIET") or "").strip().lower() in ("1", "true", "yes", "on"):
+    if _settings_get_bool(("agent", "quiet"), False):
         return False
-    p = (os.environ.get("AGENT_PROGRESS") or "1").strip().lower()
-    return p not in ("0", "false", "no", "off")
+    return _settings_get_bool(("agent", "progress"), True)
 
 
 def _agent_progress(msg: str) -> None:
@@ -653,218 +760,7 @@ def _tool_progress_message(tool: str, params: dict) -> str:
     return f"Tool: {t}"
 
 
-_AGENT_PREFS_VERSION = 3
-
-# Ollama / OpenAI / process settings: stored in ~/.agent.json as
-#   "ollama": {"HOST": "…", "MODEL": "…"}  (values use short suffixes or full OLLAMA_* names)
-#   "openai": {"API_KEY": "…", "BASE_URL": "…", …}
-#   "agent": {"PROGRESS": "1", "QUIET": "0", …}
-# On load, a key is written to os.environ only if it is not already set (so exported shell
-# variables win for a one-off). Use /settings ollama|openai|agent show|set|unset to change.
-
-_OLLAMA_FILE_ENV_KEYS: Tuple[str, ...] = (
-    "OLLAMA_HOST",
-    "OLLAMA_MODEL",
-    "OLLAMA_SECOND_OPINION_MODEL",
-    "OLLAMA_DEBUG",
-    "OLLAMA_TOOL_OUTPUT_MAX",
-    "OLLAMA_SEARCH_ENRICH",
-)
-_OPENAI_FILE_ENV_KEYS: Tuple[str, ...] = (
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL",
-    "OPENAI_CLOUD_MODEL",
-    "OPENAI_MODEL",
-)
-_AGENT_FILE_ENV_KEYS: Tuple[str, ...] = (
-    "AGENT_QUIET",
-    "AGENT_PROGRESS",
-    "AGENT_PROMPT_TEMPLATES_DIR",
-    "AGENT_SKILLS_DIR",
-    "AGENT_TOOLS_DIR",
-    "AGENT_REPL_HISTORY",
-    "AGENT_REPL_INPUT_MAX_BYTES",
-    "AGENT_REPL_BUFFERED_LINE",
-    "AGENT_THINKING",
-    "AGENT_THINKING_LEVEL",
-    "AGENT_SHOW_THINKING",
-    "AGENT_STREAM_THINKING",
-    "AGENT_SEARCH_WEB_MAX_RESULTS",
-    "AGENT_SEARCH_WEB_BACKEND",
-    "AGENT_SEARXNG_URL",
-    "AGENT_AUTO_CONFIRM_TOOL_RETRY",
-    "AGENT_CONTEXT_TOKENS",
-    "AGENT_HOSTED_CONTEXT_TOKENS",
-    "AGENT_OLLAMA_CONTEXT_TOKENS",
-    "AGENT_DISABLE_CONTEXT_MANAGER",
-    "AGENT_CONTEXT_TRIGGER_FRAC",
-    "AGENT_CONTEXT_TARGET_FRAC",
-    "AGENT_CONTEXT_KEEP_TAIL_MESSAGES",
-    "AGENT_ROUTER_TRANSCRIPT_MAX_MESSAGES",
-)
-
-
-def _file_env_block_prefix(kind: str) -> str:
-    k = (kind or "").strip().lower()
-    if k == "ollama":
-        return "OLLAMA_"
-    if k == "openai":
-        return "OPENAI_"
-    if k == "agent":
-        return "AGENT_"
-    raise ValueError("kind must be ollama, openai, or agent")
-
-
-def _normalize_file_env_name(raw: str, kind: str) -> str:
-    """Map HOST, ollama_host, or OLLAMA_HOST to OLLAMA_HOST when kind is ollama."""
-    pfx = _file_env_block_prefix(kind)
-    s = (raw or "").strip()
-    if not s:
-        raise ValueError("empty key")
-    u = s.upper().replace("-", "_")
-    if u.startswith(pfx):
-        return u
-    return pfx + u
-
-
-def _short_env_key_from_full(full: str, kind: str) -> str:
-    pfx = _file_env_block_prefix(kind)
-    n = (full or "").strip().upper()
-    if n.startswith(pfx):
-        return n[len(pfx) :]
-    return n
-
-
-def _iter_stored_file_env_map(prefs: dict, group: str) -> dict:
-    out: dict = {}
-    try:
-        pfx = _file_env_block_prefix(group)
-    except ValueError:
-        return out
-    block = prefs.get(group)
-    if not isinstance(block, dict):
-        return out
-    for sk, sv in block.items():
-        if sv is None:
-            continue
-        t = (str(sk) if sk is not None else "").strip()
-        if not t:
-            continue
-        try:
-            full = _normalize_file_env_name(t, group)
-        except ValueError:
-            continue
-        if not str(full).upper().startswith(pfx):
-            continue
-        svs = str(sv).strip() if not isinstance(sv, bool) else str(int(sv))
-        if not svs:
-            continue
-        out[full] = svs
-    return out
-
-
-def _apply_stored_env_from_prefs(prefs: Optional[dict]) -> None:
-    """
-    Load ollama / openai / agent blobs and legacy ollama_model fields into the process
-    (without overriding keys already in os.environ).
-    """
-    if not isinstance(prefs, dict):
-        return
-    for grp in ("ollama", "openai", "agent"):
-        m = _iter_stored_file_env_map(prefs, grp)
-        for k, v in m.items():
-            if k not in os.environ:
-                os.environ[k] = v
-    if "OLLAMA_MODEL" not in os.environ:
-        om = prefs.get("ollama_model")
-        if isinstance(om, str) and om.strip():
-            os.environ["OLLAMA_MODEL"] = om.strip()
-    if "OLLAMA_SECOND_OPINION_MODEL" not in os.environ:
-        som = prefs.get("ollama_second_opinion_model")
-        if isinstance(som, str) and som.strip():
-            os.environ["OLLAMA_SECOND_OPINION_MODEL"] = som.strip()
-
-
-def _file_env_block_from_process(known_keys: Tuple[str, ...], kind: str) -> dict:
-    """Build short-key → value dict for all known keys present in the process environment."""
-    out: dict = {}
-    for full in known_keys:
-        if full in os.environ:
-            out[_short_env_key_from_full(full, kind)] = os.environ[full]
-    return out
-
-
-def _file_env_key_help_lines(kind: str) -> str:
-    try:
-        pfx = _file_env_block_prefix(kind)
-    except ValueError:
-        return ""
-    if kind == "ollama":
-        keys = _OLLAMA_FILE_ENV_KEYS
-    elif kind == "openai":
-        keys = _OPENAI_FILE_ENV_KEYS
-    else:
-        keys = _AGENT_FILE_ENV_KEYS
-    # Short descriptions for keys to make /settings <group> keys self-explanatory.
-    desc: dict[str, str] = {
-        # Ollama
-        "OLLAMA_HOST": "Base URL for Ollama HTTP API (default http://localhost:11434)",
-        "OLLAMA_MODEL": "Primary local model tag",
-        "OLLAMA_SECOND_OPINION_MODEL": "Reviewer model tag for second opinion",
-        "OLLAMA_DEBUG": "1 enables extra debug logging for Ollama HTTP",
-        "OLLAMA_TOOL_OUTPUT_MAX": "Max chars of tool output forwarded to the model",
-        "OLLAMA_SEARCH_ENRICH": "0 disables present-day enrichment for some search queries",
-        # OpenAI / hosted
-        "OPENAI_API_KEY": "API key for hosted OpenAI-compatible backends",
-        "OPENAI_BASE_URL": "Base URL for OpenAI-compatible API (e.g. https://api.openai.com/v1)",
-        "OPENAI_CLOUD_MODEL": "Cloud reviewer model id (when cloud-ai enabled)",
-        "OPENAI_MODEL": "Default hosted model id (hosted primary)",
-        # Agent
-        "AGENT_QUIET": "1 disables progress heartbeats",
-        "AGENT_PROGRESS": "0 disables progress heartbeats (default 1)",
-        "AGENT_PROMPT_TEMPLATES_DIR": "Override prompt_templates directory path",
-        "AGENT_SKILLS_DIR": "Override skills directory path",
-        "AGENT_TOOLS_DIR": "Override tools (plugin toolsets) directory path",
-        "AGENT_AUTO_CONFIRM_TOOL_RETRY": "1 auto-confirms suggested tool retry prompts",
-        "AGENT_SEARCH_WEB_MAX_RESULTS": "1–30 max web results to include (default 5)",
-        "AGENT_SEARCH_WEB_BACKEND": "Web search backend: ddg (default) or searxng",
-        "AGENT_SEARXNG_URL": "SearXNG base URL (default https://searx.party)",
-        "AGENT_THINKING": "1 enables thinking (if model supports it); 0 disables",
-        "AGENT_THINKING_LEVEL": "low|medium|high (optional hint to model)",
-        "AGENT_STREAM_THINKING": "1 streams thinking; 0 disables (legacy: AGENT_SHOW_THINKING)",
-        "AGENT_SHOW_THINKING": "Legacy alias for AGENT_STREAM_THINKING",
-        "AGENT_DISABLE_CONTEXT_MANAGER": "1 disables context auto-compaction",
-        "AGENT_ROUTER_TRANSCRIPT_MAX_MESSAGES": "Max messages router sees for web-search decision (default 80)",
-    }
-    lines = ["Keys:"]
-    for k in keys:
-        short = _short_env_key_from_full(k, kind)
-        full = pfx + short
-        d = desc.get(full, "")
-        if d:
-            lines.append(f"  {short:28} ({full})\n      {d}")
-        else:
-            lines.append(f"  {short:28} ({full})")
-    return "\n".join(lines)
-
-
-def _file_env_set_process(kind: str, raw_key: str, value: str) -> str:
-    full = _normalize_file_env_name(raw_key, kind)
-    pfx = _file_env_block_prefix(kind)
-    if not full.upper().startswith(pfx):
-        raise ValueError(f"key must be for {kind} (prefix {pfx!r})")
-    os.environ[full] = value
-    return full
-
-
-def _file_env_unset_process(kind: str, raw_key: str) -> str:
-    full = _normalize_file_env_name(raw_key, kind)
-    pfx = _file_env_block_prefix(kind)
-    if not full.upper().startswith(pfx):
-        raise ValueError(f"key must be for {kind} (prefix {pfx!r})")
-    if full in os.environ:
-        del os.environ[full]
-    return full
+_AGENT_PREFS_VERSION = 4
 
 
 def _agent_prefs_path() -> str:
@@ -939,27 +835,18 @@ _register_tool_aliases()
 
 
 def _resolved_prompt_templates_dir(prefs: Optional[dict] = None) -> str:
-    p = (os.environ.get("AGENT_PROMPT_TEMPLATES_DIR") or "").strip()
-    if p:
-        return os.path.abspath(os.path.expanduser(p))
     if prefs and isinstance(prefs, dict) and (prefs.get("prompt_templates_dir") or "").strip():
         return os.path.abspath(os.path.expanduser(str(prefs["prompt_templates_dir"]).strip()))
     return _default_prompt_templates_dir()
 
 
 def _resolved_skills_dir(prefs: Optional[dict] = None) -> str:
-    p = (os.environ.get("AGENT_SKILLS_DIR") or "").strip()
-    if p:
-        return os.path.abspath(os.path.expanduser(p))
     if prefs and isinstance(prefs, dict) and (prefs.get("skills_dir") or "").strip():
         return os.path.abspath(os.path.expanduser(str(prefs["skills_dir"]).strip()))
     return _default_skills_dir()
 
 
 def _resolved_tools_dir(prefs: Optional[dict] = None) -> str:
-    p = (os.environ.get("AGENT_TOOLS_DIR") or "").strip()
-    if p:
-        return os.path.abspath(os.path.expanduser(p))
     if prefs and isinstance(prefs, dict) and (prefs.get("tools_dir") or "").strip():
         return os.path.abspath(os.path.expanduser(str(prefs["tools_dir"]).strip()))
     return _default_tools_dir()
@@ -1373,7 +1260,7 @@ _REPL_READLINE_INSTALLED = False
 
 
 def _repl_history_path() -> str:
-    override = (os.environ.get("AGENT_REPL_HISTORY") or "").strip()
+    override = _settings_get_str(("agent", "repl_history"), "")
     if override:
         return os.path.expanduser(override)
     return os.path.join(os.path.expanduser("~"), ".agent_repl_history")
@@ -1382,17 +1269,13 @@ def _repl_history_path() -> str:
 def _agent_stream_thinking_enabled() -> bool:
     """
     Whether to stream `message.thinking` chunks to the user during Ollama streaming.
-    Prefer AGENT_STREAM_THINKING; keep AGENT_SHOW_THINKING as a backward-compatible alias.
+    Controlled via prefs/CLI (agent.stream_thinking).
     """
-    raw = (os.environ.get("AGENT_STREAM_THINKING") or "").strip()
-    if not raw:
-        raw = (os.environ.get("AGENT_SHOW_THINKING") or "").strip()
-    v = raw.lower()
-    return v in ("1", "true", "yes", "y", "on")
+    return _settings_get_bool(("agent", "stream_thinking"), False)
 
 
 def _agent_thinking_level() -> Optional[str]:
-    v = (os.environ.get("AGENT_THINKING_LEVEL") or "").strip().lower()
+    v = _settings_get_str(("agent", "thinking_level"), "").strip().lower()
     if v in ("low", "medium", "high"):
         return v
     return None
@@ -1401,16 +1284,8 @@ def _agent_thinking_level() -> Optional[str]:
 def _agent_thinking_enabled_default_false() -> bool:
     """
     Default behavior: thinking OFF unless explicitly enabled.
-    Set AGENT_THINKING=1|on|true to enable; 0|off|false to disable.
     """
-    raw = (os.environ.get("AGENT_THINKING") or "").strip().lower()
-    if not raw:
-        return False
-    if raw in ("0", "false", "no", "n", "off"):
-        return False
-    if raw in ("1", "true", "yes", "y", "on"):
-        return True
-    return False
+    return _settings_get_bool(("agent", "thinking"), False)
 
 
 def _ollama_request_think_value() -> object:
@@ -1433,117 +1308,6 @@ def _ollama_request_think_value() -> object:
     if mod.startswith("gpt-oss"):
         return "medium"
     return True
-
-
-def _file_env_default_value_display(full: str) -> str:
-    """
-    String shown for a process env name when that variable is not set in os.environ
-    (matches the code's implied default for each key).
-    """
-    if full == "OLLAMA_HOST":
-        return "http://localhost:11434"
-    if full == "OLLAMA_MODEL":
-        return "gemma4:e4b"
-    if full == "OLLAMA_SECOND_OPINION_MODEL":
-        return "llama3.2:latest"
-    if full == "OLLAMA_DEBUG":
-        return ""
-    if full == "OLLAMA_TOOL_OUTPUT_MAX":
-        return "14000"
-    if full == "OLLAMA_SEARCH_ENRICH":
-        return "1"
-    if full == "OPENAI_API_KEY":
-        return ""
-    if full == "OPENAI_BASE_URL":
-        return "https://api.openai.com/v1"
-    if full in ("OPENAI_CLOUD_MODEL", "OPENAI_MODEL"):
-        return "gpt-4o-mini"
-    if full == "AGENT_QUIET":
-        return "0"
-    if full == "AGENT_PROGRESS":
-        return "1"
-    if full == "AGENT_PROMPT_TEMPLATES_DIR":
-        return _default_prompt_templates_dir()
-    if full == "AGENT_SKILLS_DIR":
-        return _default_skills_dir()
-    if full == "AGENT_TOOLS_DIR":
-        return _default_tools_dir()
-    if full == "AGENT_REPL_HISTORY":
-        return os.path.join(os.path.expanduser("~"), ".agent_repl_history")
-    if full == "AGENT_REPL_INPUT_MAX_BYTES":
-        return "131072"  # same as _REPL_INPUT_MAX_DEFAULT (defined below)
-    if full == "AGENT_REPL_BUFFERED_LINE":
-        return "0"
-    if full == "AGENT_THINKING":
-        return "0"
-    if full == "AGENT_THINKING_LEVEL":
-        return ""
-    if full == "AGENT_SHOW_THINKING":
-        return "0"
-    if full == "AGENT_STREAM_THINKING":
-        return "0"
-    if full == "AGENT_SEARCH_WEB_MAX_RESULTS":
-        return "5"
-    if full == "AGENT_SEARCH_WEB_BACKEND":
-        return "ddg"
-    if full == "AGENT_SEARXNG_URL":
-        return "https://searx.party"
-    if full == "AGENT_AUTO_CONFIRM_TOOL_RETRY":
-        return "0"
-    if full == "AGENT_CONTEXT_TOKENS":
-        return "0"
-    if full in ("AGENT_HOSTED_CONTEXT_TOKENS", "AGENT_OLLAMA_CONTEXT_TOKENS"):
-        return "131072"
-    if full == "AGENT_DISABLE_CONTEXT_MANAGER":
-        return "0"
-    if full == "AGENT_CONTEXT_TRIGGER_FRAC":
-        return "0.75"
-    if full == "AGENT_CONTEXT_TARGET_FRAC":
-        return "0.55"
-    if full == "AGENT_CONTEXT_KEEP_TAIL_MESSAGES":
-        return "12"
-    if full == "AGENT_ROUTER_TRANSCRIPT_MAX_MESSAGES":
-        return "80"
-    return ""
-
-
-def _file_env_effective_value_line(full: str) -> tuple[str, bool]:
-    """
-    (display_value, is_builtin_default) — second is True when full is not in os.environ
-    and the first string is the built-in default, not a saved value.
-    """
-    if full in os.environ:
-        v = os.environ[full]
-    else:
-        v = _file_env_default_value_display(full)
-    vdisp = (v if v is not None else "").replace("\n", " ")
-    if len(vdisp) > 120:
-        vdisp = vdisp[:120] + "…"
-    is_default = full not in os.environ
-    return (vdisp, is_default)
-
-
-def _format_file_env_group_show(kind: str) -> str:
-    try:
-        pfx = _file_env_block_prefix(kind)
-    except ValueError:
-        return ""
-    if kind == "ollama":
-        keys = _OLLAMA_FILE_ENV_KEYS
-    elif kind == "openai":
-        keys = _OPENAI_FILE_ENV_KEYS
-    else:
-        keys = _AGENT_FILE_ENV_KEYS
-    lines = [
-        f"{kind.upper()} options (in ~/.agent.json; shell env wins if set before start). "
-        "If a name is not set, the value shown is the built-in default (see (default))."
-    ]
-    for k in keys:
-        short = _short_env_key_from_full(k, kind)
-        vdisp, is_def = _file_env_effective_value_line(k)
-        tag = " (default)" if is_def else ""
-        lines.append(f"  {short} = {vdisp!r}{tag}  ({k})")
-    return "\n".join(lines)
 
 
 def _flush_repl_readline_history() -> None:
@@ -1586,26 +1350,25 @@ def _interactive_repl_install_readline() -> bool:
 _REPL_INPUT_MAX_DEFAULT = 131072
 
 
-def _repl_env_flag_true(name: str, default: str) -> bool:
-    v = (os.environ.get(name) or default).strip().lower()
-    return v not in ("0", "false", "no", "off", "")
-
-
 def _repl_buffered_line_max_bytes() -> int:
-    return max(4096, _scalar_to_int(os.environ.get("AGENT_REPL_INPUT_MAX_BYTES"), _REPL_INPUT_MAX_DEFAULT))
+    v = _settings_get_int(("agent", "repl_input_max_bytes"), 0)
+    if v <= 0:
+        v = _REPL_INPUT_MAX_DEFAULT
+    return max(4096, int(v))
 
 
 def _repl_read_line(prompt: str) -> str:
     """
     Read one REPL line. Default: input() + readline (history, arrows, usual editing).
 
-    Set AGENT_REPL_BUFFERED_LINE=1 on a TTY to read from stdin in binary mode up to
-    AGENT_REPL_INPUT_MAX_BYTES (default 128KiB) for large single-line pastes; readline.add_history
+    Enable buffered-line mode in prefs (agent.repl_buffered_line=true) on a TTY to read from
+    stdin in binary mode up to agent.repl_input_max_bytes (default 128KiB) for large single-line pastes;
+    readline.add_history is called afterward so ↑ still recalls those lines (without per-line readline editing on entry).
     is called afterward so ↑ still recalls those lines (without per-line readline editing on entry).
     """
     if not sys.stdin.isatty():
         return input(prompt)
-    if not _repl_env_flag_true("AGENT_REPL_BUFFERED_LINE", "0"):
+    if not _settings_get_bool(("agent", "repl_buffered_line"), False):
         return input(prompt)
     maxb = _repl_buffered_line_max_bytes()
     print(prompt, end="", flush=True)
@@ -1639,18 +1402,150 @@ def _load_agent_prefs() -> Optional[dict]:
         return None
 
 
+def _migrate_settings_groups_from_prefs(prefs: dict) -> None:
+    """
+    Apply settings from prefs into module-global _SETTINGS, supporting legacy shapes:
+    - prefs["ollama"]/["openai"]/["agent"] stored as env-like keys ("HOST", "OLLAMA_HOST", etc)
+    - legacy top-level keys like "ollama_model"
+    """
+    if not isinstance(prefs, dict):
+        return
+
+    def apply_group(group: str, mapping: dict) -> None:
+        if not isinstance(mapping, dict):
+            return
+        for k, v in mapping.items():
+            if v is None:
+                continue
+            key = str(k).strip()
+            if not key:
+                continue
+            lk = key.strip().lower().replace("-", "_")
+            # Accept both short keys ("host") and env-style keys ("OLLAMA_HOST", "HOST").
+            lk = re.sub(r"^(ollama_|openai_|agent_)", "", lk)
+            if group == "ollama":
+                aliases = {
+                    "host": "host",
+                    "model": "model",
+                    "second_opinion_model": "second_opinion_model",
+                    "second_opinion": "second_opinion_model",
+                    "second_opinion_model_tag": "second_opinion_model",
+                    "tool_output_max": "tool_output_max",
+                    "debug": "debug",
+                    "search_enrich": "search_enrich",
+                }
+            elif group == "openai":
+                aliases = {
+                    "api_key": "api_key",
+                    "base_url": "base_url",
+                    "model": "model",
+                    "cloud_model": "cloud_model",
+                }
+            else:
+                aliases = {
+                    "quiet": "quiet",
+                    "progress": "progress",
+                    "prompt_templates_dir": "prompt_templates_dir",
+                    "skills_dir": "skills_dir",
+                    "tools_dir": "tools_dir",
+                    "repl_history": "repl_history",
+                    "repl_input_max_bytes": "repl_input_max_bytes",
+                    "repl_buffered_line": "repl_buffered_line",
+                    "thinking": "thinking",
+                    "thinking_level": "thinking_level",
+                    "stream_thinking": "stream_thinking",
+                    "search_web_max_results": "search_web_max_results",
+                    "search_web_backend": "search_web_backend",
+                    "searxng_url": "searxng_url",
+                    "auto_confirm_tool_retry": "auto_confirm_tool_retry",
+                    "context_tokens": "context_tokens",
+                    "hosted_context_tokens": "hosted_context_tokens",
+                    "ollama_context_tokens": "ollama_context_tokens",
+                    "disable_context_manager": "disable_context_manager",
+                    "context_trigger_frac": "context_trigger_frac",
+                    "context_target_frac": "context_target_frac",
+                    "context_keep_tail_messages": "context_keep_tail_messages",
+                    "router_transcript_max_messages": "router_transcript_max_messages",
+                }
+            if lk not in aliases:
+                continue
+            _settings_set((group, aliases[lk]), v)
+
+    for grp in ("ollama", "openai", "agent"):
+        apply_group(grp, prefs.get(grp) if isinstance(prefs.get(grp), dict) else {})
+
+    # Legacy top-level keys.
+    if isinstance(prefs.get("ollama_model"), str) and prefs["ollama_model"].strip():
+        _settings_set(("ollama", "model"), prefs["ollama_model"].strip())
+    if isinstance(prefs.get("ollama_second_opinion_model"), str) and prefs["ollama_second_opinion_model"].strip():
+        _settings_set(("ollama", "second_opinion_model"), prefs["ollama_second_opinion_model"].strip())
+
+
+def _settings_group_keys_lines(group: str) -> str:
+    grp = (group or "").strip().lower()
+    if grp not in ("ollama", "openai", "agent"):
+        return ""
+    keys = sorted(((_DEFAULT_SETTINGS.get(grp) or {}).keys()))
+    lines = ["Keys:"]
+    for k in keys:
+        lines.append(f"  {k}")
+    return "\n".join(lines)
+
+
+def _settings_group_show(group: str) -> str:
+    grp = (group or "").strip().lower()
+    if grp not in ("ollama", "openai", "agent"):
+        raise ValueError("group must be ollama, openai, or agent")
+    cur = _SETTINGS.get(grp) if isinstance(_SETTINGS, dict) else None
+    if not isinstance(cur, dict):
+        cur = {}
+    return json.dumps(cur, indent=2, ensure_ascii=False, sort_keys=True)
+
+
+def _settings_group_set(group: str, raw_key: str, raw_value: str) -> str:
+    grp = (group or "").strip().lower()
+    key = (raw_key or "").strip().lower().replace("-", "_")
+    if grp not in ("ollama", "openai", "agent"):
+        raise ValueError("group must be ollama, openai, or agent")
+    defaults = _DEFAULT_SETTINGS.get(grp) or {}
+    if key not in defaults:
+        raise ValueError(f"unknown key {key!r} for group {grp!r}")
+    dv = defaults.get(key)
+    text = (raw_value or "").strip()
+    if isinstance(dv, bool):
+        v = text.lower() in ("1", "true", "yes", "y", "on")
+    elif isinstance(dv, int) and not isinstance(dv, bool):
+        v = int(float(text)) if text else 0
+    elif isinstance(dv, float):
+        v = float(text) if text else 0.0
+    else:
+        v = text
+    _settings_set((grp, key), v)
+    return f"{grp}.{key} set. Use /settings save to persist."
+
+
+def _settings_group_unset(group: str, raw_key: str) -> str:
+    grp = (group or "").strip().lower()
+    key = (raw_key or "").strip().lower().replace("-", "_")
+    if grp not in ("ollama", "openai", "agent"):
+        raise ValueError("group must be ollama, openai, or agent")
+    defaults = _DEFAULT_SETTINGS.get(grp) or {}
+    if key not in defaults:
+        raise ValueError(f"unknown key {key!r} for group {grp!r}")
+    _settings_set((grp, key), defaults.get(key))
+    return f"{grp}.{key} reset to default. Use /settings save to persist."
+
+
 def _llm_profile_to_pref(profile: LlmProfile) -> dict:
     if profile.backend != "hosted":
         return {"backend": "ollama"}
-    d = {
+    d: dict = {
         "backend": "hosted",
         "base_url": profile.base_url,
         "model": profile.model,
-        "api_key_env": profile.api_key_env,
     }
-    key = _read_api_key(profile.api_key_env)
-    if key:
-        d["api_key"] = key
+    if (profile.api_key or "").strip():
+        d["api_key"] = profile.api_key.strip()
     return d
 
 
@@ -1664,13 +1559,12 @@ def _llm_profile_from_pref(obj: object) -> Optional[LlmProfile]:
         return None
     bu = _scalar_to_str(obj.get("base_url"), "").strip().rstrip("/")
     mod = _scalar_to_str(obj.get("model"), "").strip()
-    keyenv = _scalar_to_str(obj.get("api_key_env"), "OPENAI_API_KEY").strip() or "OPENAI_API_KEY"
     if not bu.startswith(("http://", "https://")) or not mod:
         return None
-    prof = LlmProfile(backend="hosted", base_url=bu, model=mod, api_key_env=keyenv)
+    prof = LlmProfile(backend="hosted", base_url=bu, model=mod)
     ak = obj.get("api_key")
     if isinstance(ak, str) and ak.strip():
-        os.environ[keyenv] = ak.strip()
+        prof.api_key = ak.strip()
     return prof
 
 
@@ -1711,12 +1605,8 @@ def _build_agent_prefs_payload(
     context_manager: Optional[dict] = None,
     verbose_level: int = 0,
 ) -> dict:
-    om = (os.environ.get("OLLAMA_MODEL") or "").strip() or None
-    som = (os.environ.get("OLLAMA_SECOND_OPINION_MODEL") or "").strip() or None
     payload: dict = {
         "version": _AGENT_PREFS_VERSION,
-        "ollama_model": om,
-        "ollama_second_opinion_model": som,
         "second_opinion_enabled": bool(second_opinion_on),
         "cloud_ai_enabled": bool(cloud_ai_enabled),
         "verbose": _coerce_verbose_level(verbose_level),
@@ -1725,6 +1615,10 @@ def _build_agent_prefs_payload(
         if len(enabled_tools) < len(_CORE_TOOLS)
         else None,
     }
+    # Persist JSON-backed settings groups (lowercase keys).
+    payload["ollama"] = dict(_SETTINGS.get("ollama") or {})
+    payload["openai"] = dict(_SETTINGS.get("openai") or {})
+    payload["agent"] = dict(_SETTINGS.get("agent") or {})
     if reviewer_hosted_profile is not None and reviewer_hosted_profile.backend == "hosted":
         payload["second_opinion_reviewer"] = _llm_profile_to_pref(reviewer_hosted_profile)
     else:
@@ -1759,21 +1653,12 @@ def _build_agent_prefs_payload(
     ets = {str(x).strip().lower() for x in (enabled_toolsets or set()) if str(x).strip()}
     ets = {x for x in ets if x in _PLUGIN_TOOLSETS}
     payload["enabled_toolsets"] = sorted(ets) if ets else None
-    oa = _file_env_block_from_process(_OLLAMA_FILE_ENV_KEYS, "ollama")
-    oi = _file_env_block_from_process(_OPENAI_FILE_ENV_KEYS, "openai")
-    ag = _file_env_block_from_process(_AGENT_FILE_ENV_KEYS, "agent")
-    if oa:
-        payload["ollama"] = oa
-    if oi:
-        payload["openai"] = oi
-    if ag:
-        payload["agent"] = ag
     return payload
 
 
 def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
     if isinstance(prefs, dict):
-        _apply_stored_env_from_prefs(prefs)
+        _migrate_settings_groups_from_prefs(prefs)
     # Ensure plugin toolsets are loaded from the resolved tools_dir for this prefs object.
     try:
         _load_plugin_toolsets(_resolved_tools_dir(prefs))
@@ -1892,13 +1777,9 @@ def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
 
 
 def _default_search_web_max_results() -> int:
-    """Default max DDG result rows: env AGENT_SEARCH_WEB_MAX_RESULTS, else 5, clamped 1–30."""
-    raw = (os.environ.get("AGENT_SEARCH_WEB_MAX_RESULTS") or "5").strip()
-    try:
-        v = int(float(raw))
-    except (TypeError, ValueError):
-        v = 5
-    return max(1, min(30, v))
+    """Default max DDG result rows: prefs/CLI agent.search_web_max_results, else 5, clamped 1–30."""
+    v = _settings_get_int(("agent", "search_web_max_results"), 5)
+    return max(1, min(30, int(v)))
 
 
 def _search_web_max_results_clamped(n: object, *, fallback: int) -> int:
@@ -2011,7 +1892,7 @@ def _enrich_search_query_for_present_day(query: str) -> str:
     Bias web search toward the present when the query asks who holds a role but omits
     words like 'current' (weak models often mirror the user literally and get stale hits).
     """
-    if os.environ.get("OLLAMA_SEARCH_ENRICH", "1").strip() in ("0", "false", "no"):
+    if not _settings_get_bool(("ollama", "search_enrich"), True):
         return query
     q = (query or "").strip()
     if not q:
@@ -2334,26 +2215,167 @@ def _iter_balanced_brace_objects(text: str):
                     start = -1
 
 
+def _normalize_unicode_json_quotes(s: str) -> str:
+    """Map common Unicode “smart” double quotes to ASCII so delimiters parse as JSON."""
+    if not s:
+        return s
+    trans = str.maketrans(
+        {
+            "\u201c": '"',
+            "\u201d": '"',
+            "\u201e": '"',
+            "\u2033": '"',
+            "\uff02": '"',
+        }
+    )
+    return s.translate(trans)
+
+
+def _escape_controls_inside_json_strings(s: str) -> str:
+    """
+    RFC 8259 forbids literal ASCII control characters inside JSON strings.
+    Many LLMs emit literal newlines/tabs inside \"answer\" values anyway — escape them so json.loads succeeds.
+    Tracks double-quoted regions using the same rules as _iter_balanced_brace_objects.
+    """
+    if not s:
+        return s
+    out: list[str] = []
+    in_str = False
+    escape = False
+    for c in s:
+        if escape:
+            escape = False
+            out.append(c)
+            continue
+        if in_str:
+            if c == "\\":
+                escape = True
+                out.append(c)
+                continue
+            if c == '"':
+                in_str = False
+                out.append(c)
+                continue
+            o = ord(c)
+            if o < 32:
+                if c == "\n":
+                    out.append("\\n")
+                elif c == "\r":
+                    out.append("\\r")
+                elif c == "\t":
+                    out.append("\\t")
+                elif c == "\f":
+                    out.append("\\f")
+                elif c == "\b":
+                    out.append("\\b")
+                else:
+                    out.append("\\u%04x" % o)
+                continue
+            out.append(c)
+            continue
+        if c == '"':
+            in_str = True
+        out.append(c)
+    return "".join(out)
+
+
+def _fallback_extract_answer_field(raw: str) -> Optional[str]:
+    """
+    Last resort when JSON is too broken to parse: scan for \"answer\"\\s*:\\s*\" and read a
+    double-quoted string with standard JSON-style escapes (handles embedded quotes and newlines badly; good enough).
+    """
+    text = _normalize_unicode_json_quotes(raw.strip())
+    # Avoid scraping unrelated JSON fragments that mention "answer" as a word or nested keys.
+    if not re.search(r'"action"\s*:\s*"answer"', text):
+        return None
+    m = re.search(r'"answer"\s*:\s*"', text)
+    if not m:
+        return None
+    i = m.end()
+    buf: list[str] = []
+    escape = False
+    while i < len(text):
+        c = text[i]
+        if escape:
+            escape = False
+            # Map common JSON escapes back to literal text for the answer we return.
+            if c == "n":
+                buf.append("\n")
+            elif c == "r":
+                buf.append("\r")
+            elif c == "t":
+                buf.append("\t")
+            elif c == '"':
+                buf.append('"')
+            elif c == "\\":
+                buf.append("\\")
+            elif c == "/":
+                buf.append("/")
+            elif c == "f":
+                buf.append("\f")
+            elif c == "b":
+                buf.append("\b")
+            elif c == "u" and i + 4 < len(text):
+                hex_part = text[i + 1 : i + 5]
+                if len(hex_part) == 4 and all(ch in "0123456789abcdefABCDEF" for ch in hex_part):
+                    buf.append(chr(int(hex_part, 16)))
+                    i += 4
+                else:
+                    buf.append("\\")
+                    buf.append(c)
+            else:
+                buf.append("\\")
+                buf.append(c)
+            i += 1
+            continue
+        if c == "\\":
+            escape = True
+            i += 1
+            continue
+        if c == '"':
+            return "".join(buf)
+        buf.append(c)
+        i += 1
+    return None
+
+
 def _try_json_loads_object(s: str):
     """Parse a JSON object string; apply light repairs for common model mistakes."""
     if not s or not s.strip():
         return None
     s = s.strip()
-    try:
-        v = json.loads(s)
-        return v if isinstance(v, dict) else None
-    except json.JSONDecodeError:
-        pass
-    for fix in (
+
+    variants = [
         s,
-        re.sub(r",\s*}", "}", s),
-        re.sub(r",\s*]", "]", s),
-    ):
-        try:
-            v = json.loads(fix)
-            return v if isinstance(v, dict) else None
-        except json.JSONDecodeError:
-            continue
+        _normalize_unicode_json_quotes(s),
+        _escape_controls_inside_json_strings(s),
+        _escape_controls_inside_json_strings(_normalize_unicode_json_quotes(s)),
+    ]
+    seen = set()
+    uniq_variants = []
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            uniq_variants.append(v)
+
+    for cand in uniq_variants:
+        fixes = (
+            cand,
+            re.sub(r",\s*}", "}", cand),
+            re.sub(r",\s*]", "]", cand),
+        )
+        for fix in fixes:
+            try:
+                v = json.loads(fix)
+                if isinstance(v, dict):
+                    return v
+            except json.JSONDecodeError:
+                continue
+
+    extracted = _fallback_extract_answer_field(_normalize_unicode_json_quotes(s))
+    if extracted is not None and extracted.strip():
+        return {"action": "answer", "answer": extracted}
+
     return None
 
 
@@ -2502,7 +2524,7 @@ def _tool_result_user_message(
 ) -> str:
     """User follow-up after a tool run so the model reads output and stops re-querying."""
     params_s = json.dumps(params, ensure_ascii=False) if params else "{}"
-    max_len = int(os.environ.get("OLLAMA_TOOL_OUTPUT_MAX", "14000"))
+    max_len = max(1, _settings_get_int(("ollama", "tool_output_max"), 14000))
     body = result if isinstance(result, str) else str(result)
     if len(body) > max_len:
         body = body[:max_len] + "\n...[truncated for length; use what is shown above]"
@@ -2622,13 +2644,7 @@ def _suggest_tool_recovery_params(
 
 
 def _env_tool_retry_auto_confirm() -> bool:
-    return (os.environ.get("AGENT_AUTO_CONFIRM_TOOL_RETRY") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
-    )
+    return _settings_get_bool(("agent", "auto_confirm_tool_retry"), False)
 
 
 def _tool_recovery_may_run(interactive_tool_recovery: bool) -> bool:
@@ -2655,19 +2671,20 @@ def _confirm_tool_recovery_retry(
 
 
 def _ollama_second_opinion_model():
-    return os.environ.get("OLLAMA_SECOND_OPINION_MODEL", "llama3.2:latest").strip()
+    return _settings_get_str(("ollama", "second_opinion_model"), "llama3.2:latest").strip()
 
 
 def _openai_api_key():
-    return (os.environ.get("OPENAI_API_KEY") or "").strip()
+    return _settings_get_str(("openai", "api_key"), "")
 
 
 def _openai_base_url():
-    return (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    return _settings_get_str(("openai", "base_url"), "https://api.openai.com/v1").rstrip("/")
 
 
 def _openai_cloud_model():
-    return (os.environ.get("OPENAI_CLOUD_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
+    # Reviewer cloud model id.
+    return _settings_get_str(("openai", "cloud_model"), _settings_get_str(("openai", "model"), "gpt-4o-mini")).strip()
 
 
 def call_ollama_plaintext(messages: list, model: str) -> str:
@@ -2704,9 +2721,9 @@ def call_ollama_plaintext(messages: list, model: str) -> str:
 
 def call_hosted_chat_plain(messages: list, profile: LlmProfile) -> str:
     """Non-streaming chat.completions for OpenAI-compatible APIs (OpenAI, Grok, Groq, Azure, etc.)."""
-    key = _read_api_key(profile.api_key_env)
+    key = (profile.api_key or "").strip()
     if not key:
-        return f"Cloud AI error: {profile.api_key_env} is not set."
+        return "Cloud AI error: api_key is not set."
     base = profile.base_url.rstrip("/")
     url = f"{base}/chat/completions"
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -2728,12 +2745,12 @@ def call_hosted_chat_plain(messages: list, profile: LlmProfile) -> str:
 
 
 def call_openai_chat_plain(messages: list) -> str:
-    """Legacy env-based OpenAI-compatible call (OPENAI_*)."""
+    """Legacy helper: uses JSON/CLI openai.* settings."""
     prof = LlmProfile(
         backend="hosted",
         base_url=_openai_base_url(),
         model=_openai_cloud_model(),
-        api_key_env="OPENAI_API_KEY",
+        api_key=_openai_api_key(),
     )
     return call_hosted_chat_plain(messages, prof)
 
@@ -2756,9 +2773,9 @@ def call_llm_json_content(
     prof = primary_profile or default_primary_llm_profile()
     if prof.backend == "hosted":
         _last_ollama_chat_usage = None
-        key = _read_api_key(prof.api_key_env)
+        key = (prof.api_key or "").strip()
         if not key:
-            return json.dumps({"_call_error": f"{prof.api_key_env} is not set."})
+            return json.dumps({"_call_error": "api_key is not set."})
         base = prof.base_url.rstrip("/")
         url = f"{base}/chat/completions"
         headers = {
@@ -2862,26 +2879,6 @@ def _is_workflow_plan_obj(o) -> bool:
     return True
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = (os.environ.get(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw, 10)
-    except ValueError:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = (os.environ.get(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
 def _approx_message_tokens(messages: list) -> int:
     # Heuristic: ~4 chars/token + small per-message overhead.
     total_chars = 0
@@ -2896,12 +2893,12 @@ def _approx_message_tokens(messages: list) -> int:
 
 def _context_limit_tokens(profile: Optional[LlmProfile]) -> int:
     # Allow explicit override (works for both ollama + hosted).
-    lim = _env_int("AGENT_CONTEXT_TOKENS", 0)
+    lim = _settings_get_int(("agent", "context_tokens"), 0)
     if lim > 0:
         return lim
     if profile is not None and getattr(profile, "backend", "") == "hosted":
-        return _env_int("AGENT_HOSTED_CONTEXT_TOKENS", 131072)
-    return _env_int("AGENT_OLLAMA_CONTEXT_TOKENS", 131072)
+        return _settings_get_int(("agent", "hosted_context_tokens"), 131072)
+    return _settings_get_int(("agent", "ollama_context_tokens"), 131072)
 
 
 def _summarize_conversation_for_context(
@@ -2955,9 +2952,8 @@ def _maybe_compact_context_window(
     context_cfg: Optional[dict] = None,
 ) -> list:
     cfg = context_cfg if isinstance(context_cfg, dict) else {}
-    # Env overrides prefs.
     enabled = bool(cfg.get("enabled", True))
-    if _env_int("AGENT_DISABLE_CONTEXT_MANAGER", 0) == 1:
+    if _settings_get_bool(("agent", "disable_context_manager"), False):
         enabled = False
     if not enabled:
         return messages
@@ -2966,16 +2962,11 @@ def _maybe_compact_context_window(
     target_frac = float(cfg.get("target_frac", 0.55))
     keep_tail = int(cfg.get("keep_tail_messages", 12))
 
-    trigger_frac = _env_float("AGENT_CONTEXT_TRIGGER_FRAC", trigger_frac)
-    target_frac = _env_float("AGENT_CONTEXT_TARGET_FRAC", target_frac)
-    keep_tail = _env_int("AGENT_CONTEXT_KEEP_TAIL_MESSAGES", keep_tail)
-
     trigger_frac = max(0.05, min(0.95, trigger_frac))
     target_frac = max(0.05, min(trigger_frac, target_frac))
     keep_tail = max(4, keep_tail)
 
     limit = int(cfg.get("tokens", 0) or 0)
-    limit = _env_int("AGENT_CONTEXT_TOKENS", limit)
     if limit <= 0:
         limit = _context_limit_tokens(primary_profile)
     if limit <= 0:
@@ -3042,10 +3033,10 @@ def call_hosted_agent_chat(
     verbose: int = 0,
 ) -> str:
     """Hosted primary agent: same JSON contract as Ollama /api/chat + format json."""
-    key = _read_api_key(profile.api_key_env)
+    key = (profile.api_key or "").strip()
     if not key:
         return json.dumps(
-            {"action": "error", "error": f"{profile.api_key_env} is not set."}
+            {"action": "error", "error": "api_key is not set."}
         )
     base = profile.base_url.rstrip("/")
     url = f"{base}/chat/completions"
@@ -3135,7 +3126,7 @@ def call_ollama_chat(
         "format": "json",
         "think": _ollama_request_think_value(),
     }
-    debug = os.environ.get("OLLAMA_DEBUG", "")
+    debug = "1" if _settings_get_bool(("ollama", "debug"), False) else ""
 
     stream_llm = verbose >= 2
 
@@ -3240,7 +3231,7 @@ def _search_web_backend() -> str:
     - default: "ddg" (DuckDuckGo)
     - alternative: "searxng"
     """
-    v = (os.environ.get("AGENT_SEARCH_WEB_BACKEND") or os.environ.get("AGENT_WEB_SEARCH_BACKEND") or "ddg").strip().lower()
+    v = _settings_get_str(("agent", "search_web_backend"), "ddg").strip().lower()
     v = v.replace("-", "_")
     if v in ("searx", "searxng"):
         return "searxng"
@@ -3252,7 +3243,7 @@ def _searxng_base_url() -> str:
     Base URL for SearXNG.
     Default: https://searx.party (public instance).
     """
-    return (os.environ.get("AGENT_SEARXNG_URL") or "https://searx.party").strip().rstrip("/")
+    return _settings_get_str(("agent", "searxng_url"), "https://searx.party").strip().rstrip("/")
 
 
 def _search_backend_banner_line() -> str:
@@ -4287,7 +4278,7 @@ def _router_transcript_slice(transcript_messages: Optional[list]) -> list:
     """Last N user/assistant/system messages for routing (bounded for prompt size)."""
     if not transcript_messages:
         return []
-    lim = max(1, _scalar_to_int(os.environ.get("AGENT_ROUTER_TRANSCRIPT_MAX_MESSAGES"), 80))
+    lim = max(1, _settings_get_int(("agent", "router_transcript_max_messages"), 80))
     slice_ = (
         transcript_messages[-lim:]
         if len(transcript_messages) > lim
@@ -4543,9 +4534,10 @@ def _runner_instruction_bits(
     pp = primary_profile or default_primary_llm_profile()
     bits = []
     if pp.backend == "hosted":
+        key_state = "set" if (pp.api_key or "").strip() else "missing"
         bits.append(
             f"Runner: primary LLM is hosted OpenAI-compatible API: model {pp.model!r}, "
-            f"base {pp.base_url!r}, API key from env {pp.api_key_env}."
+            f"base {pp.base_url!r}, api_key: {key_state}."
         )
     else:
         bits.append(f"Runner: primary LLM is local Ollama ({_ollama_model()!r}).")
@@ -4830,18 +4822,18 @@ class AgentSession:
     # ---- programmatic settings ----
 
     def set_ollama_model(self, name: str) -> None:
-        """Set the local Ollama model tag for this process (affects Ollama backend sessions)."""
-        os.environ["OLLAMA_MODEL"] = (name or "").strip()
+        """Set the local Ollama model tag for this session/process."""
+        _settings_set(("ollama", "model"), (name or "").strip())
 
     def set_primary_llm_ollama(self) -> None:
         self.primary_profile = default_primary_llm_profile()
 
-    def set_primary_llm_hosted(self, base_url: str, model: str, api_key_env: str = "OPENAI_API_KEY") -> None:
+    def set_primary_llm_hosted(self, base_url: str, model: str, api_key: str = "") -> None:
         self.primary_profile = LlmProfile(
             backend="hosted",
             base_url=str(base_url),
             model=str(model),
-            api_key_env=str(api_key_env or "OPENAI_API_KEY"),
+            api_key=str(api_key or ""),
         )
 
     def enable_tool(self, tool: str) -> None:
@@ -5009,7 +5001,7 @@ _SETTINGS_HELP_TEXT = (
     "  /settings thinking show|on|off|level ...\n"
     "  /settings context show|on|off|...\n"
     "  /settings verbose 0|1|2|on|off\n\n"
-    "Environment-backed settings (stored in ~/.agent.json via /settings ollama|openai|agent ...):\n"
+    "JSON-backed settings groups (stored in ~/.agent.json via /settings ollama|openai|agent ...):\n"
     "  /settings ollama show|keys|set|unset\n"
     "  /settings openai show|keys|set|unset\n"
     "  /settings agent show|keys|set|unset\n\n"
@@ -5031,22 +5023,22 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
     if key in ("help", "-h", "--help"):
         return _SETTINGS_HELP_TEXT
 
-    # Env-backed groups (same behavior as REPL; mutates process env).
+    # JSON-backed settings groups (lowercase keys; persisted via /settings save).
     if key in ("ollama", "openai", "agent"):
         if len(toks) < 3:
             return (
                 f"Usage: /settings {key} show | keys | set <name> <value> | unset <name>\n"
-                + _file_env_key_help_lines(key)
+                + _settings_group_keys_lines(key)
             )
         sub = toks[2].lower()
         if sub in ("show", "list"):
             try:
-                return _format_file_env_group_show(key)
+                return _settings_group_show(key)
             except (ValueError, OSError) as e:
                 return f"/settings {key} show: {e}"
         if sub in ("keys", "key", "help"):
             try:
-                return _file_env_key_help_lines(key)
+                return _settings_group_keys_lines(key)
             except (ValueError, OSError) as e:
                 return f"/settings {key} keys: {e}"
         if sub == "set":
@@ -5055,20 +5047,16 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
             raw_k = toks[3]
             value = " ".join(toks[4:]) if len(toks) > 4 else ""
             try:
-                full = _file_env_set_process(key, raw_k, value)
+                return _settings_group_set(key, raw_k, value)
             except ValueError as e:
                 return f"/settings {key} set: {e}"
-            return f"{full} = {value!r} in this process. Use /settings save to write ~/.agent.json."
         if sub in ("unset", "delete", "clear"):
             if len(toks) < 4:
                 return f"Usage: /settings {key} unset <name>"
             try:
-                full = _file_env_unset_process(key, toks[3])
+                return _settings_group_unset(key, toks[3])
             except ValueError as e:
                 return f"/settings {key} unset: {e}"
-            return (
-                f"{full} removed from the process. Use /settings save; on next start missing keys use built-in or file defaults."
-            )
         return f"Unknown /settings {key} subcommand. Try: /settings {key} show | set | unset | keys"
 
     if key == "verbose":
@@ -5164,30 +5152,30 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
         name = toks[2].strip()
         if not name:
             return "Usage: /settings model <ollama-model-name>"
-        os.environ["OLLAMA_MODEL"] = name
-        return f"OLLAMA_MODEL set to {name!r} (this process only)."
+        _settings_set(("ollama", "model"), name)
+        return f"ollama.model set to {name!r} (this session). Use /settings save to persist."
 
     if key == "primary" and len(toks) >= 4 and toks[2].lower() == "llm":
         sub = toks[3].lower()
         if sub == "ollama":
             session.primary_profile = default_primary_llm_profile()
-            return "Primary LLM: local Ollama (uses OLLAMA_MODEL from the environment)."
+            return "Primary LLM: local Ollama."
         if sub == "hosted":
             if len(toks) < 6:
-                return "Usage: /settings primary llm hosted <base_url> <model> [api_key_env]"
+                return "Usage: /settings primary llm hosted <base_url> <model> [api_key]"
             bu, mod = toks[4], toks[5]
-            keyenv = toks[6] if len(toks) > 6 else "OPENAI_API_KEY"
             if not bu.startswith(("http://", "https://")):
                 return "base_url must start with http:// or https://"
+            keyval = toks[6] if len(toks) > 6 else ""
             session.primary_profile = LlmProfile(
                 backend="hosted",
                 base_url=bu,
                 model=mod,
-                api_key_env=keyenv,
+                api_key=keyval,
             )
             msg = "Primary LLM: hosted OpenAI-compatible API " f"({_describe_llm_profile_short(session.primary_profile)})."
-            if not _read_api_key(keyenv):
-                msg = f"Note: {keyenv} is not set; hosted primary calls will fail until it is.\n" + msg
+            if not (keyval or "").strip():
+                msg = "Note: api_key is not set; hosted primary calls will fail until it is.\n" + msg
             return msg
         return "Usage: /settings primary llm ollama|hosted …"
 
@@ -5200,21 +5188,21 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
             return f"Second-opinion reviewer: local Ollama, model {om!r}."
         if sub == "hosted":
             if len(toks) < 6:
-                return "Usage: /settings second_opinion llm hosted <base_url> <model> [api_key_env]"
+                return "Usage: /settings second_opinion llm hosted <base_url> <model> [api_key]"
             bu, mod = toks[4], toks[5]
-            keyenv = toks[6] if len(toks) > 6 else "OPENAI_API_KEY"
             if not bu.startswith(("http://", "https://")):
                 return "base_url must start with http:// or https://"
+            keyval = toks[6] if len(toks) > 6 else ""
             session.reviewer_hosted_profile = LlmProfile(
                 backend="hosted",
                 base_url=bu,
                 model=mod,
-                api_key_env=keyenv,
+                api_key=keyval,
             )
             session.reviewer_ollama_model = None
             msg = "Second-opinion reviewer: hosted " f"({_describe_llm_profile_short(session.reviewer_hosted_profile)})."
-            if not _read_api_key(keyenv):
-                msg = f"Note: {keyenv} is not set; hosted second opinion will fail until it is.\n" + msg
+            if not (keyval or "").strip():
+                msg = "Note: api_key is not set; hosted second opinion will fail until it is.\n" + msg
             return msg
         return "Usage: /settings second_opinion llm ollama|hosted …"
 
@@ -5231,8 +5219,8 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
             session.second_opinion_enabled = True
             return "second_opinion enabled for this session."
         if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
-            os.environ["AGENT_STREAM_THINKING"] = "1"
-            return "stream_thinking enabled for this session."
+            _settings_set(("agent", "stream_thinking"), True)
+            return "stream_thinking enabled for this session. Use /settings save to persist."
         if feat == "verbose":
             session.verbose = 2
             return _verbose_ack_message(session.verbose)
@@ -5255,8 +5243,8 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
             session.second_opinion_enabled = False
             return "second_opinion disabled for this session."
         if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
-            os.environ["AGENT_STREAM_THINKING"] = "0"
-            return "stream_thinking disabled for this session."
+            _settings_set(("agent", "stream_thinking"), False)
+            return "stream_thinking disabled for this session. Use /settings save to persist."
         if feat == "verbose":
             session.verbose = 0
             return _verbose_ack_message(session.verbose)
@@ -5285,24 +5273,24 @@ def _execute_settings_command(session: AgentSession, s: str) -> str:
                 f"ollama think value: {think_v!r}; stream_thinking: {_agent_stream_thinking_enabled()}"
             )
         if sub in ("on", "enable", "enabled", "true"):
-            os.environ["AGENT_THINKING"] = "1"
-            os.environ["AGENT_STREAM_THINKING"] = "1"
-            return "thinking enabled for this session (and stream_thinking enabled)."
+            _settings_set(("agent", "thinking"), True)
+            _settings_set(("agent", "stream_thinking"), True)
+            return "thinking enabled for this session (and stream_thinking enabled). Use /settings save to persist."
         if sub in ("off", "disable", "disabled", "false"):
-            os.environ["AGENT_THINKING"] = "0"
-            os.environ["AGENT_THINKING_LEVEL"] = ""
-            os.environ["AGENT_STREAM_THINKING"] = "0"
-            return "thinking disabled for this session (and stream_thinking disabled)."
+            _settings_set(("agent", "thinking"), False)
+            _settings_set(("agent", "thinking_level"), "")
+            _settings_set(("agent", "stream_thinking"), False)
+            return "thinking disabled for this session (and stream_thinking disabled). Use /settings save to persist."
         if sub == "level":
             if len(toks) < 4:
                 return "Usage: /settings thinking level low|medium|high"
             lvl = toks[3].strip().lower()
             if lvl not in ("low", "medium", "high"):
                 return "thinking level must be one of: low, medium, high"
-            os.environ["AGENT_THINKING_LEVEL"] = lvl
-            os.environ["AGENT_THINKING"] = "1"
-            os.environ["AGENT_STREAM_THINKING"] = "1"
-            return f"thinking level set to {lvl!r} for this session (and stream_thinking enabled)."
+            _settings_set(("agent", "thinking_level"), lvl)
+            _settings_set(("agent", "thinking"), True)
+            _settings_set(("agent", "stream_thinking"), True)
+            return f"thinking level set to {lvl!r} for this session (and stream_thinking enabled). Use /settings save to persist."
         return "Unknown /settings thinking subcommand. Try: /settings thinking show | on | off | level …"
 
     # For embedded mode, most remaining /settings subcommands are not critical; keep discoverable.
@@ -6489,21 +6477,21 @@ def _interactive_repl(
                 if len(toks) < 3:
                     print(
                         f"Usage: /settings {key} show | keys | set <name> <value> | unset <name>\n"
-                        "  Short names (e.g. HOST) or full env names (e.g. OLLAMA_HOST) are accepted. "
-                        "After changing, use /settings save. Shell variables set before launch still override the file for that run."
+                        "  Keys are lowercase (e.g. host, model, api_key). "
+                        "After changing, use /settings save."
                     )
-                    print(_file_env_key_help_lines(key))
+                    print(_settings_group_keys_lines(key))
                     continue
                 sub = toks[2].lower()
                 if sub in ("show", "list"):
                     try:
-                        print(_format_file_env_group_show(key))
+                        print(_settings_group_show(key))
                     except (ValueError, OSError) as e:
                         print(f"/settings {key} show: {e}")
                     continue
                 if sub in ("keys", "key", "help"):
                     try:
-                        print(_file_env_key_help_lines(key))
+                        print(_settings_group_keys_lines(key))
                     except (ValueError, OSError) as e:
                         print(f"/settings {key} keys: {e}")
                     continue
@@ -6514,26 +6502,22 @@ def _interactive_repl(
                     raw_k = toks[3]
                     value = " ".join(toks[4:]) if len(toks) > 4 else ""
                     try:
-                        full = _file_env_set_process(key, raw_k, value)
+                        msg = _settings_group_set(key, raw_k, value)
                     except ValueError as e:
                         print(f"/settings {key} set: {e}")
                         continue
-                    print(
-                        f"{full} = {value!r} in this process. Use /settings save to write ~/.agent.json."
-                    )
+                    print(msg)
                     continue
                 if sub in ("unset", "delete", "clear"):
                     if len(toks) < 4:
                         print(f"Usage: /settings {key} unset <name>")
                         continue
                     try:
-                        full = _file_env_unset_process(key, toks[3])
+                        msg = _settings_group_unset(key, toks[3])
                     except ValueError as e:
                         print(f"/settings {key} unset: {e}")
                         continue
-                    print(
-                        f"{full} removed from the process. Use /settings save; on next start missing keys use built-in or file defaults."
-                    )
+                    print(msg)
                     continue
                 print(f"Unknown /settings {key} subcommand. Try: /settings {key} show | set | unset | keys")
                 continue
@@ -6945,8 +6929,8 @@ def _interactive_repl(
                 if not name:
                     print("Usage: /settings model <ollama-model-name>")
                     continue
-                os.environ["OLLAMA_MODEL"] = name
-                print(f"OLLAMA_MODEL set to {name!r} (this process only).")
+                _settings_set(("ollama", "model"), name)
+                print(f"ollama.model set to {name!r}. Use /settings save to persist.")
                 continue
             if key == "enable":
                 if len(toks) < 3:
@@ -6963,7 +6947,7 @@ def _interactive_repl(
                     print("second_opinion enabled for this session.")
                     continue
                 if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
-                    os.environ["AGENT_STREAM_THINKING"] = "1"
+                    _settings_set(("agent", "stream_thinking"), True)
                     print("stream_thinking enabled for this session (streams model thinking when available). Use /settings save to persist.")
                     continue
                 if feat == "verbose":
@@ -6992,7 +6976,7 @@ def _interactive_repl(
                     print("second_opinion disabled for this session.")
                     continue
                 if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
-                    os.environ["AGENT_STREAM_THINKING"] = "0"
+                    _settings_set(("agent", "stream_thinking"), False)
                     print("stream_thinking disabled for this session. Use /settings save to persist.")
                     continue
                 if feat == "verbose":
@@ -7031,17 +7015,17 @@ def _interactive_repl(
                     )
                     continue
                 if sub in ("on", "enable", "enabled", "true"):
-                    os.environ["AGENT_THINKING"] = "1"
-                    os.environ["AGENT_STREAM_THINKING"] = "1"
+                    _settings_set(("agent", "thinking"), True)
+                    _settings_set(("agent", "stream_thinking"), True)
                     print(
                         "thinking enabled for this session (and stream_thinking enabled). "
                         "Use /settings save to persist."
                     )
                     continue
                 if sub in ("off", "disable", "disabled", "false"):
-                    os.environ["AGENT_THINKING"] = "0"
-                    os.environ["AGENT_THINKING_LEVEL"] = ""
-                    os.environ["AGENT_STREAM_THINKING"] = "0"
+                    _settings_set(("agent", "thinking"), False)
+                    _settings_set(("agent", "thinking_level"), "")
+                    _settings_set(("agent", "stream_thinking"), False)
                     print(
                         "thinking disabled for this session (and stream_thinking disabled). "
                         "Use /settings save to persist."
@@ -7055,9 +7039,9 @@ def _interactive_repl(
                     if lvl not in ("low", "medium", "high"):
                         print("thinking level must be one of: low, medium, high")
                         continue
-                    os.environ["AGENT_THINKING_LEVEL"] = lvl
-                    os.environ["AGENT_THINKING"] = "1"
-                    os.environ["AGENT_STREAM_THINKING"] = "1"
+                    _settings_set(("agent", "thinking_level"), lvl)
+                    _settings_set(("agent", "thinking"), True)
+                    _settings_set(("agent", "stream_thinking"), True)
                     print(
                         f"thinking level set to {lvl!r} for this session (and stream_thinking enabled). "
                         "Use /settings save to persist."
@@ -7069,27 +7053,27 @@ def _interactive_repl(
                 sub = toks[3].lower()
                 if sub == "ollama":
                     primary_profile = default_primary_llm_profile()
-                    print("Primary LLM: local Ollama (uses OLLAMA_MODEL from the environment).")
+                    print("Primary LLM: local Ollama.")
                 elif sub == "hosted":
                     if len(toks) < 6:
                         print(
-                            "Usage: /settings primary llm hosted <base_url> <model> [api_key_env]"
+                            "Usage: /settings primary llm hosted <base_url> <model> [api_key]"
                         )
                         continue
                     bu, mod = toks[4], toks[5]
-                    keyenv = toks[6] if len(toks) > 6 else "OPENAI_API_KEY"
                     if not bu.startswith(("http://", "https://")):
                         print("base_url must start with http:// or https://")
                         continue
+                    keyval = toks[6] if len(toks) > 6 else ""
                     primary_profile = LlmProfile(
                         backend="hosted",
                         base_url=bu,
                         model=mod,
-                        api_key_env=keyenv,
+                        api_key=keyval,
                     )
-                    if not _read_api_key(keyenv):
+                    if not (keyval or "").strip():
                         print(
-                            f"Note: {keyenv} is not set; hosted primary calls will fail until it is."
+                            "Note: api_key is not set; hosted primary calls will fail until it is."
                         )
                     print(
                         "Primary LLM: hosted OpenAI-compatible API "
@@ -7114,24 +7098,24 @@ def _interactive_repl(
                 elif sub == "hosted":
                     if len(toks) < 6:
                         print(
-                            "Usage: /settings second_opinion llm hosted <base_url> <model> [api_key_env]"
+                            "Usage: /settings second_opinion llm hosted <base_url> <model> [api_key]"
                         )
                         continue
                     bu, mod = toks[4], toks[5]
-                    keyenv = toks[6] if len(toks) > 6 else "OPENAI_API_KEY"
                     if not bu.startswith(("http://", "https://")):
                         print("base_url must start with http:// or https://")
                         continue
+                    keyval = toks[6] if len(toks) > 6 else ""
                     reviewer_hosted_profile = LlmProfile(
                         backend="hosted",
                         base_url=bu,
                         model=mod,
-                        api_key_env=keyenv,
+                        api_key=keyval,
                     )
                     reviewer_ollama_model = None
-                    if not _read_api_key(keyenv):
+                    if not (keyval or "").strip():
                         print(
-                            f"Note: {keyenv} is not set; hosted second opinion will fail until it is."
+                            "Note: api_key is not set; hosted second opinion will fail until it is."
                         )
                     print(
                         "Second-opinion reviewer: hosted "
@@ -7371,7 +7355,7 @@ def _run_agent_conversation_turn(
                     if (
                         reviewer_hosted_profile is not None
                         and reviewer_hosted_profile.backend == "hosted"
-                        and _read_api_key(reviewer_hosted_profile.api_key_env)
+                        and (reviewer_hosted_profile.api_key or "").strip()
                     ):
                         review = call_hosted_chat_plain(
                             reviewer_msgs, reviewer_hosted_profile

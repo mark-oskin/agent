@@ -102,23 +102,26 @@ def test_tools_dir_override_loads_plugins(tmp_path, monkeypatch):
 
 def test_ollama_request_think_value_gpt_oss_defaults_to_medium(monkeypatch):
     d = importlib.import_module("agent")
-    monkeypatch.setenv("OLLAMA_MODEL", "gpt-oss:20b")
-    monkeypatch.setenv("AGENT_THINKING", "1")
-    monkeypatch.delenv("AGENT_THINKING_LEVEL", raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("ollama", "model"), "gpt-oss:20b")
+    d._settings_set(("agent", "thinking"), True)
+    d._settings_set(("agent", "thinking_level"), "")
     assert d._ollama_request_think_value() == "medium"
 
 
 def test_ollama_request_think_false_when_disabled_even_if_level_set(monkeypatch):
     """Stale AGENT_THINKING_LEVEL must not send think= to Ollama when thinking is off."""
     d = importlib.import_module("agent")
-    monkeypatch.setenv("AGENT_THINKING", "0")
-    monkeypatch.setenv("AGENT_THINKING_LEVEL", "high")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "thinking"), False)
+    d._settings_set(("agent", "thinking_level"), "high")
     assert d._ollama_request_think_value() is False
 
 
 def test_stream_thinking_prints_done_thinking_separator(monkeypatch):
     d = importlib.import_module("agent")
-    monkeypatch.setenv("AGENT_STREAM_THINKING", "1")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "stream_thinking"), True)
     lines = iter(
         [
             json.dumps({"message": {"thinking": "Let's do that."}, "done": False}),
@@ -174,6 +177,25 @@ def test_parse_use_git_top_level_op_and_worktree():
     assert out["parameters"].get("worktree") == "/tmp"
 
 
+def test_parse_agent_json_literal_newlines_inside_answer():
+    """Many models emit RFC-invalid JSON with literal control chars inside quoted strings."""
+    d = importlib.import_module("agent")
+    raw = '{"action":"answer","answer":"Line A\nLine B"}'.replace("\\n", "\n")
+    assert "\n" in raw and "\\n" not in raw
+    out = d.parse_agent_json(raw)
+    assert out["action"] == "answer"
+    assert "Line A" in out["answer"] and "Line B" in out["answer"]
+
+
+def test_parse_agent_json_unicode_quote_delimiters():
+    """Unicode smart quotes occasionally wrap JSON keys/strings."""
+    d = importlib.import_module("agent")
+    raw = "{\u201caction\u201d:\u201canswer\u201d,\u201canswer\u201d:\u201chi\u201d}"
+    out = d.parse_agent_json(raw)
+    assert out["action"] == "answer"
+    assert out["answer"] == "hi"
+
+
 def test_merge_tool_param_aliases_use_git():
     d = importlib.import_module("agent")
     p = d._merge_tool_param_aliases(
@@ -213,11 +235,11 @@ def test_is_tool_result_weak_requires_url_for_search_sections():
 
 def test_context_window_manager_summarizes_when_over_budget(monkeypatch):
     d = importlib.import_module("agent")
-
-    monkeypatch.setenv("AGENT_CONTEXT_TOKENS", "200")
-    monkeypatch.setenv("AGENT_CONTEXT_TRIGGER_FRAC", "0.50")
-    monkeypatch.setenv("AGENT_CONTEXT_TARGET_FRAC", "0.40")
-    monkeypatch.setenv("AGENT_CONTEXT_KEEP_TAIL_MESSAGES", "4")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "context_tokens"), 200)
+    d._settings_set(("agent", "context_trigger_frac"), 0.50)
+    d._settings_set(("agent", "context_target_frac"), 0.40)
+    d._settings_set(("agent", "context_keep_tail_messages"), 4)
 
     def fake_summary(**kwargs):  # noqa: ARG001
         return "SUMMARY: keep constraints + decisions."
@@ -249,15 +271,7 @@ def test_context_window_manager_summarizes_when_over_budget(monkeypatch):
 
 def test_context_manager_prefs_applied_without_env(monkeypatch):
     d = importlib.import_module("agent")
-    # Ensure env doesn't override.
-    for k in (
-        "AGENT_CONTEXT_TOKENS",
-        "AGENT_CONTEXT_TRIGGER_FRAC",
-        "AGENT_CONTEXT_TARGET_FRAC",
-        "AGENT_CONTEXT_KEEP_TAIL_MESSAGES",
-        "AGENT_DISABLE_CONTEXT_MANAGER",
-    ):
-        monkeypatch.delenv(k, raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
 
     def fake_summary(**kwargs):  # noqa: ARG001
         return "SUMMARY"
@@ -317,9 +331,10 @@ def test_enrich_search_query_adds_year_for_current(monkeypatch):
 
 
 def test_agent_progress_prints_to_stderr_when_enabled(monkeypatch, capsys):
-    monkeypatch.delenv("AGENT_QUIET", raising=False)
-    monkeypatch.setenv("AGENT_PROGRESS", "1")
     d = importlib.import_module("agent")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "quiet"), False)
+    d._settings_set(("agent", "progress"), True)
     d._agent_progress("hello")
     err = capsys.readouterr().err
     assert "→" in err
@@ -327,41 +342,45 @@ def test_agent_progress_prints_to_stderr_when_enabled(monkeypatch, capsys):
 
 
 def test_agent_progress_silent_when_quiet(monkeypatch, capsys):
-    monkeypatch.setenv("AGENT_QUIET", "1")
     d = importlib.import_module("agent")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "quiet"), True)
     d._agent_progress("hello")
     assert capsys.readouterr().err == ""
 
 
 def test_agent_progress_silent_when_progress_off(monkeypatch, capsys):
-    monkeypatch.delenv("AGENT_QUIET", raising=False)
-    monkeypatch.setenv("AGENT_PROGRESS", "0")
     d = importlib.import_module("agent")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "quiet"), False)
+    d._settings_set(("agent", "progress"), False)
     d._agent_progress("hello")
     assert capsys.readouterr().err == ""
 
 
-def test_apply_cli_primary_model_ollama_sets_env(monkeypatch):
+def test_apply_cli_primary_model_ollama_sets_setting(monkeypatch):
     d = importlib.import_module("agent")
-    monkeypatch.setenv("OLLAMA_MODEL", "before")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("ollama", "model"), "before")
     p = d.default_primary_llm_profile()
     p2 = d._apply_cli_primary_model("after", p)
     assert p2 is p
-    assert os.environ.get("OLLAMA_MODEL") == "after"
+    assert d._settings_get_str(("ollama", "model"), "") == "after"
 
 
 def test_apply_cli_primary_model_hosted_replaces_model_only(monkeypatch):
     d = importlib.import_module("agent")
-    monkeypatch.setenv("OLLAMA_MODEL", "ollama-unchanged")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("ollama", "model"), "ollama-unchanged")
     h = d.LlmProfile(
         backend="hosted",
         base_url="https://api.example.com/v1",
         model="old-hosted",
-        api_key_env="OPENAI_API_KEY",
+        api_key="sk-test",
     )
     h2 = d._apply_cli_primary_model("new-hosted", h)
     assert h2.model == "new-hosted"
-    assert os.environ.get("OLLAMA_MODEL") == "ollama-unchanged"
+    assert d._settings_get_str(("ollama", "model"), "") == "ollama-unchanged"
 
 
 # --- main() loop / gates (13–30) ---

@@ -42,7 +42,7 @@ def test_agent_session_execute_settings_and_show(monkeypatch):
     assert "verbose level" in r1.output
 
     r2 = s.execute('/settings model tinyllama:latest')
-    assert "OLLAMA_MODEL set" in r2.output
+    assert "ollama.model set" in r2.output
 
     r3 = s.execute("/show model")
     assert "Primary LLM:" in r3.output

@@ -206,7 +206,6 @@ def test_confirm_tool_recovery_retry_tty_auto_without_prompt(monkeypatch):
 def test_confirm_tool_recovery_retry_non_tty_returns_true_without_env(monkeypatch):
     d = _d()
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    monkeypatch.delenv("AGENT_AUTO_CONFIRM_TOOL_RETRY", raising=False)
     assert d._confirm_tool_recovery_retry(
         "run_command",
         {"command": "bad"},
@@ -216,34 +215,28 @@ def test_confirm_tool_recovery_retry_non_tty_returns_true_without_env(monkeypatc
     )
 
 
-def test_repl_buffered_line_max_bytes_env(monkeypatch):
+def test_repl_buffered_line_max_bytes_setting(monkeypatch):
     d = _d()
-    monkeypatch.setenv("AGENT_REPL_INPUT_MAX_BYTES", "200000")
-    try:
-        assert d._repl_buffered_line_max_bytes() == 200000
-    finally:
-        monkeypatch.delenv("AGENT_REPL_INPUT_MAX_BYTES", raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "repl_input_max_bytes"), 200000)
+    assert d._repl_buffered_line_max_bytes() == 200000
 
 
 def test_repl_buffered_line_max_bytes_minimum(monkeypatch):
     d = _d()
-    monkeypatch.setenv("AGENT_REPL_INPUT_MAX_BYTES", "100")
-    try:
-        assert d._repl_buffered_line_max_bytes() == 4096
-    finally:
-        monkeypatch.delenv("AGENT_REPL_INPUT_MAX_BYTES", raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "repl_input_max_bytes"), 100)
+    assert d._repl_buffered_line_max_bytes() == 4096
 
 
-def test_tool_recovery_may_run_gated_on_tty_or_env(monkeypatch):
+def test_tool_recovery_may_run_gated_on_tty_or_setting(monkeypatch):
     d = _d()
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    monkeypatch.delenv("AGENT_AUTO_CONFIRM_TOOL_RETRY", raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "auto_confirm_tool_retry"), False)
     assert not d._tool_recovery_may_run(True)
-    monkeypatch.setenv("AGENT_AUTO_CONFIRM_TOOL_RETRY", "1")
-    try:
-        assert d._tool_recovery_may_run(False)
-    finally:
-        monkeypatch.delenv("AGENT_AUTO_CONFIRM_TOOL_RETRY", raising=False)
+    d._settings_set(("agent", "auto_confirm_tool_retry"), True)
+    assert d._tool_recovery_may_run(False)
 
 
 def test_merge_partial_tool_calls_merges_arguments_strings():
@@ -531,13 +524,11 @@ def test_transcript_two_sequential_fetch_different_urls(monkeypatch):
 
 def test_tool_result_user_message_truncates_long_output(monkeypatch):
     d = _d()
-    monkeypatch.setenv("OLLAMA_TOOL_OUTPUT_MAX", "50")
-    try:
-        long_body = "x" * 100
-        msg = d._tool_result_user_message("search_web", {"query": "q"}, long_body)
-        assert "truncated" in msg
-    finally:
-        monkeypatch.delenv("OLLAMA_TOOL_OUTPUT_MAX", raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("ollama", "tool_output_max"), 50)
+    long_body = "x" * 100
+    msg = d._tool_result_user_message("search_web", {"query": "q"}, long_body)
+    assert "truncated" in msg
 
 
 def test_enrich_present_day_does_not_double_year(monkeypatch):
@@ -594,15 +585,13 @@ def test_route_requires_websearch_passes_transcript_to_llm(monkeypatch):
 
 def test_router_transcript_slice_respects_max_messages(monkeypatch):
     d = _d()
-    monkeypatch.setenv("AGENT_ROUTER_TRANSCRIPT_MAX_MESSAGES", "2")
-    try:
-        t = [{"role": "user", "content": str(i)} for i in range(5)]
-        s = d._router_transcript_slice(t)
-        assert len(s) == 2
-        assert s[0]["content"] == "3"
-        assert s[1]["content"] == "4"
-    finally:
-        monkeypatch.delenv("AGENT_ROUTER_TRANSCRIPT_MAX_MESSAGES", raising=False)
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "router_transcript_max_messages"), 2)
+    t = [{"role": "user", "content": str(i)} for i in range(5)]
+    s = d._router_transcript_slice(t)
+    assert len(s) == 2
+    assert s[0]["content"] == "3"
+    assert s[1]["content"] == "4"
 
 
 def test_deliverable_followup_contains_path():
@@ -672,12 +661,13 @@ def test_tool_params_fingerprint_search_web_canonical_query():
 
 def test_search_web_effective_max_results_clamped(monkeypatch):
     d = _d()
-    monkeypatch.setenv("AGENT_SEARCH_WEB_MAX_RESULTS", "12")
+    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._settings_set(("agent", "search_web_max_results"), 12)
     assert d._search_web_effective_max_results({}) == 12
     assert d._search_web_effective_max_results({"max_results": "7"}) == 7
     assert d._search_web_effective_max_results({"max_results": 99}) == 30
     assert d._search_web_effective_max_results({"max_results": 0}) == 1
-    monkeypatch.delenv("AGENT_SEARCH_WEB_MAX_RESULTS", raising=False)
+    d._settings_set(("agent", "search_web_max_results"), 5)
     assert d._search_web_effective_max_results({}) == 5
 
 
