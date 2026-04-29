@@ -8,6 +8,7 @@ import sys
 from contextlib import redirect_stdout
 
 from tests.harness import reload_agent
+from agentlib.settings import AgentSettings
 
 
 def test_second_opinion_disabled_nudges_finalize(monkeypatch):
@@ -164,8 +165,10 @@ def _run_with_seq(
         return responses[idx]
 
     d = reload_agent(monkeypatch, call_ollama_chat=fake_chat)
+    # Keep tests deterministic: ignore the developer's ~/.agent.json entirely.
+    monkeypatch.setattr(d, "_load_agent_prefs", lambda: None)
     # Reset module settings for deterministic behavior.
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     # Provide a placeholder API key when cloud-ai is enabled so hosted reviewer paths are "ready".
     if cloud:
         d._settings_set(("openai", "api_key"), "sk-test-placeholder")

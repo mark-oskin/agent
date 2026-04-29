@@ -16,6 +16,7 @@ from contextlib import redirect_stdout
 import pytest
 
 from tests.harness import j, run_main
+from agentlib.settings import AgentSettings
 
 WEB = "[Web results]\nLink: https://a.example/x\nTitle: t\nSnippet: s\n"
 
@@ -138,7 +139,7 @@ def test_enrich_who_is_president_appends_current_year(monkeypatch):
 
 def test_enrich_respects_ollama_search_enrich_off(monkeypatch):
     d = _d()
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("ollama", "search_enrich"), False)
     q = "Who is the president of France?"
     assert d._enrich_search_query_for_present_day(q) == q
@@ -164,7 +165,7 @@ def test_main_interactive_mode_exits_on_eof(monkeypatch):
 
 def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
     d = _d()
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     ctx_file = tmp_path / "ctx.json"
     ctx_file.write_text(
         json.dumps([{"role": "user", "content": "hi from file"}]),
@@ -236,8 +237,8 @@ def test_interactive_settings_verbose_toggle(monkeypatch):
 def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
     d = _d()
     pref_path = tmp_path / ".agent.json"
-    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(pref_path))
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._set_agent_prefs_path_override(str(pref_path))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     payload = d._build_agent_prefs_payload(
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=True,
@@ -269,11 +270,12 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
     assert data.get("system_prompt") is None
     assert data.get("system_prompt_path") is None
     assert data.get("verbose") == 1
+    d._set_agent_prefs_path_override(None)
 
 
 def test_prefs_ollama_openai_agent_blobs_apply_to_settings(monkeypatch):
     d = _d()
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     prefs = {
         "version": 4,
         "ollama": {"HOST": "http://o.test:11434"},
@@ -288,7 +290,7 @@ def test_prefs_ollama_openai_agent_blobs_apply_to_settings(monkeypatch):
 
 def test_prefs_stored_env_overrides_existing_settings(monkeypatch):
     d = _d()
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("ollama", "host"), "http://from-shell:1")
     prefs = {"version": 4, "ollama": {"HOST": "http://from-file:2"}}
     d._session_defaults_from_prefs(prefs)
@@ -313,7 +315,7 @@ def test_cli_config_overrides_default_agent_json_path(tmp_path, monkeypatch):
 def test_prefs_system_prompt_inline_roundtrip(tmp_path, monkeypatch):
     d = _d()
     pref_path = tmp_path / "prefs.json"
-    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(pref_path))
+    d._set_agent_prefs_path_override(str(pref_path))
     payload = d._build_agent_prefs_payload(
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=False,
@@ -329,6 +331,7 @@ def test_prefs_system_prompt_inline_roundtrip(tmp_path, monkeypatch):
     st = d._session_defaults_from_prefs(d._load_agent_prefs())
     assert st["system_prompt"] == "You are a penguin. JSON only."
     assert st["system_prompt_path"] is None
+    d._set_agent_prefs_path_override(None)
 
 
 def test_prefs_system_prompt_path_roundtrip(tmp_path, monkeypatch):
@@ -336,7 +339,7 @@ def test_prefs_system_prompt_path_roundtrip(tmp_path, monkeypatch):
     pf = tmp_path / "mysys.txt"
     pf.write_text("Loaded from path.\n", encoding="utf-8")
     pref_path = tmp_path / "prefs.json"
-    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(pref_path))
+    d._set_agent_prefs_path_override(str(pref_path))
     payload = d._build_agent_prefs_payload(
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=False,
@@ -352,11 +355,12 @@ def test_prefs_system_prompt_path_roundtrip(tmp_path, monkeypatch):
     st = d._session_defaults_from_prefs(d._load_agent_prefs())
     assert st["system_prompt_path"] == str(pf)
     assert st["system_prompt"] == "Loaded from path.\n"
+    d._set_agent_prefs_path_override(None)
 
 
 def test_interactive_settings_ollama_show_renders(tmp_path, monkeypatch):
     d = _d()
-    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(tmp_path / "x.json"))
+    d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
     lines = ["/settings ollama show", "/quit"]
     it = iter(lines)
 
@@ -375,12 +379,13 @@ def test_interactive_settings_ollama_show_renders(tmp_path, monkeypatch):
         )
     out = buf.getvalue()
     assert '"host"' in out and '"model"' in out
+    d._set_agent_prefs_path_override(None)
 
 
 def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch):
     d = _d()
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
-    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(tmp_path / "x.json"))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
     lines = [
         "/settings thinking show",
         "/settings thinking level high",
@@ -409,11 +414,12 @@ def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch
     assert "thinking:" in out
     assert d._settings_get_str(("agent", "thinking_level"), "") in ("high", "")
     assert isinstance(d._settings_get_bool(("agent", "stream_thinking"), False), bool)
+    d._set_agent_prefs_path_override(None)
 
 
 def test_interactive_settings_tools_lists_toolsets_and_describe(tmp_path, monkeypatch):
     d = _d()
-    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(tmp_path / "x.json"))
+    d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
     lines = [
         "/settings tools",
         "/settings tools describe run_pytest",
@@ -439,12 +445,13 @@ def test_interactive_settings_tools_lists_toolsets_and_describe(tmp_path, monkey
     assert "Toolsets (plugins)" in out
     assert "Tool: run_pytest" in out
     assert "Toolset: dev" in out
+    d._set_agent_prefs_path_override(None)
 
 
 def test_interactive_settings_save_command(tmp_path, monkeypatch):
     d = _d()
     pref_path = tmp_path / "saved.json"
-    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(pref_path))
+    d._set_agent_prefs_path_override(str(pref_path))
     lines = ["/settings save", "/quit"]
     it = iter(lines)
 
@@ -465,11 +472,12 @@ def test_interactive_settings_save_command(tmp_path, monkeypatch):
     data = json.loads(pref_path.read_text(encoding="utf-8"))
     assert data["version"] == 4
     assert data["second_opinion_enabled"] is True
+    d._set_agent_prefs_path_override(None)
 
 
 def test_ctrl_c_cancels_request_but_keeps_repl_running(tmp_path, monkeypatch):
     d = _d()
-    monkeypatch.setattr(d, "_agent_prefs_path", lambda: str(tmp_path / "x.json"))
+    d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
 
     def boom(*args, **kwargs):  # noqa: ARG001
         raise KeyboardInterrupt()
@@ -493,6 +501,7 @@ def test_ctrl_c_cancels_request_but_keeps_repl_running(tmp_path, monkeypatch):
         )
     out = buf.getvalue()
     assert "[Cancelled]" in out
+    d._set_agent_prefs_path_override(None)
 
 
 def test_cli_disable_enable_tool_flags(monkeypatch):
@@ -784,7 +793,7 @@ def test_parse_while_repl_tokens_and_judge_bit():
 
 def test_interactive_show_model_and_reviewer(monkeypatch):
     d = _d()
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("ollama", "model"), "custom-llm:latest")
     lines = ["/show model", "/show reviewer", "/quit"]
     it = iter(lines)

@@ -16,6 +16,7 @@ from contextlib import redirect_stdout
 import pytest
 
 from tests.harness import run_main
+from agentlib.settings import AgentSettings
 
 
 # --- parse_agent_json / normalization (1–12) ---
@@ -102,7 +103,7 @@ def test_tools_dir_override_loads_plugins(tmp_path, monkeypatch):
 
 def test_ollama_request_think_value_gpt_oss_defaults_to_medium(monkeypatch):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("ollama", "model"), "gpt-oss:20b")
     d._settings_set(("agent", "thinking"), True)
     d._settings_set(("agent", "thinking_level"), "")
@@ -112,7 +113,7 @@ def test_ollama_request_think_value_gpt_oss_defaults_to_medium(monkeypatch):
 def test_ollama_request_think_false_when_disabled_even_if_level_set(monkeypatch):
     """Stale AGENT_THINKING_LEVEL must not send think= to Ollama when thinking is off."""
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("agent", "thinking"), False)
     d._settings_set(("agent", "thinking_level"), "high")
     assert d._ollama_request_think_value() is False
@@ -120,7 +121,7 @@ def test_ollama_request_think_false_when_disabled_even_if_level_set(monkeypatch)
 
 def test_stream_thinking_prints_done_thinking_separator(monkeypatch):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("agent", "stream_thinking"), True)
     lines = iter(
         [
@@ -235,7 +236,7 @@ def test_is_tool_result_weak_requires_url_for_search_sections():
 
 def test_context_window_manager_summarizes_when_over_budget(monkeypatch):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("agent", "context_tokens"), 200)
     d._settings_set(("agent", "context_trigger_frac"), 0.50)
     d._settings_set(("agent", "context_target_frac"), 0.40)
@@ -271,7 +272,7 @@ def test_context_window_manager_summarizes_when_over_budget(monkeypatch):
 
 def test_context_manager_prefs_applied_without_env(monkeypatch):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
 
     def fake_summary(**kwargs):  # noqa: ARG001
         return "SUMMARY"
@@ -332,7 +333,7 @@ def test_enrich_search_query_adds_year_for_current(monkeypatch):
 
 def test_agent_progress_prints_to_stderr_when_enabled(monkeypatch, capsys):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("agent", "quiet"), False)
     d._settings_set(("agent", "progress"), True)
     d._agent_progress("hello")
@@ -343,7 +344,7 @@ def test_agent_progress_prints_to_stderr_when_enabled(monkeypatch, capsys):
 
 def test_agent_progress_silent_when_quiet(monkeypatch, capsys):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("agent", "quiet"), True)
     d._agent_progress("hello")
     assert capsys.readouterr().err == ""
@@ -351,7 +352,7 @@ def test_agent_progress_silent_when_quiet(monkeypatch, capsys):
 
 def test_agent_progress_silent_when_progress_off(monkeypatch, capsys):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("agent", "quiet"), False)
     d._settings_set(("agent", "progress"), False)
     d._agent_progress("hello")
@@ -360,7 +361,7 @@ def test_agent_progress_silent_when_progress_off(monkeypatch, capsys):
 
 def test_apply_cli_primary_model_ollama_sets_setting(monkeypatch):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("ollama", "model"), "before")
     p = d.default_primary_llm_profile()
     p2 = d._apply_cli_primary_model("after", p)
@@ -370,7 +371,7 @@ def test_apply_cli_primary_model_ollama_sets_setting(monkeypatch):
 
 def test_apply_cli_primary_model_hosted_replaces_model_only(monkeypatch):
     d = importlib.import_module("agent")
-    d._SETTINGS = json.loads(json.dumps(d._DEFAULT_SETTINGS))
+    d._SETTINGS_OBJ = AgentSettings.defaults()
     d._settings_set(("ollama", "model"), "ollama-unchanged")
     h = d.LlmProfile(
         backend="hosted",

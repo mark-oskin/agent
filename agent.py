@@ -34,103 +34,35 @@ import requests
 # All settings come from ~/.agent.json (prefs) and/or CLI flags (process-local).
 #
 
-_DEFAULT_SETTINGS = {
-    "ollama": {
-        "host": "http://localhost:11434",
-        "model": "gemma4:e4b",
-        "second_opinion_model": "llama3.2:latest",
-        "debug": False,
-        "tool_output_max": 14000,
-        "search_enrich": True,
-    },
-    "openai": {
-        "api_key": "",
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o-mini",
-        "cloud_model": "gpt-4o-mini",
-    },
-    "agent": {
-        "quiet": False,
-        "progress": True,
-        "prompt_templates_dir": "",
-        "skills_dir": "",
-        "tools_dir": "",
-        "repl_history": "",
-        "repl_input_max_bytes": 0,  # 0 means use built-in default
-        "repl_buffered_line": False,
-        "thinking": False,
-        "thinking_level": "",
-        "stream_thinking": False,
-        "search_web_max_results": 5,
-        "search_web_backend": "ddg",
-        "searxng_url": "https://searx.party",
-        "auto_confirm_tool_retry": False,
-        "context_tokens": 0,
-        "hosted_context_tokens": 0,
-        "ollama_context_tokens": 0,
-        "disable_context_manager": False,
-        "context_trigger_frac": 0.75,
-        "context_target_frac": 0.55,
-        "context_keep_tail_messages": 12,
-        "router_transcript_max_messages": 80,
-    },
-}
+from agentlib import AgentSettings
+from agentlib import prefs as _prefs
 
-# Module-global settings state (defaults until main() applies prefs/CLI).
-_SETTINGS: dict = json.loads(json.dumps(_DEFAULT_SETTINGS))
+# Module-global settings object (defaults until main() applies prefs/CLI).
+_SETTINGS_OBJ: AgentSettings = AgentSettings.defaults()
 
 
 def _settings_get(path: Tuple[str, str]):
-    grp, key = path
-    g = _SETTINGS.get(grp) if isinstance(_SETTINGS, dict) else None
-    if not isinstance(g, dict):
-        return None
-    return g.get(key)
+    return _SETTINGS_OBJ.get(path)
 
 
 def _settings_get_str(path: Tuple[str, str], default: str = "") -> str:
-    v = _settings_get(path)
-    s = str(v) if v is not None else ""
-    s = s.strip()
-    return s if s else default
+    return _SETTINGS_OBJ.get_str(path, default=default)
 
 
 def _settings_get_bool(path: Tuple[str, str], default: bool = False) -> bool:
-    v = _settings_get(path)
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    if isinstance(v, str):
-        return v.strip().lower() in ("1", "true", "yes", "y", "on")
-    return default
+    return _SETTINGS_OBJ.get_bool(path, default=default)
 
 
 def _settings_get_int(path: Tuple[str, str], default: int = 0) -> int:
-    v = _settings_get(path)
-    try:
-        if v is None:
-            return int(default)
-        return int(str(v).strip(), 10)
-    except Exception:
-        return int(default)
+    return _SETTINGS_OBJ.get_int(path, default=default)
 
 
 def _settings_get_float(path: Tuple[str, str], default: float = 0.0) -> float:
-    v = _settings_get(path)
-    try:
-        if v is None:
-            return float(default)
-        return float(str(v).strip())
-    except Exception:
-        return float(default)
+    return _SETTINGS_OBJ.get_float(path, default=default)
 
 
 def _settings_set(path: Tuple[str, str], value) -> None:
-    grp, key = path
-    if grp not in _SETTINGS or not isinstance(_SETTINGS.get(grp), dict):
-        _SETTINGS[grp] = {}
-    _SETTINGS[grp][key] = value
+    _SETTINGS_OBJ.set(path, value)
 
 
 def _ollama_base_url():
@@ -760,56 +692,21 @@ def _tool_progress_message(tool: str, params: dict) -> str:
     return f"Tool: {t}"
 
 
-_AGENT_PREFS_VERSION = 4
+_AGENT_PREFS_VERSION = _prefs.AGENT_PREFS_VERSION
 
 
 def _agent_prefs_path() -> str:
-    global _AGENT_PREFS_PATH_OVERRIDE
-    if isinstance(_AGENT_PREFS_PATH_OVERRIDE, str) and _AGENT_PREFS_PATH_OVERRIDE.strip():
-        return _AGENT_PREFS_PATH_OVERRIDE
-    return os.path.join(os.path.expanduser("~"), ".agent.json")
-
-
-_AGENT_PREFS_PATH_OVERRIDE: Optional[str] = None
+    return _prefs.agent_prefs_path()
 
 
 def _set_agent_prefs_path_override(path: Optional[str]) -> None:
-    """Override ~/.agent.json path for this process (used by --config)."""
-    global _AGENT_PREFS_PATH_OVERRIDE
-    p = (path or "").strip()
-    if not p:
-        _AGENT_PREFS_PATH_OVERRIDE = None
-        return
-    _AGENT_PREFS_PATH_OVERRIDE = os.path.abspath(os.path.expanduser(p))
+    _prefs.set_agent_prefs_path_override(path)
 
 
 def _parse_and_apply_cli_config_flag(argv: list[str]) -> list[str]:
-    """
-    Extract --config <file> or --config=<file> from argv, apply override, and return remaining args.
-    This must run before loading prefs.
-    """
-    out: list[str] = []
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a == "--config":
-            if i + 1 >= len(argv) or not str(argv[i + 1]).strip():
-                print("Error: --config requires a file path.", file=sys.stderr)
-                sys.exit(2)
-            _set_agent_prefs_path_override(argv[i + 1])
-            i += 2
-            continue
-        if isinstance(a, str) and a.startswith("--config="):
-            p = a.split("=", 1)[1]
-            if not str(p).strip():
-                print("Error: --config=<file> requires a non-empty file path.", file=sys.stderr)
-                sys.exit(2)
-            _set_agent_prefs_path_override(p)
-            i += 1
-            continue
-        out.append(a)
-        i += 1
-    return out
+    from agentlib.cli import parse_and_apply_cli_config_flag
+
+    return parse_and_apply_cli_config_flag(argv)
 
 
 def _agent_module_dir() -> str:
@@ -1391,149 +1288,27 @@ def _repl_read_line(prompt: str) -> str:
 
 
 def _load_agent_prefs() -> Optional[dict]:
-    path = _agent_prefs_path()
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    return _prefs.load_agent_prefs()
 
 
 def _migrate_settings_groups_from_prefs(prefs: dict) -> None:
-    """
-    Apply settings from prefs into module-global _SETTINGS, supporting legacy shapes:
-    - prefs["ollama"]/["openai"]/["agent"] stored as env-like keys ("HOST", "OLLAMA_HOST", etc)
-    - legacy top-level keys like "ollama_model"
-    """
-    if not isinstance(prefs, dict):
-        return
-
-    def apply_group(group: str, mapping: dict) -> None:
-        if not isinstance(mapping, dict):
-            return
-        for k, v in mapping.items():
-            if v is None:
-                continue
-            key = str(k).strip()
-            if not key:
-                continue
-            lk = key.strip().lower().replace("-", "_")
-            # Accept both short keys ("host") and env-style keys ("OLLAMA_HOST", "HOST").
-            lk = re.sub(r"^(ollama_|openai_|agent_)", "", lk)
-            if group == "ollama":
-                aliases = {
-                    "host": "host",
-                    "model": "model",
-                    "second_opinion_model": "second_opinion_model",
-                    "second_opinion": "second_opinion_model",
-                    "second_opinion_model_tag": "second_opinion_model",
-                    "tool_output_max": "tool_output_max",
-                    "debug": "debug",
-                    "search_enrich": "search_enrich",
-                }
-            elif group == "openai":
-                aliases = {
-                    "api_key": "api_key",
-                    "base_url": "base_url",
-                    "model": "model",
-                    "cloud_model": "cloud_model",
-                }
-            else:
-                aliases = {
-                    "quiet": "quiet",
-                    "progress": "progress",
-                    "prompt_templates_dir": "prompt_templates_dir",
-                    "skills_dir": "skills_dir",
-                    "tools_dir": "tools_dir",
-                    "repl_history": "repl_history",
-                    "repl_input_max_bytes": "repl_input_max_bytes",
-                    "repl_buffered_line": "repl_buffered_line",
-                    "thinking": "thinking",
-                    "thinking_level": "thinking_level",
-                    "stream_thinking": "stream_thinking",
-                    "search_web_max_results": "search_web_max_results",
-                    "search_web_backend": "search_web_backend",
-                    "searxng_url": "searxng_url",
-                    "auto_confirm_tool_retry": "auto_confirm_tool_retry",
-                    "context_tokens": "context_tokens",
-                    "hosted_context_tokens": "hosted_context_tokens",
-                    "ollama_context_tokens": "ollama_context_tokens",
-                    "disable_context_manager": "disable_context_manager",
-                    "context_trigger_frac": "context_trigger_frac",
-                    "context_target_frac": "context_target_frac",
-                    "context_keep_tail_messages": "context_keep_tail_messages",
-                    "router_transcript_max_messages": "router_transcript_max_messages",
-                }
-            if lk not in aliases:
-                continue
-            _settings_set((group, aliases[lk]), v)
-
-    for grp in ("ollama", "openai", "agent"):
-        apply_group(grp, prefs.get(grp) if isinstance(prefs.get(grp), dict) else {})
-
-    # Legacy top-level keys.
-    if isinstance(prefs.get("ollama_model"), str) and prefs["ollama_model"].strip():
-        _settings_set(("ollama", "model"), prefs["ollama_model"].strip())
-    if isinstance(prefs.get("ollama_second_opinion_model"), str) and prefs["ollama_second_opinion_model"].strip():
-        _settings_set(("ollama", "second_opinion_model"), prefs["ollama_second_opinion_model"].strip())
+    _prefs.apply_prefs_to_settings(_SETTINGS_OBJ, prefs)
 
 
 def _settings_group_keys_lines(group: str) -> str:
-    grp = (group or "").strip().lower()
-    if grp not in ("ollama", "openai", "agent"):
-        return ""
-    keys = sorted(((_DEFAULT_SETTINGS.get(grp) or {}).keys()))
-    lines = ["Keys:"]
-    for k in keys:
-        lines.append(f"  {k}")
-    return "\n".join(lines)
+    return _SETTINGS_OBJ.group_keys_lines(group)
 
 
 def _settings_group_show(group: str) -> str:
-    grp = (group or "").strip().lower()
-    if grp not in ("ollama", "openai", "agent"):
-        raise ValueError("group must be ollama, openai, or agent")
-    cur = _SETTINGS.get(grp) if isinstance(_SETTINGS, dict) else None
-    if not isinstance(cur, dict):
-        cur = {}
-    return json.dumps(cur, indent=2, ensure_ascii=False, sort_keys=True)
+    return _SETTINGS_OBJ.group_show(group)
 
 
 def _settings_group_set(group: str, raw_key: str, raw_value: str) -> str:
-    grp = (group or "").strip().lower()
-    key = (raw_key or "").strip().lower().replace("-", "_")
-    if grp not in ("ollama", "openai", "agent"):
-        raise ValueError("group must be ollama, openai, or agent")
-    defaults = _DEFAULT_SETTINGS.get(grp) or {}
-    if key not in defaults:
-        raise ValueError(f"unknown key {key!r} for group {grp!r}")
-    dv = defaults.get(key)
-    text = (raw_value or "").strip()
-    if isinstance(dv, bool):
-        v = text.lower() in ("1", "true", "yes", "y", "on")
-    elif isinstance(dv, int) and not isinstance(dv, bool):
-        v = int(float(text)) if text else 0
-    elif isinstance(dv, float):
-        v = float(text) if text else 0.0
-    else:
-        v = text
-    _settings_set((grp, key), v)
-    return f"{grp}.{key} set. Use /settings save to persist."
+    return _SETTINGS_OBJ.group_set(group, raw_key, raw_value)
 
 
 def _settings_group_unset(group: str, raw_key: str) -> str:
-    grp = (group or "").strip().lower()
-    key = (raw_key or "").strip().lower().replace("-", "_")
-    if grp not in ("ollama", "openai", "agent"):
-        raise ValueError("group must be ollama, openai, or agent")
-    defaults = _DEFAULT_SETTINGS.get(grp) or {}
-    if key not in defaults:
-        raise ValueError(f"unknown key {key!r} for group {grp!r}")
-    _settings_set((grp, key), defaults.get(key))
-    return f"{grp}.{key} reset to default. Use /settings save to persist."
+    return _SETTINGS_OBJ.group_unset(group, raw_key)
 
 
 def _llm_profile_to_pref(profile: LlmProfile) -> dict:
@@ -1569,20 +1344,7 @@ def _llm_profile_from_pref(obj: object) -> Optional[LlmProfile]:
 
 
 def _write_agent_prefs_file(payload: dict) -> None:
-    path = _agent_prefs_path()
-    body = json.dumps(payload, indent=2, ensure_ascii=False)
-    parent = os.path.dirname(path) or os.path.expanduser("~")
-    fd, tmp = tempfile.mkstemp(prefix=".agent.", suffix=".json", dir=parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    _prefs.write_agent_prefs_file(payload)
 
 
 def _build_agent_prefs_payload(
@@ -1616,9 +1378,7 @@ def _build_agent_prefs_payload(
         else None,
     }
     # Persist JSON-backed settings groups (lowercase keys).
-    payload["ollama"] = dict(_SETTINGS.get("ollama") or {})
-    payload["openai"] = dict(_SETTINGS.get("openai") or {})
-    payload["agent"] = dict(_SETTINGS.get("agent") or {})
+    payload.update(_SETTINGS_OBJ.as_groups_dict())
     if reviewer_hosted_profile is not None and reviewer_hosted_profile.backend == "hosted":
         payload["second_opinion_reviewer"] = _llm_profile_to_pref(reviewer_hosted_profile)
     else:
@@ -6727,115 +6487,55 @@ def main():
         _register_tool_aliases()
     except Exception:
         pass
-    verbose = _coerce_verbose_level(st.get("verbose", 0))
-    verbose_flag_set = False
-    second_opinion_flag_set = False
-    cloud_ai_flag_set = False
-    query_parts = []
-    second_opinion_enabled = bool(st["second_opinion_enabled"])
-    cloud_ai_enabled = bool(st["cloud_ai_enabled"])
-    load_context_path: Optional[str] = None
-    save_context_path: Optional[str] = st["save_context_path"]
-    enabled_tools = set(st["enabled_tools"])
-    primary_profile = st["primary_profile"]
+    from agentlib.cli import parse_main_argv
+
+    verbose0 = _coerce_verbose_level(st.get("verbose", 0))
+    second_opinion0 = bool(st["second_opinion_enabled"])
+    cloud0 = bool(st["cloud_ai_enabled"])
+    enabled_tools0 = set(st["enabled_tools"])
+    save_context_path0: Optional[str] = st["save_context_path"]
+    primary_profile0 = st["primary_profile"]
     reviewer_hosted_profile: Optional[LlmProfile] = st["reviewer_hosted_profile"]
     reviewer_ollama_model: Optional[str] = st["reviewer_ollama_model"]
-    prompt_templates = st.get("prompt_templates") if isinstance(st.get("prompt_templates"), dict) else _default_prompt_templates()
+
+    parsed = parse_main_argv(
+        argv,
+        verbose=verbose0,
+        second_opinion_enabled=second_opinion0,
+        cloud_ai_enabled=cloud0,
+        save_context_path=save_context_path0,
+        enabled_tools=enabled_tools0,
+        primary_profile=primary_profile0,
+        reviewer_hosted_profile=reviewer_hosted_profile,
+        reviewer_ollama_model=reviewer_ollama_model,
+        strip_leading_dashes_flag=_strip_leading_dashes_flag,
+        print_cli_help=_print_cli_help,
+        apply_cli_primary_model=_apply_cli_primary_model,
+        normalize_tool_name=_normalize_tool_name,
+        format_unknown_tool_hint=_format_unknown_tool_hint,
+        format_settings_tools_list=_format_settings_tools_list,
+    )
+    if parsed.help_requested:
+        return
+    verbose = parsed.verbose
+    verbose_flag_set = parsed.verbose_flag_set
+    second_opinion_enabled = parsed.second_opinion_enabled
+    second_opinion_flag_set = parsed.second_opinion_flag_set
+    cloud_ai_enabled = parsed.cloud_ai_enabled
+    cloud_ai_flag_set = parsed.cloud_ai_flag_set
+    load_context_path = parsed.load_context_path
+    save_context_path = parsed.save_context_path
+    enabled_tools = set(parsed.enabled_tools)
+    primary_profile = parsed.primary_profile
+    prompt_template_selected = parsed.prompt_template_selected
+    query_parts = list(parsed.query_parts)
+
+    prompt_templates = (
+        st.get("prompt_templates")
+        if isinstance(st.get("prompt_templates"), dict)
+        else _default_prompt_templates()
+    )
     prompt_template_default = (st.get("prompt_template_default") or "coding").strip()
-    prompt_template_selected: Optional[str] = None
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        fa = _strip_leading_dashes_flag(a)
-        if (a or "").startswith("-") and fa in ("help", "h", "?"):
-            _print_cli_help()
-            return
-        if (a or "").startswith("-") and (fa == "model" or fa.startswith("model=")):
-            mname: str
-            if fa == "model":
-                if i + 1 >= len(argv):
-                    print("Error: --model requires a model name.", file=sys.stderr)
-                    return
-                mname = argv[i + 1].strip()
-                if not mname:
-                    print("Error: --model name must be non-empty.", file=sys.stderr)
-                    return
-                i += 2
-            else:
-                _eq = a.split("=", 1)
-                if len(_eq) < 2 or not _eq[1].strip():
-                    print(
-                        "Error: --model=<name> requires a non-empty name.",
-                        file=sys.stderr,
-                    )
-                    return
-                mname = _eq[1].strip()
-                i += 1
-            primary_profile = _apply_cli_primary_model(mname, primary_profile)
-            continue
-        if fa in ("enable-tool",):
-            if i + 1 >= len(argv):
-                print("Error: -enable_tool requires a tool name.")
-                return
-            t = _normalize_tool_name(argv[i + 1])
-            if not t:
-                print("Error: " + _format_unknown_tool_hint(argv[i + 1]))
-                return
-            enabled_tools.add(t)
-            i += 2
-            continue
-        if fa in ("disable-tool",):
-            if i + 1 >= len(argv):
-                print("Error: -disable_tool requires a tool name.")
-                return
-            t = _normalize_tool_name(argv[i + 1])
-            if not t:
-                print("Error: " + _format_unknown_tool_hint(argv[i + 1]))
-                return
-            enabled_tools.discard(t)
-            i += 2
-            continue
-        if fa in ("list-tools",):
-            print(_format_settings_tools_list(enabled_tools))
-            return
-        if _strip_leading_dashes_flag(a) == "verbose":
-            if i + 1 < len(argv) and argv[i + 1] in ("0", "1", "2"):
-                verbose = int(argv[i + 1])
-                i += 2
-            else:
-                verbose = 2
-                i += 1
-            verbose_flag_set = True
-            continue
-        elif a in ("--second-opinion", "--second_opinion"):
-            second_opinion_enabled = True
-            second_opinion_flag_set = True
-            i += 1
-        elif a in ("--cloud-ai", "--cloud_ai"):
-            cloud_ai_enabled = True
-            cloud_ai_flag_set = True
-            i += 1
-        elif a in ("--load-context", "--load_context"):
-            if i + 1 >= len(argv):
-                print("Error: --load_context requires a file path.")
-                return
-            load_context_path = argv[i + 1]
-            i += 2
-        elif a in ("--save-context", "--save_context"):
-            if i + 1 >= len(argv):
-                print("Error: --save_context requires a file path.")
-                return
-            save_context_path = argv[i + 1]
-            i += 2
-        elif a in ("--prompt-template", "--prompt_template"):
-            if i + 1 >= len(argv):
-                print("Error: --prompt-template requires a template name.")
-                return
-            prompt_template_selected = argv[i + 1].strip()
-            i += 2
-        else:
-            query_parts.append(a)
-            i += 1
 
     # One-shot scripting mode: when stdout is redirected, default to quiet unless explicitly overridden.
     if not sys.stdout.isatty() and not verbose_flag_set:
