@@ -91,17 +91,7 @@ When adding or modifying commands:
 
 ## Embedding API (`import agent`)
 
-### `AgentSession`
-
-`AgentSession` provides a stateful interface for other Python programs:
-
-- `session.messages`: conversation history for that session
-- `session.run_query(text)`: run a normal agent turn
-- `session.execute(line)`: run a REPL-style command line (e.g. `/settings ...`, `/while ...`)
-
-Important limitation (current design):
-
-- Some toggles are still backed by **process environment variables** (`AGENT_*`, `OLLAMA_*`). That means multiple sessions are best used **sequentially** unless you avoid env-backed settings.
+Temporarily removed. `agent.py` is CLI/REPL-only for now.
 
 ## Packaging / install
 

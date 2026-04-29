@@ -14,7 +14,7 @@ It can run as:
 - **Plugin toolsets** add optional tools from a `tools/` directory, gated by your settings and per-request routing.
 - **Skills** (JSON in `skills/`) specialize behavior with extra prompt text, optional **multi-step workflows**, and a tighter **tool allowlist** when a skill matches.
 - A **context window** helper can summarize older turns when the transcript grows; settings live in `~/.agent.json` and the REPL.
-- The agent can also be **embedded** in other Python programs via a **stateful** `AgentSession` object (see **Embedding / Python API**).
+<!-- Embedding / Python API temporarily removed; CLI/REPL only. -->
 
 ## Install
 
@@ -83,14 +83,13 @@ Run `./agent.py --help` for the full text.
 
 - **Default file:** `~/.agent.json` (versioned schema; the agent migrates/reads what it understands).
 - **Override path:** `--config ./path/to/agent.json`
-- In the **REPL**, use `/settings ollama`, `/settings openai`, `/settings agent` to view or set persisted environment-style keys, then **`/settings save`** to write the file.
-- **Precedence:** If a full variable (e.g. `OLLAMA_HOST`) is set in the shell when the process starts, that value is kept for that name; the file does not override it. See `/help environment` in the REPL for the full list.
+- In the **REPL**, use `/settings ollama`, `/settings openai`, `/settings agent` to view or set persisted settings, then **`/settings save`** to write the file.
 
 ## Interactive REPL (important commands)
 
 | Command | Purpose |
 |---------|---------|
-| `/help`, `/help environment` | Command list; how env vars interact with the config file |
+| `/help` | Command list |
 | `/quit` | Exit |
 | `/clear` | Clear in-memory messages (and the stored skill for `/skill reuse`) |
 | `/models` | List local Ollama models (`/api/tags`) |
@@ -108,37 +107,13 @@ At `verbose=0`, startup is minimal (`Interactive mode. Type /help for commands.`
 
 ## Embedding / Python API
 
-You can embed the agent in another Python program.
-
-- `AgentSession` is **stateful**: it keeps conversation history (`session.messages`) and session-local settings.
-- `session.run_query("...")` runs one normal agent turn (like a non-command REPL line).
-- `session.execute("...")` executes a **REPL-style line** (commands like `/settings ...`, `/while ...`, `/skill ...`, `/show ...`, etc.) and returns structured output.
-
-Example:
-
-```python
-import agent
-
-s = agent.AgentSession.from_prefs()   # load defaults (and apply env overrides)
-
-print(s.execute("/settings verbose 1").output)
-print(s.execute("/settings model llama3.2:latest").output)
-print(s.execute("/show model").output)
-
-r = s.run_query("Explain how toolsets are routed per request.")
-print(r)
-```
-
-Notes:
-
-- Some options (notably `AGENT_*` and `OLLAMA_*`) are still backed by **process environment variables** in the current implementation, so avoid mutating those concurrently across multiple sessions in different threads.
-- For deeper extension / internals, see `DEVELOPERS.md`.
+Temporarily unavailable. Use the CLI/REPL for now.
 
 ## Core behavior
 
 ### Primary and reviewer LLMs
 
-- **Primary** defaults to local **Ollama** (`OLLAMA_HOST`, `OLLAMA_MODEL`). You can switch to a **hosted** OpenAI-compatible base URL from the REPL: `/settings primary llm hosted …` or `… ollama`.
+- **Primary** defaults to local **Ollama**. You can switch to a **hosted** OpenAI-compatible base URL from the REPL: `/settings primary llm hosted …` or `… ollama`.
 - A **second-opinion** path can use another Ollama model or a separate hosted profile (`/settings second_opinion llm …`). Enable the feature with `/settings enable second_opinion` (and CLI flags as needed; see preferences).
 
 ### Context window
@@ -147,7 +122,7 @@ The agent can **compact** older transcript turns when a heuristic size threshold
 
 ### Web search
 
-Web search result count is capped; configure with **`AGENT_SEARCH_WEB_MAX_RESULTS`** (1–30) or via `~/.agent.json` / `/settings agent` where exposed.
+Web search result count is capped; configure via `~/.agent.json` / `/settings agent` where exposed.
 
 ## Tools
 
