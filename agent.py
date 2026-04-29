@@ -1926,60 +1926,26 @@ def _openai_cloud_model():
 
 
 def call_ollama_plaintext(messages: list, model: str) -> str:
-    """Ollama /api/chat without JSON format — for second-opinion reviewer text."""
-    base = _ollama_base_url()
-    url = f"{base}/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "think": _ollama_request_think_value(),
-    }
+    from agentlib.llm.calls import call_ollama_plaintext as _impl
 
-    def run_chat(streaming: bool) -> Tuple[str, Optional[dict]]:
-        body = {**payload, "stream": streaming}
-        if streaming:
-            with requests.post(url, json=body, stream=True, timeout=600) as r:
-                r.raise_for_status()
-                msg, usage, _ = _merge_stream_message_chunks(
-                    r.iter_lines(decode_unicode=True), stream_chunks=False
-                )
-            return (msg.get("content") or "").strip(), usage
-        r = requests.post(url, json=body, timeout=600)
-        r.raise_for_status()
-        data = r.json()
-        msg = data.get("message") or {}
-        return (msg.get("content") or "").strip(), _ollama_usage_from_chat_response(data)
-
-    text, _usage = run_chat(streaming=True)
-    if not text:
-        text, _usage = run_chat(streaming=False)
-    return text or "(empty reviewer response)"
+    return _impl(
+        base_url=_ollama_base_url(),
+        messages=messages,
+        model=model,
+        think_value=_ollama_request_think_value(),
+        merge_stream_message_chunks=_merge_stream_message_chunks,
+    )
 
 
 def call_hosted_chat_plain(messages: list, profile: LlmProfile) -> str:
-    """Non-streaming chat.completions for OpenAI-compatible APIs (OpenAI, Grok, Groq, Azure, etc.)."""
-    key = (profile.api_key or "").strip()
-    if not key:
-        return "Cloud AI error: api_key is not set."
-    base = profile.base_url.rstrip("/")
-    url = f"{base}/chat/completions"
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    body = {
-        "model": profile.model,
-        "messages": messages,
-        "stream": False,
-        "temperature": 0.3,
-    }
-    try:
-        r = requests.post(url, json=body, headers=headers, timeout=120)
-        r.raise_for_status()
-        data = r.json()
-        choice0 = (data.get("choices") or [{}])[0]
-        msg = choice0.get("message") or {}
-        return (msg.get("content") or "").strip() or "(empty cloud response)"
-    except Exception as e:
-        return f"Cloud AI error: {e}"
+    from agentlib.llm.calls import call_hosted_chat_plain as _impl
+
+    return _impl(
+        messages,
+        base_url=profile.base_url,
+        model=profile.model,
+        api_key=profile.api_key,
+    )
 
 
 def call_openai_chat_plain(messages: list) -> str:
@@ -1999,84 +1965,24 @@ def call_llm_json_content(
     *,
     verbose: int = 0,
 ) -> str:
-    """
-    One-shot model call: return assistant *content* as stored by the model.
-    Does NOT run agent post-processing (no _message_to_agent_json_text), so
-    the reply can be arbitrary JSON (skill selector, workflow plan, etc.).
+    from agentlib.llm.calls import call_llm_json_content as _impl
 
-    Local Ollama uses /api/chat with format=json. Hosted uses chat.completions
-    and returns the message content string.
-    """
-    global _last_ollama_chat_usage
     prof = primary_profile or default_primary_llm_profile()
-    if prof.backend == "hosted":
-        _last_ollama_chat_usage = None
-        key = (prof.api_key or "").strip()
-        if not key:
-            return json.dumps({"_call_error": "api_key is not set."})
-        base = prof.base_url.rstrip("/")
-        url = f"{base}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
-        body = {
-            "model": prof.model,
-            "messages": messages,
-            "stream": False,
-            "temperature": 0.2,
-        }
-        try:
-            r = requests.post(url, json=body, headers=headers, timeout=300)
-            r.raise_for_status()
-            data = r.json()
-            choice0 = (data.get("choices") or [{}])[0]
-            msg = choice0.get("message") or {}
-            text = (msg.get("content") or "").strip()
-            if verbose >= 2 and text:
-                print(text, flush=True)
-            return text or ""
-        except Exception as e:
-            return json.dumps({"_call_error": f"Hosted JSON call error: {e}"})
 
-    _last_ollama_chat_usage = None
-    base = _ollama_base_url()
-    url = f"{base}/api/chat"
-    payload = {
-        "model": _ollama_model(),
-        "messages": messages,
-        "stream": True,
-        "format": "json",
-        "think": False,
-    }
-    try:
+    def _set_usage(u: Optional[dict]) -> None:
+        global _last_ollama_chat_usage
+        _last_ollama_chat_usage = u
 
-        def run_once(streaming: bool) -> Tuple[str, Optional[dict]]:
-            body = {**payload, "stream": streaming}
-            if streaming:
-                with requests.post(url, json=body, stream=True, timeout=300) as r:
-                    r.raise_for_status()
-                    msg, usage, _ = _merge_stream_message_chunks(
-                        r.iter_lines(decode_unicode=True), stream_chunks=verbose >= 2
-                    )
-            else:
-                r = requests.post(url, json=body, timeout=300)
-                r.raise_for_status()
-                data = r.json()
-                msg = data.get("message") or {}
-                usage = _ollama_usage_from_chat_response(data)
-            return ((msg.get("content") or "").strip(), usage)
-
-        text, usage = run_once(streaming=True)
-        if not text:
-            text, usage = run_once(streaming=False)
-        if usage:
-            _last_ollama_chat_usage = usage
-        if verbose >= 2 and text:
-            print(flush=True)
-        return text
-    except Exception as e:
-        return json.dumps({"_call_error": f"Ollama JSON call error: {e}"})
+    return _impl(
+        messages,
+        primary_profile=prof,
+        verbose=verbose,
+        ollama_base_url=_ollama_base_url(),
+        ollama_model=_ollama_model(),
+        merge_stream_message_chunks=_merge_stream_message_chunks,
+        ollama_usage_from_chat_response=_ollama_usage_from_chat_response,
+        set_last_ollama_usage=_set_usage,
+    )
 
 
 def _parse_json_with_skill_id(raw: str) -> dict:
@@ -2270,37 +2176,18 @@ def call_hosted_agent_chat(
     *,
     verbose: int = 0,
 ) -> str:
-    """Hosted primary agent: same JSON contract as Ollama /api/chat + format json."""
-    key = (profile.api_key or "").strip()
-    if not key:
-        return json.dumps(
-            {"action": "error", "error": "api_key is not set."}
-        )
-    base = profile.base_url.rstrip("/")
-    url = f"{base}/chat/completions"
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    body = {
-        "model": profile.model,
-        "messages": messages,
-        "stream": False,
-        "temperature": 0.3,
-    }
-    try:
-        r = requests.post(url, json=body, headers=headers, timeout=600)
-        r.raise_for_status()
-        data = r.json()
-        choice0 = (data.get("choices") or [{}])[0]
-        msg = choice0.get("message") or {}
-        text = _message_to_agent_json_text(msg, enabled_tools).strip()
-        if not text:
-            return json.dumps({"action": "answer", "answer": "No response from model."})
-        if verbose >= 2:
-            print(text, flush=True)
-            _verbose_emit_final_agent_readable(text)
-        return text
-    except Exception as e:
-        print(f"[DEBUG] Hosted chat error: {e}")
-        return json.dumps({"action": "error", "error": str(e)})
+    from agentlib.llm.calls import call_hosted_agent_chat as _impl
+
+    return _impl(
+        messages,
+        base_url=profile.base_url,
+        model=profile.model,
+        api_key=profile.api_key,
+        enabled_tools=enabled_tools,
+        verbose=verbose,
+        message_to_agent_json_text=_message_to_agent_json_text,
+        verbose_emit_final_agent_readable=_verbose_emit_final_agent_readable,
+    )
 
 
 def _second_opinion_reviewer_messages(user_query: str, primary_answer: str, rationale: str) -> list:
@@ -2345,78 +2232,31 @@ def call_ollama_chat(
     *,
     verbose: int = 0,
 ) -> str:
-    """
-    Agent chat: local Ollama JSON /api/chat, or hosted OpenAI-compatible chat.completions
-    when primary_profile.backend == \"hosted\".
-    """
-    global _last_ollama_chat_usage
+    from agentlib.llm.calls import call_ollama_chat as _impl
+
     prof = primary_profile or default_primary_llm_profile()
-    if prof.backend == "hosted":
-        _last_ollama_chat_usage = None
-        return call_hosted_agent_chat(messages, prof, enabled_tools, verbose=verbose)
 
-    base = _ollama_base_url()
-    url = f"{base}/api/chat"
-    payload = {
-        "model": _ollama_model(),
-        "messages": messages,
-        "stream": True,
-        "format": "json",
-        "think": _ollama_request_think_value(),
-    }
-    debug = "1" if _settings_get_bool(("ollama", "debug"), False) else ""
+    def _set_usage(u: Optional[dict]) -> None:
+        global _last_ollama_chat_usage
+        _last_ollama_chat_usage = u
 
-    stream_llm = verbose >= 2
-
-    def run_chat(streaming: bool) -> Tuple[str, Optional[dict], bool]:
-        body = {**payload, "stream": streaming}
-        if streaming:
-            with requests.post(url, json=body, stream=True, timeout=600) as r:
-                r.raise_for_status()
-                msg, usage, streamed = _merge_stream_message_chunks(
-                    r.iter_lines(decode_unicode=True), stream_chunks=stream_llm
-                )
-            if debug:
-                print("[DEBUG] Ollama merged message:", msg)
-            text = _message_to_agent_json_text(msg, enabled_tools)
-            return text, usage, streamed
-        r = requests.post(url, json=body, timeout=600)
-        r.raise_for_status()
-        data = r.json()
-        if debug:
-            print("[DEBUG] Ollama API response:", data)
-        msg = data.get("message") or {}
-        text = _message_to_agent_json_text(msg, enabled_tools)
-        usage = _ollama_usage_from_chat_response(data)
-        if stream_llm and text.strip():
-            print(text, flush=True)
-            return text, usage, True
-        return text, usage, False
-
-    try:
-        text, usage, streamed = run_chat(streaming=True)
-        text = text.strip()
-        if not text:
-            text2, usage2, streamed2 = run_chat(streaming=False)
-            text = text2.strip()
-            if usage2:
-                usage = usage2
-            streamed = streamed or streamed2
-        if usage:
-            _last_ollama_chat_usage = usage
-        if stream_llm:
-            if streamed:
-                print(flush=True)
-            if text:
-                _verbose_emit_final_agent_readable(text)
-        if stream_llm and usage:
-            print(_format_ollama_usage_line(usage))
-        if not text:
-            return json.dumps({"action": "answer", "answer": "No response from model."})
-        return text
-    except Exception as e:
-        print(f"[DEBUG] Request error: {e}")
-        return json.dumps({"action": "error", "error": str(e)})
+    return _impl(
+        messages,
+        primary_profile=prof,
+        enabled_tools=enabled_tools,
+        verbose=verbose,
+        ollama_base_url=_ollama_base_url(),
+        ollama_model=_ollama_model(),
+        ollama_think_value=_ollama_request_think_value(),
+        ollama_debug=_settings_get_bool(("ollama", "debug"), False),
+        merge_stream_message_chunks=_merge_stream_message_chunks,
+        ollama_usage_from_chat_response=_ollama_usage_from_chat_response,
+        message_to_agent_json_text=_message_to_agent_json_text,
+        verbose_emit_final_agent_readable=_verbose_emit_final_agent_readable,
+        format_ollama_usage_line=_format_ollama_usage_line,
+        set_last_ollama_usage=_set_usage,
+        call_hosted_agent_chat_impl=call_hosted_agent_chat,
+    )
 
 
 def _ddg_search_headers():
@@ -2987,65 +2827,13 @@ def parse_agent_json(resp_text):
 
 
 # System instructions exposing all tool actions
-SYSTEM_INSTRUCTIONS = (
-    "You are a universal agent. Output format: reply with a single JSON object only—no text before or after it, "
-    "no Markdown code fences, no keys or values that are not valid JSON. The object must include an \"action\" key. "
-    "Minimal answer example: {\"action\":\"answer\",\"answer\":\"your user-facing reply as a string\"}. "
-    "The \"answer\" string should be the complete helpful response for the user: do not fill it with meta-commentary "
-    "about your search process, your uncertainty, or system instructions.\n\n"
-    "Decision order (follow roughly in this sequence):\n"
-    "(1) If the user needs current or recent real-world facts, or anything that changes over time (news, prices, "
-    "versions, outages, sports results, elections, who holds an office or title today, rankings, product availability, "
-    "or similar), you MUST call search_web before a final answer and base conclusions on tool output, not memory alone. "
-    "When you are unsure whether the web is needed, prefer search_web.\n"
-    "(2) If tool output already in the thread fully answers the request, use action answer. Do not repeat the same tool "
-    "with the same parameters. Avoid trivially rephrased duplicate searches for the same fact unless the prior result "
-    "was empty or clearly an error; if a tool returns an error or useless empty output, try a different query, URL, or tool, "
-    "or answer and briefly state the limitation.\n"
-    "(3) For timeless material (definitions, math, logic, stable algorithms, widely accepted historical facts) when the "
-    "user is not asking for up-to-date real-world data, you may use action answer without tools.\n"
-    "(4) After search_web, use fetch_page when snippets are not enough and you need full page text.\n\n"
-    "Allowed tool names (exact strings only): search_web, fetch_page, run_command, use_git, write_file, read_file, list_directory, "
-    "download_file, tail_file, replace_text, call_python.\n\n"
-    "Tool calls use this shape: {\"action\":\"tool_call\",\"tool\":<name>,\"parameters\":{...}} with every required key "
-    "for that tool present. Example: {\"action\":\"tool_call\",\"tool\":\"search_web\",\"parameters\":{\"query\":\"search terms\"}}.\n"
-    "Required parameters per tool (use JSON strings, numbers, or booleans as noted):\n"
-    "1. search_web — parameters.query (non-empty string, the web search terms); optional parameters.max_results "
-    "(integer 1–30, how many result rows to parse; default from AGENT_SEARCH_WEB_MAX_RESULTS, else 5).\n"
-    "2. fetch_page — parameters.url (string, full http/https URL to fetch).\n"
-    "3. run_command — parameters.command (string, shell command to run).\n"
-    "4. use_git — parameters.op (string: status|log|diff|add|commit|push|pull|branch), "
-    "optional parameters.worktree (repo path), parameters.message (for commit), parameters.remote / parameters.branch (for push/pull), "
-    "parameters.staged (boolean, for diff), parameters.paths (array of strings for add).\n"
-    "5. write_file — parameters.path (file path string), parameters.content (string to write).\n"
-    "6. read_file — parameters.path (file path string).\n"
-    "7. list_directory — parameters.path (directory path string).\n"
-    "8. download_file — parameters.url (source URL string), parameters.path (destination file path).\n"
-    "9. tail_file — parameters.path (file path string); optional: parameters.lines (integer, default 20).\n"
-    "10. replace_text — parameters.path, parameters.pattern (regex string), parameters.replacement (string); "
-    "optional: parameters.replace_all (boolean, default true).\n"
-    "11. call_python — parameters.code (string, syntactically valid Python ONLY). "
-    "Tool output includes STDOUT from print() (if any) plus a JSON summary of assigned variables (locals); "
-    "use print for human-readable trace. "
-    "Never put shell/batch/cmd text, pseudo-code, or natural-language document drafts in code; "
-    "those belong in write_file content or in action answer. "
-    "Optional: parameters.globals (object, extra globals).\n\n"
-    "Finishing: use {\"action\":\"answer\",\"answer\":\"string\","
-    "\"next_action\":\"finalize\",\"rationale\":\"short note (e.g. why you are done)\"}. "
-    "To request an independent second opinion before finishing, use "
-    "{\"action\":\"answer\",\"answer\":\"your best draft so far\",\"next_action\":\"second_opinion\","
-    "\"rationale\":\"why you want a review\"}. "
-    "The program routes that using session configuration.\n"
-    "If you need to write and execute code, first use write_file then use run_command. "
-    "If the user asked for a document/report/essay saved to disk, after write_file you should read_file that same path "
-    "and put the full document text in the final answer field (unless the user explicitly asked only for a file path). "
-    "For letters, memos, or other creative writing, search_web is optional unless the user asked for sources, "
-    "citations, or web research—compose with write_file or a direct answer.",
-)
+from agentlib.prompts import SYSTEM_INSTRUCTIONS
 
 
 def _default_system_instruction_text() -> str:
-    return "".join(SYSTEM_INSTRUCTIONS)
+    from agentlib.prompts import default_system_instruction_text
+
+    return default_system_instruction_text()
 
 
 def _default_prompt_templates() -> dict:
@@ -3073,40 +2861,15 @@ def _merge_prompt_templates(prefs: Optional[dict]) -> dict:
 
 
 def _resolve_prompt_template_text(name: str, templates: dict) -> Optional[str]:
-    """Resolve a template name to an effective system prompt string."""
-    key = (name or "").strip()
-    if not key:
-        return None
-    t = templates.get(key)
-    if not isinstance(t, dict):
-        return None
-    kind = str(t.get("kind") or "overlay").strip().lower()
-    text = t.get("text")
-    path = t.get("path")
-    if text is None and isinstance(path, str) and path.strip():
-        p = os.path.abspath(os.path.expanduser(path.strip()))
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                text = f.read()
-        except OSError:
-            text = None
-    if not isinstance(text, str) or not text.strip():
-        return None
-    body = text.strip()
-    if kind == "full":
-        return body
-    # overlay (default)
-    return _default_system_instruction_text() + "\n\n" + body
+    from agentlib.prompts import resolve_prompt_template_text
+
+    return resolve_prompt_template_text(name, templates)
 
 
 def _effective_system_instruction_text(override: Optional[str]) -> str:
-    """Session override replaces the built-in system prompt when non-empty."""
-    if override is None:
-        return _default_system_instruction_text()
-    s = str(override).strip()
-    if not s:
-        return _default_system_instruction_text()
-    return s
+    from agentlib.prompts import effective_system_instruction_text
+
+    return effective_system_instruction_text(override)
 
 
 ROUTER_INSTRUCTIONS = (
@@ -3483,25 +3246,20 @@ def _runner_instruction_bits(
     reviewer_hosted_profile: Optional[LlmProfile] = None,
     enabled_tools: Optional[AbstractSet[str]] = None,
 ) -> str:
-    """Runner preamble for system instructions (CLI and interactive)."""
+    from agentlib.prompts import runner_instruction_bits
+
     pp = primary_profile or default_primary_llm_profile()
-    bits = []
-    if pp.backend == "hosted":
-        key_state = "set" if (pp.api_key or "").strip() else "missing"
-        bits.append(
-            f"Runner: primary LLM is hosted OpenAI-compatible API: model {pp.model!r}, "
-            f"base {pp.base_url!r}, api_key: {key_state}."
-        )
-    else:
-        bits.append(f"Runner: primary LLM is local Ollama ({_ollama_model()!r}).")
-    if second_opinion or _hosted_review_ready(cloud, reviewer_hosted_profile):
-        bits.append(
-            "Runner: you may use next_action second_opinion in this session (see system instructions)."
-        )
-    tp = _tool_policy_runner_text(enabled_tools)
-    if tp:
-        bits.append(tp)
-    return " ".join(bits) if bits else ""
+    return runner_instruction_bits(
+        second_opinion=second_opinion,
+        cloud=cloud,
+        primary_profile=pp,
+        reviewer_hosted_profile=reviewer_hosted_profile,
+        reviewer_ollama_model=reviewer_ollama_model,
+        enabled_tools=enabled_tools,
+        ollama_model=_ollama_model(),
+        hosted_review_ready=_hosted_review_ready,
+        tool_policy_runner_text=_tool_policy_runner_text,
+    )
 
 
 def _interactive_turn_user_message(
@@ -3517,31 +3275,23 @@ def _interactive_turn_user_message(
     system_instruction_override: Optional[str] = None,
     skill_suffix: Optional[str] = None,
 ) -> str:
-    si = _effective_system_instruction_text(system_instruction_override)
-    from agentlib.skills.prompting import apply_skill_prompt_overlay
+    from agentlib.prompts import interactive_turn_user_message
 
-    si = apply_skill_prompt_overlay(si, skill_id=None, skills_map=None)  # no-op for API symmetry
-    suff = (skill_suffix or "").strip()
-    if suff:
-        # Preserve existing call-site behavior: skill_suffix is already the resolved prompt text.
-        si = si + "\n\n--- Active skill ---\n" + suff
-    block = (
-        f"{si}\n\n"
-        f"Today's date (system clock): {today_str}\n\n"
-        f"User request:\n{user_query}\n\n"
-        "Respond with JSON only. No other text."
-    )
-    ri = _runner_instruction_bits(
-        second_opinion,
-        cloud,
-        primary_profile=primary_profile,
+    return interactive_turn_user_message(
+        user_query=user_query,
+        today_str=today_str,
+        second_opinion=second_opinion,
+        cloud=cloud,
+        primary_profile=primary_profile or default_primary_llm_profile(),
         reviewer_ollama_model=reviewer_ollama_model,
         reviewer_hosted_profile=reviewer_hosted_profile,
         enabled_tools=enabled_tools,
+        system_instruction_override=system_instruction_override,
+        skill_suffix=skill_suffix,
+        ollama_model=_ollama_model(),
+        hosted_review_ready=_hosted_review_ready,
+        tool_policy_runner_text=_tool_policy_runner_text,
     )
-    if ri:
-        block += "\n\n" + ri
-    return block
 
 
 _WHILE_JUDGE_SYSTEM = (
