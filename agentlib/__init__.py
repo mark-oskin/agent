@@ -6,6 +6,7 @@ configuration parsing so agent.py can focus on the runtime agent behavior.
 """
 
 from .settings import AgentSettings
+from .session import AgentSession, SessionLineResult
 
-__all__ = ["AgentSettings"]
+__all__ = ["AgentSettings", "AgentSession", "SessionLineResult"]
 
