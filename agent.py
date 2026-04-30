@@ -52,6 +52,7 @@ from agentlib.llm.second_opinion import (
     second_opinion_result_user_message as _second_opinion_result_user_message,
     second_opinion_reviewer_messages as _second_opinion_reviewer_messages,
 )
+from agentlib import prompts as agent_prompts
 from agentlib import prompt_templates_io
 from agentlib.repl import run_interactive_repl_loop
 from agentlib.context import io as context_io
@@ -60,6 +61,7 @@ from agentlib import routing_followups
 from agentlib.skills.loader import expand_skill_artifacts as _expand_skill_artifacts
 from agentlib.skills.loader import load_skills_from_dir as _load_skills_from_dir
 from agentlib.skills.loader import safe_path_under_dir as _safe_path_under_dir
+from agentlib.tools import builtins as tool_builtins
 from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
 from agentlib.llm.profile import llm_profile_from_pref as _llm_profile_from_pref
 from agentlib.llm.profile import llm_profile_to_pref as _llm_profile_to_pref
@@ -753,7 +755,11 @@ def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
         core_tools=_CORE_TOOLS,
         plugin_toolsets=_PLUGIN_TOOLSETS,
         normalize_tool_name=_normalize_tool_name,
-        merge_prompt_templates=_merge_prompt_templates,
+        merge_prompt_templates=lambda p: prompt_templates_io.merge_prompt_templates(
+            p,
+            resolved_prompt_templates_dir=_resolved_prompt_templates_dir,
+            default_prompt_templates_dir=_default_prompt_templates_dir,
+        ),
         load_skills_from_dir=_load_skills_from_dir,
         resolved_prompt_templates_dir=_resolved_prompt_templates_dir,
         resolved_skills_dir=_resolved_skills_dir,
@@ -1258,25 +1264,6 @@ def _search_backend_banner_line() -> str:
     """Same banner prefix as prepended to search_web tool output."""
     return _websearch_backend_banner_line(_SETTINGS_OBJ)
 
-
-def search_web(query, params: Optional[dict] = None) -> str:
-    from agentlib.tools.builtins import search_web as _impl
-
-    return _impl(query, params=params, settings=_SETTINGS_OBJ)
-
-
-def fetch_page(url):
-    from agentlib.tools.builtins import fetch_page as _impl
-
-    return _impl(url)
-
-
-def run_command(command):
-    from agentlib.tools.builtins import run_command as _impl
-
-    return _impl(command)
-
-
 def _tool_fault_result(tool: str, exc: BaseException) -> str:
     """Convert a tool crash/exception into a stable string the model can reason about."""
     t = (tool or "").strip() or "(unknown tool)"
@@ -1287,89 +1274,8 @@ def _tool_fault_result(tool: str, exc: BaseException) -> str:
     return f"Tool fault: {t} raised {en}: {msg}"
 
 
-def use_git(params) -> str:
-    from agentlib.tools.builtins import use_git as _impl
-
-    return _impl(params)
-
-
-def write_file(path, content):
-    from agentlib.tools.builtins import write_file as _impl
-
-    return _impl(path, content)
-
-
-def list_directory(path):
-    from agentlib.tools.builtins import list_directory as _impl
-
-    return _impl(path)
-
-
-def read_file(path):
-    from agentlib.tools.builtins import read_file as _impl
-
-    return _impl(path)
-
-
-def download_file(url, path):
-    from agentlib.tools.builtins import download_file as _impl
-
-    return _impl(url, path)
-
-
-def tail_file(path, lines=20):
-    from agentlib.tools.builtins import tail_file as _impl
-
-    return _impl(path, lines=lines)
-
-
-def replace_text(path, pattern, replacement, replace_all=True):
-    from agentlib.tools.builtins import replace_text as _impl
-
-    return _impl(path, pattern, replacement, replace_all=replace_all)
-
-
-def call_python(code, globals=None):
-    from agentlib.tools.builtins import call_python as _impl
-
-    return _impl(code, globals=globals)
-
-
 # System instructions exposing all tool actions
 from agentlib.prompts import SYSTEM_INSTRUCTIONS
-
-
-def _default_system_instruction_text() -> str:
-    from agentlib.prompts import default_system_instruction_text
-
-    return default_system_instruction_text()
-
-
-def _default_prompt_templates() -> dict:
-    """Default templates live under prompt_templates/ as one JSON per template name."""
-    return prompt_templates_io.load_prompt_templates_from_dir(_default_prompt_templates_dir())
-
-
-def _merge_prompt_templates(prefs: Optional[dict]) -> dict:
-    """Load templates from the configured directory, then apply ~/.agent.json object overrides (user wins)."""
-    return prompt_templates_io.merge_prompt_templates(
-        prefs,
-        resolved_prompt_templates_dir=_resolved_prompt_templates_dir,
-        default_prompt_templates_dir=_default_prompt_templates_dir,
-    )
-
-
-def _resolve_prompt_template_text(name: str, templates: dict) -> Optional[str]:
-    from agentlib.prompts import resolve_prompt_template_text
-
-    return resolve_prompt_template_text(name, templates)
-
-
-def _effective_system_instruction_text(override: Optional[str]) -> str:
-    from agentlib.prompts import effective_system_instruction_text
-
-    return effective_system_instruction_text(override)
-
 
 ROUTER_INSTRUCTIONS = _routing.ROUTER_INSTRUCTIONS
 
@@ -1658,7 +1564,13 @@ def _interactive_repl(
         os.path.expanduser(tld0) if tld0 else _default_tools_dir()
     )
     skills_m = skills_map if isinstance(skills_map, dict) else {}
-    templates = prompt_templates if isinstance(prompt_templates, dict) else _default_prompt_templates()
+    templates = (
+        prompt_templates
+        if isinstance(prompt_templates, dict)
+        else prompt_templates_io.load_prompt_templates_from_dir(
+            _default_prompt_templates_dir()
+        )
+    )
     template_default = (prompt_template_default or "").strip() or "coding"
     session_prompt_template: Optional[str] = None
     session_system_prompt = system_prompt_override
@@ -1668,7 +1580,7 @@ def _interactive_repl(
         else None
     )
     if session_system_prompt is None and not session_system_prompt_path:
-        resolved = _resolve_prompt_template_text(template_default, templates)
+        resolved = agent_prompts.resolve_prompt_template_text(template_default, templates)
         if resolved:
             session_system_prompt = resolved
             session_prompt_template = template_default
@@ -1722,8 +1634,8 @@ def _interactive_repl(
         conversation_turn_deps=_conversation_turn_deps(),
         save_context_bundle=_save_context_bundle,
         load_context_messages=_load_context_messages,
-        resolve_prompt_template_text=_resolve_prompt_template_text,
-        effective_system_instruction_text=_effective_system_instruction_text,
+        resolve_prompt_template_text=agent_prompts.resolve_prompt_template_text,
+        effective_system_instruction_text=agent_prompts.effective_system_instruction_text,
         canonicalize_user_tool_phrase=_canonicalize_user_tool_phrase,
         normalize_tool_name=_normalize_tool_name,
         format_unknown_tool_hint=_format_unknown_tool_hint,
@@ -1798,17 +1710,19 @@ def _conversation_turn_deps() -> ConversationTurnDeps:
             ensure_tool_defaults=_ensure_tool_defaults,
             tool_params_fingerprint=_tool_params_fingerprint,
             search_backend_banner_line=_search_backend_banner_line,
-            search_web=search_web,
-            fetch_page=fetch_page,
-            run_command=run_command,
-            use_git=use_git,
-            write_file=write_file,
-            list_directory=list_directory,
-            read_file=read_file,
-            download_file=download_file,
-            tail_file=tail_file,
-            replace_text=replace_text,
-            call_python=call_python,
+            search_web=lambda query, params=None: tool_builtins.search_web(
+                query, params=params, settings=_SETTINGS_OBJ
+            ),
+            fetch_page=tool_builtins.fetch_page,
+            run_command=tool_builtins.run_command,
+            use_git=tool_builtins.use_git,
+            write_file=tool_builtins.write_file,
+            list_directory=tool_builtins.list_directory,
+            read_file=tool_builtins.read_file,
+            download_file=tool_builtins.download_file,
+            tail_file=tool_builtins.tail_file,
+            replace_text=tool_builtins.replace_text,
+            call_python=tool_builtins.call_python,
             plugin_tool_handlers=_PLUGIN_TOOL_HANDLERS,
             tool_fault_result=_tool_fault_result,
             tool_recovery_may_run=_tool_recovery_may_run,
@@ -1877,10 +1791,8 @@ def main():
     prompt_template_selected = parsed.prompt_template_selected
     query_parts = list(parsed.query_parts)
 
-    prompt_templates = (
-        st.get("prompt_templates")
-        if isinstance(st.get("prompt_templates"), dict)
-        else _default_prompt_templates()
+    prompt_templates = st.get("prompt_templates") if isinstance(st.get("prompt_templates"), dict) else (
+        prompt_templates_io.load_prompt_templates_from_dir(_default_prompt_templates_dir())
     )
     prompt_template_default = (st.get("prompt_template_default") or "coding").strip()
 
@@ -1952,7 +1864,7 @@ def main():
     if sys_prompt_override is None:
         chosen = (prompt_template_selected or prompt_template_default or "").strip()
         if chosen:
-            resolved = _resolve_prompt_template_text(chosen, prompt_templates)
+            resolved = agent_prompts.resolve_prompt_template_text(chosen, prompt_templates)
             if resolved:
                 sys_prompt_override = resolved
             else:
@@ -1962,7 +1874,7 @@ def main():
                     file=sys.stderr,
                 )
                 return
-    si0 = _effective_system_instruction_text(sys_prompt_override)
+    si0 = agent_prompts.effective_system_instruction_text(sys_prompt_override)
     if skill_id_cli:
         rec0 = skills_map_cli.get(skill_id_cli) or {}
         psk0 = str(rec0.get("prompt") or "").strip()

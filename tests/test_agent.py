@@ -294,21 +294,25 @@ def test_context_manager_prefs_applied_without_env(monkeypatch):
 
 def test_prompt_templates_resolve_overlay_and_full(tmp_path):
     d = importlib.import_module("agent")
-    templates = d._default_prompt_templates()
+    from agentlib import prompt_templates_io
+
+    templates = prompt_templates_io.load_prompt_templates_from_dir(d._default_prompt_templates_dir())
     # overlay template yields default base + overlay.
-    coding = d._resolve_prompt_template_text("coding", templates)
+    from agentlib import prompts as agent_prompts
+
+    coding = agent_prompts.resolve_prompt_template_text("coding", templates)
     assert isinstance(coding, str) and len(coding) > 1000
     # full template overrides base.
     templates2 = dict(templates)
     templates2["xfull"] = {"kind": "full", "text": "FULL PROMPT"}
-    out = d._resolve_prompt_template_text("xfull", templates2)
+    out = agent_prompts.resolve_prompt_template_text("xfull", templates2)
     assert out == "FULL PROMPT"
 
     # path template loads from file.
     p = tmp_path / "p.txt"
     p.write_text("FILE PROMPT", encoding="utf-8")
     templates2["xfile"] = {"kind": "full", "path": str(p)}
-    out2 = d._resolve_prompt_template_text("xfile", templates2)
+    out2 = agent_prompts.resolve_prompt_template_text("xfile", templates2)
     assert out2 == "FILE PROMPT"
     strong = d._is_tool_result_weak_for_dedup("[Web results]\nLink: https://a.test\nTitle: t")
     assert strong is False
@@ -671,7 +675,9 @@ def test_fetch_page_prefix_contains_urls(monkeypatch):
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(d.requests, "get", fake_get)
     try:
-        out = d.fetch_page("https://example.com/here")
+        from agentlib.tools import builtins as tool_builtins
+
+        out = tool_builtins.fetch_page("https://example.com/here")
         assert "Fetched URL:" in out
         assert "Final URL:" in out
         assert "https://example.com/there" in out

@@ -611,26 +611,30 @@ def test_clean_json_response_strips_prefix():
 
 
 def test_call_python_rejects_shell_like_source():
-    d = _d()
-    out = d.call_python('@echo off\necho not python')
+    from agentlib.tools import builtins as tool_builtins
+
+    out = tool_builtins.call_python('@echo off\necho not python')
     assert "Exec error" in out
     assert "write_file" in out or "Python" in out
 
 
 def test_call_python_rejects_empty():
-    d = _d()
-    assert "empty" in d.call_python("").lower()
+    from agentlib.tools import builtins as tool_builtins
+
+    assert "empty" in tool_builtins.call_python("").lower()
 
 
 def test_call_python_runs_valid_code():
-    d = _d()
-    out = d.call_python("x = 40 + 2")
+    from agentlib.tools import builtins as tool_builtins
+
+    out = tool_builtins.call_python("x = 40 + 2")
     assert json.loads(out).get("x") == 42
 
 
 def test_call_python_captures_stdout_and_locals():
-    d = _d()
-    out = d.call_python('print("hello")\nresult = 99')
+    from agentlib.tools import builtins as tool_builtins
+
+    out = tool_builtins.call_python('print("hello")\nresult = 99')
     assert "STDOUT:" in out
     assert "hello" in out
     assert "--- locals (JSON) ---" in out
@@ -639,8 +643,9 @@ def test_call_python_captures_stdout_and_locals():
 
 
 def test_call_python_locals_non_jsonable_values_use_str():
-    d = _d()
-    out = d.call_python(
+    from agentlib.tools import builtins as tool_builtins
+
+    out = tool_builtins.call_python(
         "class O: pass\nx = O()  # not JSON-serializable by default\nn = 1"
     )
     data = json.loads(out)
@@ -673,8 +678,9 @@ def test_search_web_effective_max_results_clamped(monkeypatch):
 
 
 def test_write_file_rejects_empty_content():
-    d = _d()
-    out = d.write_file("/tmp/will-not-be-used-empty-letter.txt", "")
+    from agentlib.tools import builtins as tool_builtins
+
+    out = tool_builtins.write_file("/tmp/will-not-be-used-empty-letter.txt", "")
     assert out.startswith("Write error:")
     assert "content" in out.lower()
 

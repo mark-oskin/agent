@@ -77,33 +77,41 @@ def run_main(
         return route_after_answer
 
     d = reload_agent(monkeypatch, call_ollama_chat=fake_call_ollama_chat)
+    from agentlib.tools import builtins as tool_builtins
     # Keep tests deterministic: ignore the developer's ~/.agent.json entirely.
     monkeypatch.setattr(d, "_load_agent_prefs", lambda: None)
     monkeypatch.setattr(d, "_route_requires_websearch", fake_route_requires_websearch)
     monkeypatch.setattr(d, "_route_requires_websearch_after_answer", fake_route_after_answer)
     if stub_search_web is not None:
-        def _search_web_wrap(query, params=None):  # noqa: ARG001
-            return stub_search_web(query)
-
-        monkeypatch.setattr(d, "search_web", _search_web_wrap)
+        monkeypatch.setattr(
+            tool_builtins,
+            "search_web",
+            lambda query, params=None, settings=None: stub_search_web(query),
+        )
     if stub_fetch_page is not None:
-        monkeypatch.setattr(d, "fetch_page", stub_fetch_page)
+        monkeypatch.setattr(tool_builtins, "fetch_page", lambda url: stub_fetch_page(url))
     if stub_write_file is not None:
-        monkeypatch.setattr(d, "write_file", stub_write_file)
+        monkeypatch.setattr(tool_builtins, "write_file", lambda path, content: stub_write_file(path, content))
     if stub_read_file is not None:
-        monkeypatch.setattr(d, "read_file", stub_read_file)
+        monkeypatch.setattr(tool_builtins, "read_file", lambda path: stub_read_file(path))
     if stub_run_command is not None:
-        monkeypatch.setattr(d, "run_command", stub_run_command)
+        monkeypatch.setattr(tool_builtins, "run_command", lambda command: stub_run_command(command))
     if stub_list_directory is not None:
-        monkeypatch.setattr(d, "list_directory", stub_list_directory)
+        monkeypatch.setattr(tool_builtins, "list_directory", lambda path: stub_list_directory(path))
     if stub_tail_file is not None:
-        monkeypatch.setattr(d, "tail_file", stub_tail_file)
+        monkeypatch.setattr(tool_builtins, "tail_file", lambda path, lines=20: stub_tail_file(path, lines=lines))
     if stub_replace_text is not None:
-        monkeypatch.setattr(d, "replace_text", stub_replace_text)
+        monkeypatch.setattr(
+            tool_builtins,
+            "replace_text",
+            lambda path, pattern, replacement, replace_all=True: stub_replace_text(
+                path, pattern, replacement, replace_all=replace_all
+            ),
+        )
     if stub_download_file is not None:
-        monkeypatch.setattr(d, "download_file", stub_download_file)
+        monkeypatch.setattr(tool_builtins, "download_file", lambda url, path: stub_download_file(url, path))
     if stub_call_python is not None:
-        monkeypatch.setattr(d, "call_python", stub_call_python)
+        monkeypatch.setattr(tool_builtins, "call_python", lambda code, globals=None: stub_call_python(code, globals=globals))
 
     monkeypatch.setattr(sys, "argv", ["agent.py", *argv])
     buf = io.StringIO()

@@ -949,27 +949,30 @@ def test_transcript_router_after_answer_forces_search_then_fetch(monkeypatch):
 
 
 def test_write_file_and_read_file_roundtrip(tmp_path, monkeypatch):
-    d = _d()
+    from agentlib.tools import builtins as tool_builtins
+
     p = tmp_path / "round.txt"
     monkeypatch.chdir(tmp_path)
-    d.write_file(str(p), "alpha\nbeta\n")
-    assert d.read_file(str(p)) == "alpha\nbeta\n"
+    tool_builtins.write_file(str(p), "alpha\nbeta\n")
+    assert tool_builtins.read_file(str(p)) == "alpha\nbeta\n"
 
 
 def test_replace_text_on_real_file(tmp_path, monkeypatch):
-    d = _d()
+    from agentlib.tools import builtins as tool_builtins
+
     monkeypatch.chdir(tmp_path)
     p = tmp_path / "r.txt"
     p.write_text("aa OLD bb OLD cc", encoding="utf-8")
-    d.replace_text(str(p), "OLD", "NEW", replace_all=True)
+    tool_builtins.replace_text(str(p), "OLD", "NEW", replace_all=True)
     assert p.read_text(encoding="utf-8") == "aa NEW bb NEW cc"
 
 
 def test_list_directory_real(tmp_path, monkeypatch):
-    d = _d()
+    from agentlib.tools import builtins as tool_builtins
+
     (tmp_path / "a.txt").write_text("x", encoding="utf-8")
     (tmp_path / "b.txt").write_text("y", encoding="utf-8")
-    raw = d.list_directory(str(tmp_path))
+    raw = tool_builtins.list_directory(str(tmp_path))
     names = json.loads(raw)
     assert "a.txt" in names and "b.txt" in names
 

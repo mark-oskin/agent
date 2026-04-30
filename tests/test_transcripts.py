@@ -134,12 +134,12 @@ def test_all_tools_exceptions_are_caught(monkeypatch, tool, params, stub_kw):
 
 
 def test_use_git_exception_is_caught(monkeypatch):
-    import agent as d
-
     def boom_use_git(_p):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(d, "use_git", boom_use_git)
+    from agentlib.tools import builtins as tool_builtins
+
+    monkeypatch.setattr(tool_builtins, "use_git", boom_use_git)
     out = run_main(
         monkeypatch,
         ["Run tool"],
