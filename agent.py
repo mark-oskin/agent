@@ -7,6 +7,15 @@ All application wiring lives in `agentlib.app`. This module remains as a stable
 top-level executable for `./agent.py`.
 """
 
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"urllib3 v2 only supports OpenSSL 1\.1\.1\+.*LibreSSL.*",
+    category=Warning,
+    module=r"urllib3(\..*)?",
+)
+
 from agentlib.app import main
 
 

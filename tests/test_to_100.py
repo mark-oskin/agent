@@ -5,7 +5,6 @@ real filesystem round-trips, usage edge cases, and more transcripts.
 
 from __future__ import annotations
 
-import importlib
 import io
 import json
 import os
@@ -15,21 +14,33 @@ from contextlib import redirect_stdout
 
 import pytest
 
-from tests.harness import j, run_main
+from agentlib import agent_json
+from agentlib.agent_json import AgentJsonDeps
+from agentlib.repl.while_cmd import parse_while_judge_bit, parse_while_repl_tokens
+from agentlib.tools import turn_support
+from agentlib.tools.registry import ToolRegistry
+from agentlib.tools.websearch import enrich_search_query_for_present_day, first_url_in_text
+from tests.harness import build_test_app, build_test_session, j, run_main, run_session_lines
 from agentlib.settings import AgentSettings
 
 WEB = "[Web results]\nLink: https://a.example/x\nTitle: t\nSnippet: s\n"
 
 
-def _d():
-    return importlib.import_module("agentlib.app")
+PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REGISTRY = ToolRegistry(default_tools_dir=os.path.join(PROJECT_DIR, "tools"))
+REGISTRY.load_plugin_toolsets(REGISTRY.default_tools_dir)
+REGISTRY.register_aliases()
+DEPS = AgentJsonDeps(
+    all_known_tools=REGISTRY.all_known_tools,
+    coerce_enabled_tools=REGISTRY.coerce_enabled_tools,
+    merge_tool_param_aliases=turn_support.merge_tool_param_aliases,
+)
 
 
 # --- native Ollama tool_calls → agent JSON ---
 
 
 def test_message_to_agent_json_text_prefers_tool_calls_over_noise():
-    d = _d()
     msg = {
         "content": 'Say {"action":"answer","answer":"wrong"} here',
         "tool_calls": [
@@ -42,14 +53,13 @@ def test_message_to_agent_json_text_prefers_tool_calls_over_noise():
             }
         ],
     }
-    raw = d._message_to_agent_json_text(msg)
-    out = d.parse_agent_json(raw)
+    raw = agent_json.message_to_agent_json_text(msg, None, DEPS)
+    out = agent_json.parse_agent_json(raw, DEPS)
     assert out["tool"] == "search_web"
     assert out["parameters"]["query"] == "from native"
 
 
 def test_tool_calls_functions_prefix_maps_to_tool():
-    d = _d()
     msg = {
         "tool_calls": [
             {
@@ -60,20 +70,18 @@ def test_tool_calls_functions_prefix_maps_to_tool():
             }
         ]
     }
-    raw = d._message_to_agent_json_text(msg)
-    out = d.parse_agent_json(raw)
+    raw = agent_json.message_to_agent_json_text(msg, None, DEPS)
+    out = agent_json.parse_agent_json(raw, DEPS)
     assert out["tool"] == "read_file"
 
 
 def test_tool_call_to_agent_dict_tool_dot_prefix():
-    d = _d()
-    out = d._tool_call_to_agent_dict("tool.list_directory", '{"path": "."}')
+    out = agent_json.tool_call_to_agent_dict("tool.list_directory", '{"path": "."}')
     assert out["tool"] == "list_directory"
 
 
 def test_tool_call_to_agent_dict_filename_becomes_path():
-    d = _d()
-    out = d._tool_call_to_agent_dict(
+    out = agent_json.tool_call_to_agent_dict(
         "write_file", json.dumps({"filename": "out.txt", "content": "z"})
     )
     assert out["parameters"]["path"] == "out.txt"
@@ -84,46 +92,39 @@ def test_tool_call_to_agent_dict_filename_becomes_path():
 
 
 def test_parse_markdown_fence_json_variant():
-    d = _d()
     raw = "```JSON\n" + json.dumps({"action": "answer", "answer": "x"}) + "\n```"
-    out = d.parse_agent_json(raw)
+    out = agent_json.parse_agent_json(raw, DEPS)
     assert out["answer"] == "x"
 
 
 def test_parse_action_false_normalized_like_missing():
-    d = _d()
     raw = json.dumps({"action": False, "tool": "read_file", "parameters": {"path": "p"}})
-    out = d.parse_agent_json(raw)
+    out = agent_json.parse_agent_json(raw, DEPS)
     assert out["action"] == "tool_call"
 
 
 def test_iter_balanced_brace_objects_respects_string_escape():
-    d = _d()
     text = r'pre {"k": "a\"b"} post'
-    spans = list(d._iter_balanced_brace_objects(text))
+    spans = list(agent_json.iter_balanced_brace_objects(text))
     assert len(spans) == 1
-    obj = d._try_json_loads_object(spans[0])
+    obj = agent_json.try_json_loads_object(spans[0])
     assert obj["k"] == 'a"b'
 
 
 def test_first_url_in_text_extracts():
-    d = _d()
     s = "See https://example.com/path) for more"
-    assert d._first_url_in_text(s).startswith("https://example.com/path")
+    assert first_url_in_text(s).startswith("https://example.com/path")
 
 
 # --- enrich (present-day bias) ---
 
 
 def test_enrich_who_was_not_appended(monkeypatch):
-    d = _d()
     q = "Who was the first president of the USA?"
-    out = d._enrich_search_query_for_present_day(q)
-    assert out == q
+    assert enrich_search_query_for_present_day(q, settings=AgentSettings.defaults()) == q
 
 
 def test_enrich_who_is_president_appends_current_year(monkeypatch):
-    d = _d()
     from datetime import date as real_date
 
     class FakeDate(real_date):
@@ -131,25 +132,27 @@ def test_enrich_who_is_president_appends_current_year(monkeypatch):
         def today(cls):
             return real_date(2026, 6, 1)
 
-    monkeypatch.setattr(d.datetime, "date", FakeDate)
-    out = d._enrich_search_query_for_present_day("Who is the president of France?")
+    import agentlib.tools.websearch as websearch
+
+    monkeypatch.setattr(websearch.datetime, "date", FakeDate)
+    out = enrich_search_query_for_present_day("Who is the president of France?", settings=AgentSettings.defaults())
     assert "current" in out.lower()
     assert "2026" in out
 
 
 def test_enrich_respects_ollama_search_enrich_off(monkeypatch):
-    d = _d()
-    d._APP.settings = AgentSettings.defaults()
-    d._settings_set(("ollama", "search_enrich"), False)
+    from agentlib.tools.websearch import enrich_search_query_for_present_day
+
+    settings = AgentSettings.defaults()
+    settings.set(("ollama", "search_enrich"), False)
     q = "Who is the president of France?"
-    assert d._enrich_search_query_for_present_day(q) == q
+    assert enrich_search_query_for_present_day(q, settings=settings) == q
 
 
 # --- CLI usage ---
 
 
 def test_main_interactive_mode_exits_on_eof(monkeypatch):
-    d = _d()
     monkeypatch.setattr(sys, "argv", ["agent.py"])
 
     def _eof(_=""):
@@ -158,14 +161,14 @@ def test_main_interactive_mode_exits_on_eof(monkeypatch):
     monkeypatch.setattr("builtins.input", _eof)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d.main()
+        import agentlib.app as app_mod
+
+        app_mod.main()
     out = buf.getvalue()
     assert "Interactive mode" in out
 
 
 def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
-    d = _d()
-    d._APP.settings = AgentSettings.defaults()
     ctx_file = tmp_path / "ctx.json"
     ctx_file.write_text(
         json.dumps([{"role": "user", "content": "hi from file"}]),
@@ -181,22 +184,12 @@ def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
         f"/save_context {out_file}",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue()
-    assert d._settings_get_str(("ollama", "model"), "") == "repl-test-model"
+    assert _app.settings.get_str(("ollama", "model"), "") == "repl-test-model"
     assert "second_opinion enabled" in out
     assert "second_opinion disabled" in out
     assert "Loaded 1 message" in out
@@ -207,7 +200,6 @@ def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
 
 
 def test_interactive_settings_verbose_toggle(monkeypatch):
-    d = _d()
     lines = [
         "/settings verbose on",
         "/settings verbose off",
@@ -215,35 +207,32 @@ def test_interactive_settings_verbose_toggle(monkeypatch):
         "/settings disable verbose",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "verbose level 2" in out
     assert "verbose level 0" in out
 
 
 def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
-    d = _d()
+    from agentlib import prefs
+    from agentlib.prefs import bootstrap as prefs_bootstrap
+    from agentlib.llm.profile import default_primary_llm_profile
+
     pref_path = tmp_path / ".agent.json"
-    d._set_agent_prefs_path_override(str(pref_path))
-    d._APP.settings = AgentSettings.defaults()
-    payload = d._build_agent_prefs_payload(
-        primary_profile=d.default_primary_llm_profile(),
+    prefs.set_agent_prefs_path_override(str(pref_path))
+    app = build_test_app(monkeypatch)
+    app.settings = AgentSettings.defaults()
+    payload = prefs_bootstrap.build_agent_prefs_payload(
+        settings=app.settings,
+        core_tools=app.registry.core_tools,
+        plugin_toolsets=app.registry.plugin_toolsets,
+        primary_profile=default_primary_llm_profile(),
         second_opinion_on=True,
         cloud_ai_enabled=True,
-        enabled_tools=set(d._TOOL_REGISTRY.core_tools) - {"run_command"},
+        enabled_tools=set(app.registry.core_tools) - {"run_command"},
         reviewer_hosted_profile=None,
         reviewer_ollama_model="mymodel:latest",
         session_save_path="/tmp/x.json",
@@ -252,10 +241,26 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
         context_manager={"enabled": False, "tokens": 1234, "trigger_frac": 0.7, "target_frac": 0.5, "keep_tail_messages": 9},
         verbose_level=1,
     )
-    d._write_agent_prefs_file(payload)
-    raw = d._load_agent_prefs()
+    prefs.write_agent_prefs_file(payload)
+    raw = prefs.load_agent_prefs()
     assert raw is not None
-    st = d._session_defaults_from_prefs(raw)
+    st = prefs_bootstrap.session_defaults_from_prefs(
+        raw,
+        migrate_prefs=lambda p: prefs.apply_prefs_to_settings(app.settings, p),
+        settings=app.settings,
+        core_tools=app.registry.core_tools,
+        plugin_toolsets=app.registry.plugin_toolsets,
+        normalize_tool_name=app.registry.normalize_tool_name,
+        merge_prompt_templates=lambda p: p,
+        load_skills_from_dir=lambda p: {},
+        resolved_prompt_templates_dir=lambda _p=None: "",
+        resolved_skills_dir=lambda _p=None: "",
+        resolved_tools_dir=lambda _p=None: "",
+        default_prompt_templates_dir=lambda: "",
+        default_skills_dir=lambda: "",
+        load_plugin_toolsets=lambda tools_dir=None: None,
+        register_tool_aliases=lambda: None,
+    )
     assert st["second_opinion_enabled"] is True
     assert st["cloud_ai_enabled"] is True
     assert "run_command" not in st["enabled_tools"]
@@ -270,122 +275,190 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
     assert data.get("system_prompt") is None
     assert data.get("system_prompt_path") is None
     assert data.get("verbose") == 1
-    d._set_agent_prefs_path_override(None)
+    prefs.set_agent_prefs_path_override(None)
 
 
 def test_prefs_ollama_openai_agent_blobs_apply_to_settings(monkeypatch):
-    d = _d()
-    d._APP.settings = AgentSettings.defaults()
+    from agentlib.prefs import bootstrap as prefs_bootstrap
+
+    app = build_test_app(monkeypatch)
+    app.settings = AgentSettings.defaults()
     prefs = {
         "version": 4,
         "ollama": {"HOST": "http://o.test:11434"},
         "openai": {"BASE_URL": "https://api.x/v1"},
         "agent": {"PROGRESS": "0"},
     }
-    d._session_defaults_from_prefs(prefs)
-    assert d._settings_get_str(("ollama", "host"), "") == "http://o.test:11434"
-    assert d._settings_get_str(("openai", "base_url"), "") == "https://api.x/v1"
-    assert d._settings_get_bool(("agent", "progress"), True) is False
+    _ = prefs_bootstrap.session_defaults_from_prefs(
+        prefs,
+        migrate_prefs=lambda p: __import__("agentlib.prefs").prefs.apply_prefs_to_settings(app.settings, p),
+        settings=app.settings,
+        core_tools=app.registry.core_tools,
+        plugin_toolsets=app.registry.plugin_toolsets,
+        normalize_tool_name=app.registry.normalize_tool_name,
+        merge_prompt_templates=lambda p: p,
+        load_skills_from_dir=lambda p: {},
+        resolved_prompt_templates_dir=lambda _p=None: "",
+        resolved_skills_dir=lambda _p=None: "",
+        resolved_tools_dir=lambda _p=None: "",
+        default_prompt_templates_dir=lambda: "",
+        default_skills_dir=lambda: "",
+        load_plugin_toolsets=lambda tools_dir=None: None,
+        register_tool_aliases=lambda: None,
+    )
+    assert app.settings.get_str(("ollama", "host"), "") == "http://o.test:11434"
+    assert app.settings.get_str(("openai", "base_url"), "") == "https://api.x/v1"
+    assert app.settings.get_bool(("agent", "progress"), True) is False
 
 
 def test_prefs_stored_env_overrides_existing_settings(monkeypatch):
-    d = _d()
-    d._APP.settings = AgentSettings.defaults()
-    d._settings_set(("ollama", "host"), "http://from-shell:1")
+    from agentlib.prefs import bootstrap as prefs_bootstrap
+    from agentlib import prefs as prefs_mod
+
+    app = build_test_app(monkeypatch)
+    app.settings = AgentSettings.defaults()
+    app.settings.set(("ollama", "host"), "http://from-shell:1")
     prefs = {"version": 4, "ollama": {"HOST": "http://from-file:2"}}
-    d._session_defaults_from_prefs(prefs)
+    _ = prefs_bootstrap.session_defaults_from_prefs(
+        prefs,
+        migrate_prefs=lambda p: prefs_mod.apply_prefs_to_settings(app.settings, p),
+        settings=app.settings,
+        core_tools=app.registry.core_tools,
+        plugin_toolsets=app.registry.plugin_toolsets,
+        normalize_tool_name=app.registry.normalize_tool_name,
+        merge_prompt_templates=lambda p: p,
+        load_skills_from_dir=lambda p: {},
+        resolved_prompt_templates_dir=lambda _p=None: "",
+        resolved_skills_dir=lambda _p=None: "",
+        resolved_tools_dir=lambda _p=None: "",
+        default_prompt_templates_dir=lambda: "",
+        default_skills_dir=lambda: "",
+        load_plugin_toolsets=lambda tools_dir=None: None,
+        register_tool_aliases=lambda: None,
+    )
     # Prefs apply (no shell env precedence anymore).
-    assert d._settings_get_str(("ollama", "host"), "") == "http://from-file:2"
+    assert app.settings.get_str(("ollama", "host"), "") == "http://from-file:2"
 
 
 def test_cli_config_overrides_default_agent_json_path(tmp_path, monkeypatch):
-    d = _d()
+    from agentlib import prefs
+    from agentlib.cli import parse_and_apply_cli_config_flag
+
     cfg = tmp_path / "cfg.json"
     cfg.write_text(json.dumps({"version": 3, "second_opinion_enabled": True}), encoding="utf-8")
-    d._set_agent_prefs_path_override(None)
+    prefs.set_agent_prefs_path_override(None)
     # Apply via argv parsing helper (same logic as main()).
-    rem = d._parse_and_apply_cli_config_flag(["--config", str(cfg), "hello"])
+    rem = parse_and_apply_cli_config_flag(["--config", str(cfg), "hello"])
     assert rem == ["hello"]
-    assert d._agent_prefs_path() == str(cfg)
-    loaded = d._load_agent_prefs()
+    assert prefs.agent_prefs_path() == str(cfg)
+    loaded = prefs.load_agent_prefs()
     assert isinstance(loaded, dict)
     assert loaded.get("second_opinion_enabled") is True
 
 
 def test_prefs_system_prompt_inline_roundtrip(tmp_path, monkeypatch):
-    d = _d()
+    from agentlib import prefs
+    from agentlib.prefs import bootstrap as prefs_bootstrap
+    from agentlib.llm.profile import default_primary_llm_profile
+
     pref_path = tmp_path / "prefs.json"
-    d._set_agent_prefs_path_override(str(pref_path))
-    payload = d._build_agent_prefs_payload(
-        primary_profile=d.default_primary_llm_profile(),
+    prefs.set_agent_prefs_path_override(str(pref_path))
+    app = build_test_app(monkeypatch)
+    payload = prefs_bootstrap.build_agent_prefs_payload(
+        settings=app.settings,
+        core_tools=app.registry.core_tools,
+        plugin_toolsets=app.registry.plugin_toolsets,
+        primary_profile=default_primary_llm_profile(),
         second_opinion_on=False,
         cloud_ai_enabled=False,
-        enabled_tools=set(d._TOOL_REGISTRY.core_tools),
+        enabled_tools=set(app.registry.core_tools),
         reviewer_hosted_profile=None,
         reviewer_ollama_model=None,
         session_save_path=None,
         system_prompt_override="You are a penguin. JSON only.",
         system_prompt_path_override=None,
     )
-    d._write_agent_prefs_file(payload)
-    st = d._session_defaults_from_prefs(d._load_agent_prefs())
+    prefs.write_agent_prefs_file(payload)
+    st = prefs_bootstrap.session_defaults_from_prefs(
+        prefs.load_agent_prefs(),
+        migrate_prefs=lambda p: prefs.apply_prefs_to_settings(app.settings, p),
+        settings=app.settings,
+        core_tools=app.registry.core_tools,
+        plugin_toolsets=app.registry.plugin_toolsets,
+        normalize_tool_name=app.registry.normalize_tool_name,
+        merge_prompt_templates=lambda p: p,
+        load_skills_from_dir=lambda p: {},
+        resolved_prompt_templates_dir=lambda _p=None: "",
+        resolved_skills_dir=lambda _p=None: "",
+        resolved_tools_dir=lambda _p=None: "",
+        default_prompt_templates_dir=lambda: "",
+        default_skills_dir=lambda: "",
+        load_plugin_toolsets=lambda tools_dir=None: None,
+        register_tool_aliases=lambda: None,
+    )
     assert st["system_prompt"] == "You are a penguin. JSON only."
     assert st["system_prompt_path"] is None
-    d._set_agent_prefs_path_override(None)
+    prefs.set_agent_prefs_path_override(None)
 
 
 def test_prefs_system_prompt_path_roundtrip(tmp_path, monkeypatch):
-    d = _d()
+    from agentlib import prefs
+    from agentlib.prefs import bootstrap as prefs_bootstrap
+    from agentlib.llm.profile import default_primary_llm_profile
+
     pf = tmp_path / "mysys.txt"
     pf.write_text("Loaded from path.\n", encoding="utf-8")
     pref_path = tmp_path / "prefs.json"
-    d._set_agent_prefs_path_override(str(pref_path))
-    payload = d._build_agent_prefs_payload(
-        primary_profile=d.default_primary_llm_profile(),
+    prefs.set_agent_prefs_path_override(str(pref_path))
+    app = build_test_app(monkeypatch)
+    payload = prefs_bootstrap.build_agent_prefs_payload(
+        settings=app.settings,
+        core_tools=app.registry.core_tools,
+        plugin_toolsets=app.registry.plugin_toolsets,
+        primary_profile=default_primary_llm_profile(),
         second_opinion_on=False,
         cloud_ai_enabled=False,
-        enabled_tools=set(d._TOOL_REGISTRY.core_tools),
+        enabled_tools=set(app.registry.core_tools),
         reviewer_hosted_profile=None,
         reviewer_ollama_model=None,
         session_save_path=None,
         system_prompt_override=None,
         system_prompt_path_override=str(pf),
     )
-    d._write_agent_prefs_file(payload)
-    st = d._session_defaults_from_prefs(d._load_agent_prefs())
+    prefs.write_agent_prefs_file(payload)
+    st = prefs_bootstrap.session_defaults_from_prefs(
+        prefs.load_agent_prefs(),
+        migrate_prefs=lambda p: prefs.apply_prefs_to_settings(app.settings, p),
+        settings=app.settings,
+        core_tools=app.registry.core_tools,
+        plugin_toolsets=app.registry.plugin_toolsets,
+        normalize_tool_name=app.registry.normalize_tool_name,
+        merge_prompt_templates=lambda p: p,
+        load_skills_from_dir=lambda p: {},
+        resolved_prompt_templates_dir=lambda _p=None: "",
+        resolved_skills_dir=lambda _p=None: "",
+        resolved_tools_dir=lambda _p=None: "",
+        default_prompt_templates_dir=lambda: "",
+        default_skills_dir=lambda: "",
+        load_plugin_toolsets=lambda tools_dir=None: None,
+        register_tool_aliases=lambda: None,
+    )
     assert st["system_prompt_path"] == str(pf)
     assert st["system_prompt"] == "Loaded from path.\n"
-    d._set_agent_prefs_path_override(None)
+    prefs.set_agent_prefs_path_override(None)
 
 
 def test_interactive_settings_ollama_show_renders(tmp_path, monkeypatch):
-    d = _d()
-    d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
     lines = ["/settings ollama show", "/quit"]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-            prefs_loaded=False,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0, prefs_path=str(tmp_path / "x.json"))
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert '"host"' in out and '"model"' in out
-    d._set_agent_prefs_path_override(None)
 
 
 def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch):
-    d = _d()
-    d._APP.settings = AgentSettings.defaults()
-    d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
     lines = [
         "/settings thinking show",
         "/settings thinking level high",
@@ -395,113 +468,82 @@ def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch
         "/settings thinking show",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-            prefs_loaded=False,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0, prefs_path=str(tmp_path / "x.json"))
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "thinking:" in out
-    assert d._settings_get_str(("agent", "thinking_level"), "") in ("high", "")
-    assert isinstance(d._settings_get_bool(("agent", "stream_thinking"), False), bool)
-    d._set_agent_prefs_path_override(None)
+    assert session.settings.get_str(("agent", "thinking_level"), "") in ("high", "")
+    assert isinstance(session.settings.get_bool(("agent", "stream_thinking"), False), bool)
 
 
 def test_interactive_settings_tools_lists_toolsets_and_describe(tmp_path, monkeypatch):
-    d = _d()
-    d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
     lines = [
         "/settings tools",
         "/settings tools describe run_pytest",
         "/settings tools describe dev",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-            prefs_loaded=False,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0, prefs_path=str(tmp_path / "x.json"))
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "Toolsets (plugins)" in out
     assert "Tool: run_pytest" in out
     assert "Toolset: dev" in out
-    d._set_agent_prefs_path_override(None)
 
 
 def test_interactive_settings_save_command(tmp_path, monkeypatch):
-    d = _d()
+    from agentlib import prefs
+
     pref_path = tmp_path / "saved.json"
-    d._set_agent_prefs_path_override(str(pref_path))
     lines = ["/settings save", "/quit"]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
+        _app, session = build_test_session(
+            monkeypatch,
             verbose=0,
             second_opinion_enabled=True,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-            prefs_loaded=False,
+            prefs_path=str(pref_path),
+            write_prefs=True,
         )
+        run_session_lines(session, lines)
     assert "Saved settings" in buf.getvalue()
     data = json.loads(pref_path.read_text(encoding="utf-8"))
     assert data["version"] == 4
     assert data["second_opinion_enabled"] is True
-    d._set_agent_prefs_path_override(None)
+    prefs.set_agent_prefs_path_override(None)
 
 
 def test_ctrl_c_cancels_request_but_keeps_repl_running(tmp_path, monkeypatch):
-    d = _d()
-    d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
+    from agentlib.repl.loop import run_interactive_repl_loop
 
     def boom(*args, **kwargs):  # noqa: ARG001
         raise KeyboardInterrupt()
 
-    monkeypatch.setattr(d, "call_ollama_chat", boom)
-    lines = ["hello", "/quit"]
-    it = iter(lines)
+    _app, session = build_test_session(monkeypatch, verbose=0, prefs_path=str(tmp_path / "x.json"))
+    monkeypatch.setattr(_app, "call_ollama_chat", boom)
+    # Rebuild deps cache since we patched the method after session creation.
+    session._conversation_turn_deps = _app.conversation_turn_deps()
 
-    def fake_input(_=""):
-        return next(it)
+    lines = iter(["hello", "/quit"])
 
-    monkeypatch.setattr("builtins.input", fake_input)
+    def repl_read_line(_prompt: str) -> str:
+        return next(lines)
+
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-            prefs_loaded=False,
+        run_interactive_repl_loop(
+            session,
+            install_readline=lambda: None,
+            repl_read_line=repl_read_line,
+            flush_repl_history=lambda: None,
+            agent_progress=lambda _m: None,
         )
     out = buf.getvalue()
     assert "[Cancelled]" in out
-    d._set_agent_prefs_path_override(None)
 
 
 def test_cli_disable_enable_tool_flags(monkeypatch):
@@ -520,30 +562,18 @@ def test_cli_disable_enable_tool_flags(monkeypatch):
 
 
 def test_normalize_tool_user_aliases():
-    d = _d()
-    assert d._normalize_tool_name("web search") == "search_web"
-    assert d._normalize_tool_name("shell") == "run_command"
-    assert d._normalize_tool_name("Search-Web") == "search_web"
-    assert d._normalize_tool_name("nope_tool_xyz") is None
+    assert REGISTRY.normalize_tool_name("web search") == "search_web"
+    assert REGISTRY.normalize_tool_name("shell") == "run_command"
+    assert REGISTRY.normalize_tool_name("Search-Web") == "search_web"
+    assert REGISTRY.normalize_tool_name("nope_tool_xyz") is None
 
 
 def test_interactive_settings_tools_command(monkeypatch):
-    d = _d()
     lines = ["/settings tools", "/quit"]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "search_web" in out
     assert "run_command" in out
@@ -576,73 +606,65 @@ def test_cli_unknown_tool_prints_hint(monkeypatch):
 
 
 def test_interactive_phrase_disable_enable_web_search(monkeypatch):
-    d = _d()
     lines = [
         "/settings disable web search",
         "/settings enable web search",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "Tool disabled: search_web" in out
     assert "Tool enabled: search_web" in out
 
 
 def test_interactive_settings_tools(monkeypatch):
-    d = _d()
     lines = [
         "/settings disable search_web",
         "/settings enable search_web",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "Tool disabled: search_web" in out
     assert "Tool enabled: search_web" in out
 
 
 def test_route_requires_websearch_skips_when_search_web_disabled(monkeypatch):
-    d = _d()
-    et = frozenset(t for t in d._TOOL_REGISTRY.core_tools if t != "search_web")
+    from agentlib import routing
+
+    et = frozenset({"fetch_page", "run_command"})  # any set without search_web
     called = []
 
     def no_chat(*a, **k):
         called.append(1)
         return "{}"
 
-    monkeypatch.setattr(d, "call_ollama_chat", no_chat)
-    assert d._route_requires_websearch("today's news", "2026-01-01", enabled_tools=et) is None
+    # If search_web isn't enabled, routing must return None without calling the model.
+    assert (
+        routing.route_requires_websearch(
+            "today's news",
+            "2026-01-01",
+            primary_profile=None,
+            enabled_tools=et,
+            transcript_messages=None,
+            coerce_enabled_tools=lambda x: set(x or set()),
+            call_ollama_chat=no_chat,
+            parse_agent_json=lambda _s: {},
+            scalar_to_str=lambda x, default="": str(x) if x is not None else default,
+            router_transcript_max_messages=80,
+        )
+        is None
+    )
     assert called == []
 
 
 def test_interactive_settings_llm_profiles(monkeypatch):
-    d = _d()
     lines = [
         "/settings primary llm hosted https://api.example/v1 fake-model sk-test",
         "/settings second_opinion llm ollama tinyllama:latest",
@@ -650,20 +672,10 @@ def test_interactive_settings_llm_profiles(monkeypatch):
         "/settings primary llm ollama",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "https://api.example/v1" in out
     assert "https://review.example/v1" in out
@@ -672,98 +684,54 @@ def test_interactive_settings_llm_profiles(monkeypatch):
 
 
 def test_interactive_use_skill_unknown(monkeypatch):
-    d = _d()
     lines = [
         "/skill not_a_skill hello",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue().lower()
     assert "unknown skill" in out
 
 
 def test_interactive_skill_list(monkeypatch):
-    d = _d()
     lines = [
         "/skill list",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert ("Skills:" in out) or ("(no skills loaded)" in out)
 
 
 def test_interactive_skill_help_and_prompt_template_help(monkeypatch):
-    d = _d()
     lines = [
         "/skill help",
         "/settings prompt_template help",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue().lower()
     assert "/skill" in out and "prompt_template" in out
 
 
 def test_interactive_help_is_top_level(monkeypatch):
-    d = _d()
     lines = [
         "/help",
         "/quit",
     ]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "/skill ..." in out
     assert "/settings ..." in out
@@ -772,44 +740,31 @@ def test_interactive_help_is_top_level(monkeypatch):
 
 
 def test_parse_while_repl_tokens_and_judge_bit():
-    d = _d()
     toks = shlex.split('/while --max 3 "pytest ok" do "fix code"')
-    m, c, body = d._parse_while_repl_tokens(toks)
+    m, c, body = parse_while_repl_tokens(toks)
     assert m == 3 and c == "pytest ok" and body == ["fix code"]
     toks2 = shlex.split("/while 'x' do 'y'")
-    assert d._parse_while_repl_tokens(toks2) == (50, "x", ["y"])
+    assert parse_while_repl_tokens(toks2) == (50, "x", ["y"])
     toks3 = shlex.split('/while "c" do "p1", "p2"')
-    assert d._parse_while_repl_tokens(toks3)[2] == ["p1", "p2"]
+    assert parse_while_repl_tokens(toks3)[2] == ["p1", "p2"]
     toks4 = shlex.split('/while "c" do "a" , "b" , "c"')
-    assert d._parse_while_repl_tokens(toks4)[2] == ["a", "b", "c"]
+    assert parse_while_repl_tokens(toks4)[2] == ["a", "b", "c"]
     with pytest.raises(ValueError):
-        d._parse_while_repl_tokens(["/while"])
+        parse_while_repl_tokens(["/while"])
     with pytest.raises(ValueError):
-        d._parse_while_repl_tokens(shlex.split("/while --max 0 'a' do 'b'"))
-    assert d._parse_while_judge_bit("1") == 1
-    assert d._parse_while_judge_bit("0") == 0
-    assert d._parse_while_judge_bit("noise 1 trailing") == 1
+        parse_while_repl_tokens(shlex.split("/while --max 0 'a' do 'b'"))
+    assert parse_while_judge_bit("1") == 1
+    assert parse_while_judge_bit("0") == 0
+    assert parse_while_judge_bit("noise 1 trailing") == 1
 
 
 def test_interactive_show_model_and_reviewer(monkeypatch):
-    d = _d()
-    d._APP.settings = AgentSettings.defaults()
-    d._settings_set(("ollama", "model"), "custom-llm:latest")
     lines = ["/show model", "/show reviewer", "/quit"]
-    it = iter(lines)
-
-    def fake_input(_=""):
-        return next(it)
-
-    monkeypatch.setattr("builtins.input", fake_input)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d._interactive_repl(
-            verbose=0,
-            second_opinion_enabled=False,
-            cloud_ai_enabled=False,
-            save_context_path=None,
-        )
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        session.settings.set(("ollama", "model"), "custom-llm:latest")
+        run_session_lines(session, lines)
     out = buf.getvalue()
     assert "Primary LLM: ollama (" in out and "custom-llm:latest" in out
     assert "Second-opinion reviewer:" in out
@@ -981,7 +936,6 @@ def test_list_directory_real(tmp_path, monkeypatch):
 
 
 def test_is_tool_result_weak_instant_answer_without_url():
-    d = _d()
     r = "[DuckDuckGo instant answer]\nSome text without link"
-    assert d._is_tool_result_weak_for_dedup(r) is True
+    assert turn_support.is_tool_result_weak_for_dedup(r) is True
 

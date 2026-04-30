@@ -29,6 +29,204 @@ def build_test_app(monkeypatch: pytest.MonkeyPatch):
     return app
 
 
+def build_test_session(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    verbose: int = 0,
+    second_opinion_enabled: bool = False,
+    cloud_ai_enabled: bool = False,
+    save_context_path: Optional[str] = None,
+    enabled_tools: Optional[set[str]] = None,
+    prefs_path: Optional[str] = None,
+    write_prefs: bool = False,
+):
+    """
+    Create a fresh AgentSession for interactive-command tests.
+
+    This is intentionally lower-level than `agentlib.app._interactive_repl`: tests should exercise
+    `AgentSession.execute_line` directly and keep only minimal coverage for the REPL loop itself.
+    """
+    from agentlib.session import AgentSession
+    from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
+    from agentlib import prompt_templates_io, prompts
+    from agentlib.context.io import load_context_messages, save_context_bundle
+    from agentlib.skills.loader import load_skills_from_dir
+    from agentlib import prefs as prefs_mod
+    from agentlib.prefs import bootstrap as prefs_bootstrap
+    from agentlib.repl.while_cmd import call_while_condition_judge, parse_while_repl_tokens
+
+    app = build_test_app(monkeypatch)
+    if prefs_path is not None:
+        prefs_mod.set_agent_prefs_path_override(str(prefs_path))
+
+
+    templates = prompt_templates_io.load_prompt_templates_from_dir(app.default_prompt_templates_dir())
+    skills_map = load_skills_from_dir(app.default_skills_dir())
+    primary_profile = default_primary_llm_profile()
+    enabled_tools_use = enabled_tools if enabled_tools is not None else set(app.registry.core_tools)
+
+    def describe_llm_profile_short(p: LlmProfile) -> str:
+        if p.backend != "hosted":
+            return "ollama"
+        key = "set" if (p.api_key or "").strip() else "missing"
+        return f"hosted {p.model!r} @ {p.base_url!r} (api_key: {key})"
+
+    def format_session_primary_llm_line(p: LlmProfile) -> str:
+        if p.backend == "hosted":
+            return describe_llm_profile_short(p)
+        return f"ollama ({app.ollama_model()!r})"
+
+    def format_session_reviewer_line(hosted: Optional[LlmProfile], ollama_model: Optional[str]) -> str:
+        if hosted is not None and hosted.backend == "hosted":
+            return describe_llm_profile_short(hosted)
+        return f"ollama ({(ollama_model or app.ollama_second_opinion_model())!r})"
+
+    def hosted_review_ready(cloud: bool, reviewer) -> bool:
+        if cloud and app.settings.get_str(("openai", "api_key"), "").strip():
+            return True
+        if (
+            reviewer is not None
+            and getattr(reviewer, "backend", "") == "hosted"
+            and (getattr(reviewer, "api_key", "") or "").strip()
+        ):
+            return True
+        return False
+
+    def interactive_turn_user_message(
+        user_query: str,
+        today_str: str,
+        second_opinion: bool,
+        cloud: bool,
+        *,
+        primary_profile=None,
+        reviewer_ollama_model=None,
+        reviewer_hosted_profile=None,
+        enabled_tools=None,
+        system_instruction_override: Optional[str] = None,
+        skill_suffix: Optional[str] = None,
+    ) -> str:
+        return prompts.interactive_turn_user_message(
+            user_query=user_query,
+            today_str=today_str,
+            second_opinion=second_opinion,
+            cloud=cloud,
+            primary_profile=primary_profile or default_primary_llm_profile(),
+            reviewer_ollama_model=reviewer_ollama_model,
+            reviewer_hosted_profile=reviewer_hosted_profile,
+            enabled_tools=enabled_tools,
+            system_instruction_override=system_instruction_override,
+            skill_suffix=skill_suffix,
+            ollama_model=app.ollama_model(),
+            hosted_review_ready=hosted_review_ready,
+            tool_policy_runner_text=app.registry.tool_policy_runner_text,
+        )
+
+    def call_while_judge(condition: str, messages: list, *, primary_profile, verbose: int) -> int:
+        return call_while_condition_judge(
+            condition,
+            messages,
+            primary_profile=primary_profile,
+            verbose=verbose,
+            default_primary_llm_profile=default_primary_llm_profile,
+            call_hosted_chat_plain=app.call_hosted_chat_plain,
+            call_ollama_plaintext=app.call_ollama_plaintext,
+            ollama_model=app.ollama_model(),
+        )
+
+    session = AgentSession(
+        settings=app.settings,
+        verbose=verbose,
+        second_opinion_enabled=second_opinion_enabled,
+        cloud_ai_enabled=cloud_ai_enabled,
+        save_context_path=save_context_path,
+        enabled_tools=frozenset(enabled_tools_use),
+        enabled_toolsets=frozenset(),
+        primary_profile=primary_profile,
+        reviewer_hosted_profile=None,
+        reviewer_ollama_model=None,
+        skills_map=skills_map,
+        prompt_templates=templates,
+        prompt_template_default="coding",
+        prompt_templates_dir=app.default_prompt_templates_dir(),
+        skills_dir=app.default_skills_dir(),
+        tools_dir=app.default_tools_dir(),
+        context_cfg={},
+        system_prompt_override=None,
+        system_prompt_path=None,
+        session_prompt_template=None,
+        agent_progress=app.agent_progress,
+        fetch_ollama_local_model_names=lambda: [],
+        format_last_ollama_usage_for_repl=lambda: "",
+        format_session_primary_llm_line=format_session_primary_llm_line,
+        format_session_reviewer_line=format_session_reviewer_line,
+        print_skill_usage_verbose=app.print_skill_usage_verbose,
+        match_skill_detail=lambda u, sm: (None, None),
+        ml_select_skill_id=lambda *_a, **_k: (None, "disabled"),
+        skill_plan_steps=lambda **_k: (None, "disabled"),
+        effective_enabled_tools_for_skill=app.effective_enabled_tools_for_skill,
+        effective_enabled_tools_for_turn=app.registry.effective_enabled_tools_for_turn,
+        route_requires_websearch=app.route_requires_websearch,
+        deliverable_skip_mandatory_web=lambda _q: False,
+        user_wants_written_deliverable=lambda _q: False,
+        interactive_turn_user_message=interactive_turn_user_message,
+        conversation_turn_deps=app.conversation_turn_deps(),
+        save_context_bundle=save_context_bundle,
+        load_context_messages=load_context_messages,
+        registry=app.registry,
+        build_agent_prefs_payload=lambda **kwargs: prefs_bootstrap.build_agent_prefs_payload(
+            settings=app.settings,
+            core_tools=app.registry.core_tools,
+            plugin_toolsets=app.registry.plugin_toolsets,
+            **kwargs,
+        ),
+        write_agent_prefs_file=(prefs_mod.write_agent_prefs_file if write_prefs else (lambda _payload: None)),
+        agent_prefs_path=(prefs_mod.agent_prefs_path if write_prefs else (lambda: "")),
+        settings_group_keys_lines=app.settings.group_keys_lines,
+        settings_group_show=app.settings.group_show,
+        settings_group_set=app.settings.group_set,
+        settings_group_unset=app.settings.group_unset,
+        settings_get=app.settings.get,
+        settings_set=app.settings.set,
+        LlmProfile_cls=LlmProfile,
+        default_primary_llm_profile=default_primary_llm_profile,
+        describe_llm_profile_short=describe_llm_profile_short,
+        ollama_second_opinion_model=app.ollama_second_opinion_model,
+        ollama_request_think_value=app.ollama_request_think_value,
+        agent_thinking_level=lambda: app.settings.get_str(("agent", "thinking_level"), ""),
+        agent_thinking_enabled_default_false=lambda: app.settings.get_bool(("agent", "thinking"), False),
+        agent_stream_thinking_enabled=lambda: app.settings.get_bool(("agent", "stream_thinking"), False),
+        verbose_ack_message=app.verbose_ack_message,
+        parse_while_repl_tokens=parse_while_repl_tokens,
+        call_while_condition_judge=call_while_judge,
+    )
+    return app, session
+
+
+def run_session_lines(session, lines: list[str]) -> None:
+    """
+    Drive `AgentSession.execute_line` like the REPL loop would:
+    print any `SessionLineResult.output` and stop on quit.
+    """
+    for line in lines:
+        res = session.execute_line(line)
+        if res.output:
+            print(res.output)
+        if res.quit:
+            break
+
+
+def build_agent_json_deps(app) -> object:
+    """Create `AgentJsonDeps` wired to an app's registry."""
+    from agentlib.agent_json import AgentJsonDeps
+    from agentlib.tools import turn_support
+
+    return AgentJsonDeps(
+        all_known_tools=app.registry.all_known_tools,
+        coerce_enabled_tools=app.registry.coerce_enabled_tools,
+        merge_tool_param_aliases=turn_support.merge_tool_param_aliases,
+    )
+
+
 def run_main(
     monkeypatch: pytest.MonkeyPatch,
     argv: List[str],

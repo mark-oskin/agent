@@ -10,6 +10,17 @@ Application composition root.
 - session construction + REPL/one-shot execution
 """
 
+import warnings
+
+# Silence urllib3's LibreSSL startup warning on macOS system Python builds.
+# This warning is noisy and not actionable for this project.
+warnings.filterwarnings(
+    "ignore",
+    message=r"urllib3 v2 only supports OpenSSL 1\.1\.1\+.*LibreSSL.*",
+    category=Warning,
+    module=r"urllib3(\..*)?",
+)
+
 import datetime
 import json
 import os
@@ -45,6 +56,7 @@ from agentlib.llm.second_opinion import (
     second_opinion_reviewer_messages,
 )
 from agentlib.prefs import bootstrap as prefs_bootstrap
+from agentlib.repl.io import repl_buffered_line_max_bytes
 from agentlib.repl.loop import run_interactive_repl_loop
 from agentlib.repl.while_cmd import call_while_condition_judge, parse_while_repl_tokens, parse_while_judge_bit
 from agentlib.runtime import ConversationTurnDeps, run_agent_conversation_turn
@@ -52,6 +64,7 @@ from agentlib.skills.loader import load_skills_from_dir
 from agentlib.skills.planner import skill_plan_steps as skill_plan_steps_impl
 from agentlib.skills.selection import match_skill_detail, ml_select_skill_id as ml_select_skill_id_impl
 from agentlib.tools import builtins as tool_builtins
+from agentlib.tools.progress import tool_progress_message_with_settings
 from agentlib.tools import turn_support
 from agentlib.tools.registry import ToolRegistry
 from agentlib.tools.websearch import search_backend_banner_line, search_web_effective_max_results
@@ -588,7 +601,9 @@ class AgentApp:
                 stdin_isatty=sys.stdin.isatty(),
             ),
             agent_progress=self.agent_progress,
-            tool_progress_message=lambda tool, params: _tool_progress_message(tool, params),
+            tool_progress_message=lambda tool, params: tool_progress_message_with_settings(
+                tool, params, settings=self.settings
+            ),
             is_tool_result_weak_for_dedup=turn_support.is_tool_result_weak_for_dedup,
             tool_result_user_message=lambda tool, params, result, deliverable_reminder="": turn_support.tool_result_user_message(
                 tool,
@@ -633,8 +648,7 @@ class AgentApp:
         return os.path.join(os.path.expanduser("~"), ".agent_repl_history")
 
     def repl_input_max_bytes(self) -> int:
-        v = self.settings_get_int(("agent", "repl_input_max_bytes"), 0)
-        return v if v > 0 else 131072
+        return repl_buffered_line_max_bytes(settings_get_int=self.settings_get_int)
 
     def flush_repl_readline_history(self) -> None:
         if not self._repl_readline_installed:
@@ -699,28 +713,180 @@ class AgentApp:
         enabled_tools: AbstractSet[str],
         prompt_template_selected: Optional[str],
     ) -> None:
-        _interactive_repl(
-            app=self,
+        """
+        Multi-turn stdin loop when no query is given on the command line.
+        """
+        from agentlib.session import AgentSession
+
+        enabled_toolsets = st.get("enabled_toolsets") or set()
+        skills_m = st.get("skills") if isinstance(st.get("skills"), dict) else {}
+        templates = (
+            st.get("prompt_templates")
+            if isinstance(st.get("prompt_templates"), dict)
+            else prompt_templates_io.load_prompt_templates_from_dir(self.default_prompt_templates_dir())
+        )
+        template_default = (st.get("prompt_template_default") or "").strip() or "coding"
+        session_prompt_template: Optional[str] = None
+        session_system_prompt = st.get("system_prompt")
+        session_system_prompt_path = st.get("system_prompt_path")
+        if session_system_prompt is None and not session_system_prompt_path:
+            resolved = prompts.resolve_prompt_template_text(template_default, templates)
+            if resolved:
+                session_system_prompt = resolved
+                session_prompt_template = template_default
+        if prompt_template_selected:
+            session_prompt_template = prompt_template_selected or session_prompt_template
+
+        primary_profile = st.get("primary_profile") or default_primary_llm_profile()
+        reviewer_hosted_profile = st.get("reviewer_hosted_profile")
+        reviewer_ollama_model = st.get("reviewer_ollama_model")
+
+        def hosted_review_ready(cloud: bool, reviewer) -> bool:
+            if cloud and self.settings.get_str(("openai", "api_key"), "").strip():
+                return True
+            if (
+                reviewer is not None
+                and getattr(reviewer, "backend", "") == "hosted"
+                and (getattr(reviewer, "api_key", "") or "").strip()
+            ):
+                return True
+            return False
+
+        def describe_llm_profile_short(p: LlmProfile) -> str:
+            if p.backend != "hosted":
+                return "ollama"
+            key = "set" if (p.api_key or "").strip() else "missing"
+            return f"hosted {p.model!r} @ {p.base_url!r} (api_key: {key})"
+
+        def format_session_primary_llm_line(p: LlmProfile) -> str:
+            if p.backend == "hosted":
+                return describe_llm_profile_short(p)
+            return f"ollama ({self.ollama_model()!r})"
+
+        def format_session_reviewer_line(hosted: Optional[LlmProfile], ollama_model: Optional[str]) -> str:
+            if hosted is not None and hosted.backend == "hosted":
+                return describe_llm_profile_short(hosted)
+            return f"ollama ({(ollama_model or self.ollama_second_opinion_model())!r})"
+
+        def interactive_turn_user_message(
+            user_query: str,
+            today_str: str,
+            second_opinion: bool,
+            cloud: bool,
+            *,
+            primary_profile=None,
+            reviewer_ollama_model=None,
+            reviewer_hosted_profile=None,
+            enabled_tools=None,
+            system_instruction_override: Optional[str] = None,
+            skill_suffix: Optional[str] = None,
+        ) -> str:
+            return prompts.interactive_turn_user_message(
+                user_query=user_query,
+                today_str=today_str,
+                second_opinion=second_opinion,
+                cloud=cloud,
+                primary_profile=primary_profile or default_primary_llm_profile(),
+                reviewer_ollama_model=reviewer_ollama_model,
+                reviewer_hosted_profile=reviewer_hosted_profile,
+                enabled_tools=enabled_tools,
+                system_instruction_override=system_instruction_override,
+                skill_suffix=skill_suffix,
+                ollama_model=self.ollama_model(),
+                hosted_review_ready=hosted_review_ready,
+                tool_policy_runner_text=self.registry.tool_policy_runner_text,
+            )
+
+        def call_while_judge(condition: str, messages: list, *, primary_profile, verbose: int) -> int:
+            return call_while_condition_judge(
+                condition,
+                messages,
+                primary_profile=primary_profile,
+                verbose=verbose,
+                default_primary_llm_profile=default_primary_llm_profile,
+                call_hosted_chat_plain=self.call_hosted_chat_plain,
+                call_ollama_plaintext=self.call_ollama_plaintext,
+                ollama_model=self.ollama_model(),
+                scalar_to_str_fn=scalar_to_str,
+            )
+
+        session = AgentSession(
+            settings=self.settings,
             verbose=verbose,
             second_opinion_enabled=second_opinion,
             cloud_ai_enabled=cloud_ai,
             save_context_path=save_context_path,
-            enabled_tools=enabled_tools,
-            enabled_toolsets=st.get("enabled_toolsets"),
-            primary_profile=st.get("primary_profile"),
-            reviewer_hosted_profile=st.get("reviewer_hosted_profile"),
-            reviewer_ollama_model=st.get("reviewer_ollama_model"),
-            prefs_loaded=False,
-            system_prompt_override=st.get("system_prompt"),
-            system_prompt_path=st.get("system_prompt_path"),
-            prompt_templates=st.get("prompt_templates"),
-            prompt_template_default=st.get("prompt_template_default"),
-            prompt_templates_dir=st.get("prompt_templates_dir"),
-            skills_dir=st.get("skills_dir"),
-            tools_dir=st.get("tools_dir"),
-            skills_map=st.get("skills"),
-            context_cfg=st.get("context_manager"),
-            prompt_template_selected=prompt_template_selected,
+            enabled_tools=frozenset(enabled_tools),
+            enabled_toolsets=frozenset(enabled_toolsets),
+            primary_profile=primary_profile,
+            reviewer_hosted_profile=reviewer_hosted_profile,
+            reviewer_ollama_model=reviewer_ollama_model,
+            skills_map=skills_m,
+            prompt_templates=templates,
+            prompt_template_default=template_default,
+            prompt_templates_dir=st.get("prompt_templates_dir") or self.resolved_prompt_templates_dir(),
+            skills_dir=st.get("skills_dir") or self.resolved_skills_dir(),
+            tools_dir=st.get("tools_dir") or self.resolved_tools_dir(),
+            context_cfg=st.get("context_manager") if isinstance(st.get("context_manager"), dict) else {},
+            system_prompt_override=session_system_prompt,
+            system_prompt_path=session_system_prompt_path,
+            session_prompt_template=session_prompt_template,
+            agent_progress=self.agent_progress,
+            fetch_ollama_local_model_names=lambda: fetch_ollama_local_model_names_impl(
+                self.ollama_base_url(), http_get=requests.get, timeout=60
+            ),
+            format_last_ollama_usage_for_repl=lambda: "",
+            format_session_primary_llm_line=format_session_primary_llm_line,
+            format_session_reviewer_line=format_session_reviewer_line,
+            print_skill_usage_verbose=self.print_skill_usage_verbose,
+            match_skill_detail=lambda u, sm: match_skill_detail(u, sm),
+            ml_select_skill_id=lambda user_request, sm, **kw: self.ml_select_skill_id(
+                user_request, sm, **kw
+            ),
+            skill_plan_steps=lambda **kw: self.skill_plan_steps(**kw),
+            effective_enabled_tools_for_skill=self.effective_enabled_tools_for_skill,
+            effective_enabled_tools_for_turn=self.registry.effective_enabled_tools_for_turn,
+            route_requires_websearch=self.route_requires_websearch,
+            deliverable_skip_mandatory_web=deliverable_skip_mandatory_web,
+            user_wants_written_deliverable=user_wants_written_deliverable,
+            interactive_turn_user_message=interactive_turn_user_message,
+            conversation_turn_deps=self.conversation_turn_deps(),
+            save_context_bundle=save_context_bundle,
+            load_context_messages=load_context_messages,
+            registry=self.registry,
+            build_agent_prefs_payload=lambda **kwargs: prefs_bootstrap.build_agent_prefs_payload(
+                settings=self.settings,
+                plugin_toolsets=self.registry.plugin_toolsets,
+                core_tools=self.registry.core_tools,
+                **kwargs,
+            ),
+            write_agent_prefs_file=prefs.write_agent_prefs_file,
+            agent_prefs_path=prefs.agent_prefs_path,
+            settings_group_keys_lines=self.settings.group_keys_lines,
+            settings_group_show=self.settings.group_show,
+            settings_group_set=self.settings.group_set,
+            settings_group_unset=self.settings.group_unset,
+            settings_get=self.settings.get,
+            settings_set=self.settings.set,
+            LlmProfile_cls=LlmProfile,
+            default_primary_llm_profile=default_primary_llm_profile,
+            describe_llm_profile_short=describe_llm_profile_short,
+            ollama_second_opinion_model=self.ollama_second_opinion_model,
+            ollama_request_think_value=self.ollama_request_think_value,
+            agent_thinking_level=lambda: self.settings_get_str(("agent", "thinking_level"), ""),
+            agent_thinking_enabled_default_false=lambda: self.settings_get_bool(("agent", "thinking"), False),
+            agent_stream_thinking_enabled=lambda: self.settings_get_bool(("agent", "stream_thinking"), False),
+            verbose_ack_message=self.verbose_ack_message,
+            parse_while_repl_tokens=parse_while_repl_tokens,
+            call_while_condition_judge=call_while_judge,
+        )
+
+        run_interactive_repl_loop(
+            session,
+            install_readline=self.interactive_repl_install_readline,
+            repl_read_line=self.repl_read_line,
+            flush_repl_history=self.flush_repl_readline_history,
+            agent_progress=self.agent_progress,
         )
 
     def run(self, argv: Optional[list[str]] = None) -> None:
@@ -881,7 +1047,7 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
     """
     from agentlib.cli import parse_and_apply_cli_config_flag, parse_main_argv
 
-    app0 = app or _APP
+    app0 = app or get_default_app()
     argv0 = list(sys.argv[1:] if argv is None else argv)
     argv1 = parse_and_apply_cli_config_flag(argv0)
     raw_prefs = app0.load_prefs()
@@ -948,27 +1114,13 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
         if load_context_path:
             print("Error: --load_context requires a follow-up question on the command line.")
             return
-        _interactive_repl(
-            app=app0,
+        app0.run_interactive(
+            st=st,
             verbose=verbose,
-            second_opinion_enabled=second_opinion_enabled,
-            cloud_ai_enabled=cloud_ai_enabled,
+            second_opinion=second_opinion_enabled,
+            cloud_ai=cloud_ai_enabled,
             save_context_path=save_context_path,
             enabled_tools=frozenset(enabled_tools),
-            enabled_toolsets=st.get("enabled_toolsets"),
-            primary_profile=primary_profile,
-            reviewer_hosted_profile=reviewer_hosted_profile,
-            reviewer_ollama_model=reviewer_ollama_model,
-            prefs_loaded=raw_prefs is not None,
-            system_prompt_override=st.get("system_prompt"),
-            system_prompt_path=st.get("system_prompt_path"),
-            prompt_templates=st.get("prompt_templates"),
-            prompt_template_default=st.get("prompt_template_default"),
-            prompt_templates_dir=st.get("prompt_templates_dir"),
-            skills_dir=st.get("skills_dir"),
-            tools_dir=st.get("tools_dir"),
-            skills_map=st.get("skills"),
-            context_cfg=st.get("context_manager"),
             prompt_template_selected=prompt_template_selected,
         )
         return
@@ -1081,659 +1233,15 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
             print(f"Warning: could not save context: {e}", file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# Back-compat test surface (was historically in agent.py)
-# ---------------------------------------------------------------------------
-#
-# The project is in the middle of migrating callers/tests off of `agent.py` internals.
-# Keep this lightweight, stable module surface so tests can import `agentlib.app`
-# and avoid touching `agent.py`.
-#
+_DEFAULT_APP: Optional[AgentApp] = None
 
-_APP = default_app()
 
-# Common “defaults” paths (assets live at repo root, not inside the package dir).
-_PROJECT_DIR = _APP.project_dir
+def get_default_app() -> AgentApp:
+    global _DEFAULT_APP
+    if _DEFAULT_APP is None:
+        _DEFAULT_APP = default_app()
+    return _DEFAULT_APP
 
 
-def _interactive_repl(
-    *,
-    app: Optional["AgentApp"] = None,
-    verbose: int,
-    second_opinion_enabled: bool,
-    cloud_ai_enabled: bool,
-    save_context_path: Optional[str],
-    enabled_tools: Optional[AbstractSet[str]] = None,
-    enabled_toolsets: Optional[AbstractSet[str]] = None,
-    primary_profile: Optional[LlmProfile] = None,
-    reviewer_hosted_profile: Optional[LlmProfile] = None,
-    reviewer_ollama_model: Optional[str] = None,
-    prefs_loaded: bool = False,
-    system_prompt_override: Optional[str] = None,
-    system_prompt_path: Optional[str] = None,
-    prompt_templates: Optional[dict] = None,
-    prompt_template_default: Optional[str] = None,
-    prompt_templates_dir: Optional[str] = None,
-    skills_dir: Optional[str] = None,
-    tools_dir: Optional[str] = None,
-    skills_map: Optional[dict] = None,
-    context_cfg: Optional[dict] = None,
-    prompt_template_selected: Optional[str] = None,
-) -> None:
-    """Multi-turn stdin loop when no query is given on the command line (legacy surface)."""
-    _ = prefs_loaded
-    a = app or _APP
-    second_opinion_on = second_opinion_enabled
-    session_save_path = save_context_path
-    ptd0 = (prompt_templates_dir or "").strip()
-    session_pt_dir = os.path.abspath(os.path.expanduser(ptd0) if ptd0 else a.default_prompt_templates_dir())
-    skd0 = (skills_dir or "").strip()
-    session_skills_dir = os.path.abspath(os.path.expanduser(skd0) if skd0 else a.default_skills_dir())
-    tld0 = (tools_dir or "").strip()
-    session_tools_dir = os.path.abspath(os.path.expanduser(tld0) if tld0 else a.default_tools_dir())
-    skills_m = skills_map if isinstance(skills_map, dict) else {}
-    templates = (
-        prompt_templates
-        if isinstance(prompt_templates, dict)
-        else prompt_templates_io.load_prompt_templates_from_dir(a.default_prompt_templates_dir())
-    )
-    template_default = (prompt_template_default or "").strip() or "coding"
-    session_prompt_template: Optional[str] = None
-    session_system_prompt = system_prompt_override
-    session_system_prompt_path = (
-        os.path.abspath(os.path.expanduser(system_prompt_path)) if (system_prompt_path or "").strip() else None
-    )
-    if session_system_prompt is None and not session_system_prompt_path:
-        resolved = prompts.resolve_prompt_template_text(template_default, templates)
-        if resolved:
-            session_system_prompt = resolved
-            session_prompt_template = template_default
-    if prompt_template_selected:
-        session_prompt_template = prompt_template_selected or session_prompt_template
-
-    context_cfg_use = context_cfg if isinstance(context_cfg, dict) else {}
-    primary_profile_use = primary_profile or default_primary_llm_profile()
-    enabled_tools_use = set(enabled_tools) if enabled_tools is not None else set(a.registry.core_tools)
-    enabled_toolsets_use = set(enabled_toolsets) if enabled_toolsets is not None else set()
-
-    from agentlib.session import AgentSession
-
-    def describe_llm_profile_short(p) -> str:
-        if p.backend != "hosted":
-            return "ollama"
-        key = "set" if (p.api_key or "").strip() else "missing"
-        return f"hosted {p.model!r} @ {p.base_url!r} (api_key: {key})"
-
-    def format_session_primary_llm_line(p) -> str:
-        if p.backend == "hosted":
-            return describe_llm_profile_short(p)
-        return f"ollama ({a.ollama_model()!r})"
-
-    def format_session_reviewer_line(hosted, ollama_model) -> str:
-        if hosted is not None and hosted.backend == "hosted":
-            return describe_llm_profile_short(hosted)
-        return f"ollama ({(ollama_model or a.ollama_second_opinion_model())!r})"
-
-    def fetch_ollama_local_model_names() -> list[str]:
-        return fetch_ollama_local_model_names_impl(a.ollama_base_url(), http_get=requests.get, timeout=60)
-
-    def format_last_ollama_usage_for_repl() -> str:
-        return llm_usage.format_last_ollama_usage_for_repl(None)
-
-    def interactive_turn_user_message(
-        user_query: str,
-        today_str: str,
-        second_opinion: bool,
-        cloud: bool,
-        *,
-        primary_profile=None,
-        reviewer_ollama_model=None,
-        reviewer_hosted_profile=None,
-        enabled_tools=None,
-        system_instruction_override: Optional[str] = None,
-        skill_suffix: Optional[str] = None,
-    ) -> str:
-        def hosted_review_ready(cloud_b: bool, reviewer) -> bool:
-            if cloud_b and a.settings.get_str(("openai", "api_key"), "").strip():
-                return True
-            if (
-                reviewer is not None
-                and getattr(reviewer, "backend", "") == "hosted"
-                and (getattr(reviewer, "api_key", "") or "").strip()
-            ):
-                return True
-            return False
-
-        return prompts.interactive_turn_user_message(
-            user_query=user_query,
-            today_str=today_str,
-            second_opinion=second_opinion,
-            cloud=cloud,
-            primary_profile=primary_profile or default_primary_llm_profile(),
-            reviewer_ollama_model=reviewer_ollama_model,
-            reviewer_hosted_profile=reviewer_hosted_profile,
-            enabled_tools=enabled_tools,
-            system_instruction_override=system_instruction_override,
-            skill_suffix=skill_suffix,
-            ollama_model=a.ollama_model(),
-            hosted_review_ready=hosted_review_ready,
-            tool_policy_runner_text=a.registry.tool_policy_runner_text,
-        )
-
-    def call_while_judge(condition: str, messages: list, *, primary_profile, verbose: int) -> int:
-        return call_while_condition_judge(
-            condition,
-            messages,
-            primary_profile=primary_profile,
-            verbose=verbose,
-            default_primary_llm_profile=default_primary_llm_profile,
-            call_hosted_chat_plain=a.call_hosted_chat_plain,
-            call_ollama_plaintext=a.call_ollama_plaintext,
-            ollama_model=a.ollama_model(),
-            scalar_to_str_fn=scalar_to_str,
-        )
-
-    def route_req(uq, today, prof, tools, transcript_messages=None, **_k):
-        return a.route_requires_websearch(uq, today, prof, tools, transcript_messages)
-
-    session = AgentSession(
-        settings=a.settings,
-        verbose=verbose,
-        second_opinion_enabled=second_opinion_on,
-        cloud_ai_enabled=cloud_ai_enabled,
-        save_context_path=session_save_path,
-        enabled_tools=frozenset(enabled_tools_use),
-        enabled_toolsets=frozenset(enabled_toolsets_use),
-        primary_profile=primary_profile_use,
-        reviewer_hosted_profile=reviewer_hosted_profile,
-        reviewer_ollama_model=reviewer_ollama_model,
-        skills_map=skills_m,
-        prompt_templates=templates,
-        prompt_template_default=template_default,
-        prompt_templates_dir=session_pt_dir,
-        skills_dir=session_skills_dir,
-        tools_dir=session_tools_dir,
-        context_cfg=context_cfg_use,
-        system_prompt_override=session_system_prompt,
-        system_prompt_path=session_system_prompt_path,
-        session_prompt_template=session_prompt_template,
-        agent_progress=a.agent_progress,
-        fetch_ollama_local_model_names=fetch_ollama_local_model_names,
-        format_last_ollama_usage_for_repl=format_last_ollama_usage_for_repl,
-        format_session_primary_llm_line=format_session_primary_llm_line,
-        format_session_reviewer_line=format_session_reviewer_line,
-        print_skill_usage_verbose=a.print_skill_usage_verbose,
-        match_skill_detail=match_skill_detail,
-        ml_select_skill_id=lambda user_request, skills_map, **kw: a.ml_select_skill_id(
-            user_request, skills_map, **kw
-        ),
-        skill_plan_steps=lambda **kw: a.skill_plan_steps(**kw),
-        effective_enabled_tools_for_skill=a.effective_enabled_tools_for_skill,
-        effective_enabled_tools_for_turn=a.registry.effective_enabled_tools_for_turn,
-        route_requires_websearch=route_req,
-        deliverable_skip_mandatory_web=deliverable_skip_mandatory_web,
-        user_wants_written_deliverable=user_wants_written_deliverable,
-        interactive_turn_user_message=interactive_turn_user_message,
-        conversation_turn_deps=(_conversation_turn_deps() if app is None or app is _APP else a.conversation_turn_deps()),
-        save_context_bundle=save_context_bundle,
-        load_context_messages=load_context_messages,
-        registry=a.registry,
-        build_agent_prefs_payload=lambda **kwargs: prefs_bootstrap.build_agent_prefs_payload(
-            settings=a.settings,
-            core_tools=a.registry.core_tools,
-            plugin_toolsets=a.registry.plugin_toolsets,
-            **kwargs,
-        ),
-        write_agent_prefs_file=prefs.write_agent_prefs_file,
-        agent_prefs_path=prefs.agent_prefs_path,
-        settings_group_keys_lines=a.settings.group_keys_lines,
-        settings_group_show=a.settings.group_show,
-        settings_group_set=a.settings.group_set,
-        settings_group_unset=a.settings.group_unset,
-        settings_get=a.settings.get,
-        settings_set=a.settings.set,
-        LlmProfile_cls=LlmProfile,
-        default_primary_llm_profile=default_primary_llm_profile,
-        describe_llm_profile_short=describe_llm_profile_short,
-        ollama_second_opinion_model=a.ollama_second_opinion_model,
-        ollama_request_think_value=a.ollama_request_think_value,
-        agent_thinking_level=lambda: a.settings_get_str(("agent", "thinking_level"), ""),
-        agent_thinking_enabled_default_false=lambda: a.settings_get_bool(("agent", "thinking"), False),
-        agent_stream_thinking_enabled=lambda: a.settings_get_bool(("agent", "stream_thinking"), False),
-        verbose_ack_message=a.verbose_ack_message,
-        parse_while_repl_tokens=parse_while_repl_tokens,
-        call_while_condition_judge=call_while_judge,
-    )
-
-    run_interactive_repl_loop(
-        session,
-        install_readline=a.interactive_repl_install_readline,
-        repl_read_line=a.repl_read_line,
-        flush_repl_history=a.flush_repl_readline_history,
-        agent_progress=a.agent_progress,
-    )
-
-
-def _default_prompt_templates_dir() -> str:
-    return _APP.default_prompt_templates_dir()
-
-
-def _default_skills_dir() -> str:
-    return _APP.default_skills_dir()
-
-
-def _default_tools_dir() -> str:
-    return _APP.default_tools_dir()
-
-
-def _enrich_search_query_for_present_day(query: str) -> str:
-    return _enrich_search_query_for_present_day_impl(query, settings=_APP.settings)
-
-
-def _settings_get(path: tuple[str, str]):
-    return _APP.settings.get(path)
-
-
-def _settings_get_str(path: tuple[str, str], default: str = "") -> str:
-    return _APP.settings.get_str(path, default=default)
-
-
-def _settings_get_bool(path: tuple[str, str], default: bool = False) -> bool:
-    return _APP.settings.get_bool(path, default=default)
-
-
-def _settings_get_int(path: tuple[str, str], default: int = 0) -> int:
-    return _APP.settings.get_int(path, default=default)
-
-
-def _settings_set(path: tuple[str, str], value) -> None:
-    _APP.settings.set(path, value)
-
-
-_TOOL_REGISTRY = _APP.registry
-_PLUGIN_TOOLSETS = _APP.registry.plugin_toolsets
-_PLUGIN_TOOL_HANDLERS = _APP.registry.plugin_tool_handlers
-
-_normalize_tool_name = _APP.registry.normalize_tool_name
-_route_active_toolsets_for_request = _APP.registry.route_active_toolsets_for_request
-
-_iter_balanced_brace_objects = agent_json.iter_balanced_brace_objects
-_try_json_loads_object = agent_json.try_json_loads_object
-from agentlib.tools.websearch import enrich_search_query_for_present_day as _enrich_search_query_for_present_day_impl
-from agentlib.tools.websearch import first_url_in_text as _first_url_in_text
-
-from agentlib.skills.loader import (
-    expand_skill_artifacts as _expand_skill_artifacts,
-    load_skills_from_dir as _load_skills_from_dir,
-    safe_path_under_dir as _safe_path_under_dir,
-)
-
-
-def parse_agent_json(raw: str) -> dict:
-    return agent_json.parse_agent_json(raw, _APP.agent_json_deps())
-
-
-def call_ollama_chat(*args, **kwargs):
-    return _APP.call_ollama_chat(*args, **kwargs)
-
-
-def _message_to_agent_json_text(msg: dict, enabled_tools: Optional[AbstractSet[str]] = None) -> str:
-    return agent_json.message_to_agent_json_text(msg, enabled_tools, _APP.agent_json_deps())
-
-
-def _tool_call_to_agent_dict(function_name: str, arguments):
-    return agent_json.tool_call_to_agent_dict(function_name, arguments)
-
-
-def _parse_tool_arguments(arguments):
-    return agent_json.parse_tool_arguments(arguments)
-
-
-def _parse_context_messages_data(obj):
-    from agentlib.context.io import parse_context_messages_data
-
-    return parse_context_messages_data(obj)
-
-
-def _load_context_messages(path: str) -> list:
-    return load_context_messages(path)
-
-
-def _save_context_bundle(path: str, messages: list, user_query: str, final_answer: str, answered: bool) -> None:
-    return save_context_bundle(path, messages, user_query, final_answer, answered)
-
-
-def _ollama_request_think_value() -> object:
-    return _APP.ollama_request_think_value()
-
-
-def _apply_cli_primary_model(name: str, profile: LlmProfile) -> LlmProfile:
-    return _APP.apply_cli_primary_model(name, profile)
-
-
-def _agent_progress(msg: str) -> None:
-    return _APP.agent_progress(msg)
-
-
-def _merge_stream_message_chunks(lines_iter, *, stream_chunks: bool = False):
-    return _APP.merge_stream_message_chunks(lines_iter, stream_chunks=stream_chunks)
-
-
-_merge_tool_param_aliases = turn_support.merge_tool_param_aliases
-_ensure_tool_defaults = turn_support.ensure_tool_defaults
-_is_tool_result_weak_for_dedup = turn_support.is_tool_result_weak_for_dedup
-def _tool_result_user_message(tool: str, params: dict, result: object, *, deliverable_reminder: str = "") -> str:
-    return turn_support.tool_result_user_message(
-        tool,
-        params,
-        result,
-        deliverable_reminder=deliverable_reminder,
-        tool_output_max=_APP.settings.get_int(("ollama", "tool_output_max"), 14000),
-    )
-_tool_result_indicates_retryable_failure = turn_support.tool_result_indicates_retryable_failure
-_web_tool_result_followup_hint = turn_support.web_tool_result_followup_hint
-_parse_tool_recovery_payload = turn_support.parse_tool_recovery_payload
-
-
-def _tool_progress_message(tool: str, params: dict) -> str:
-    t = (tool or "").strip()
-    if t == "search_web":
-        q = (params or {}).get("query")
-        return f"Tool: search_web query={q!r}"
-    if t == "fetch_page":
-        u = (params or {}).get("url")
-        return f"Tool: fetch_page url={u!r}"
-    if t == "run_command":
-        c = (params or {}).get("command")
-        return f"Tool: run_command command={c!r}"
-    if t == "use_git":
-        op = (params or {}).get("op")
-        return f"Tool: use_git op={op!r}"
-    if t in ("read_file", "write_file", "list_directory", "tail_file", "replace_text", "download_file"):
-        p = (params or {}).get("path")
-        return f"Tool: {t} path={p!r}"
-    if t == "call_python":
-        return "Tool: call_python"
-    return f"Tool: {t}"
-
-
-_CACHED_CONVERSATION_TURN_DEPS: Optional[ConversationTurnDeps] = None
-
-
-def _conversation_turn_deps() -> ConversationTurnDeps:
-    """Lazily-built deps for `agentlib.runtime.run_agent_conversation_turn` (legacy module wiring)."""
-    global _CACHED_CONVERSATION_TURN_DEPS
-    if _CACHED_CONVERSATION_TURN_DEPS is None:
-        _CACHED_CONVERSATION_TURN_DEPS = ConversationTurnDeps(
-            coerce_enabled_tools=_TOOL_REGISTRY.coerce_enabled_tools,
-            maybe_compact_context_window=_maybe_compact_context_window,
-            call_ollama_chat=call_ollama_chat,
-            parse_agent_json=parse_agent_json,
-            deliverable_followup_block=lambda p: deliverable_followup_block(p, scalar_to_str),
-            answer_missing_written_body=answer_missing_written_body,
-            scalar_to_str=scalar_to_str,
-            hosted_review_ready=lambda cloud, reviewer: bool(cloud and _APP.settings.get_str(("openai", "api_key"), "").strip())
-            or (
-                reviewer is not None
-                and getattr(reviewer, "backend", "") == "hosted"
-                and (getattr(reviewer, "api_key", "") or "").strip()
-            ),
-            second_opinion_reviewer_messages=second_opinion_reviewer_messages,
-            second_opinion_result_user_message=second_opinion_result_user_message,
-            call_ollama_plaintext=_APP.call_ollama_plaintext,
-            call_hosted_chat_plain=_APP.call_hosted_chat_plain,
-            call_openai_chat_plain=_APP.call_openai_chat_plain,
-            ollama_second_opinion_model=_APP.ollama_second_opinion_model,
-            route_requires_websearch_after_answer=_route_requires_websearch_after_answer,
-            deliverable_skip_mandatory_web=deliverable_skip_mandatory_web,
-            deliverable_first_answer_followup=deliverable_first_answer_followup,
-            is_self_capability_question=routing_followups.is_self_capability_question,
-            self_capability_followup=routing_followups.self_capability_followup,
-            tool_need_review_followup=routing_followups.tool_need_review_followup,
-            extract_json_object_from_text=_extract_json_object_from_text,
-            all_known_tools=_TOOL_REGISTRY.all_known_tools,
-            merge_tool_param_aliases=turn_support.merge_tool_param_aliases,
-            ensure_tool_defaults=turn_support.ensure_tool_defaults,
-            tool_params_fingerprint=_tool_params_fingerprint,
-            search_backend_banner_line=lambda: search_backend_banner_line(_APP.settings),
-            search_web=lambda query, params=None: tool_builtins.search_web(query, params=params, settings=_APP.settings),
-            fetch_page=tool_builtins.fetch_page,
-            run_command=tool_builtins.run_command,
-            use_git=tool_builtins.use_git,
-            write_file=tool_builtins.write_file,
-            list_directory=tool_builtins.list_directory,
-            read_file=tool_builtins.read_file,
-            download_file=tool_builtins.download_file,
-            tail_file=tool_builtins.tail_file,
-            replace_text=tool_builtins.replace_text,
-            call_python=tool_builtins.call_python,
-            plugin_tool_handlers=_PLUGIN_TOOL_HANDLERS,
-            tool_fault_result=lambda tool, exc: f"Tool fault: {tool} raised {type(exc).__name__}: {exc}",
-            tool_recovery_may_run=_tool_recovery_may_run,
-            tool_recovery_tools=turn_support.TOOL_RECOVERY_TOOLS,
-            tool_result_indicates_retryable_failure=turn_support.tool_result_indicates_retryable_failure,
-            suggest_tool_recovery_params=lambda tool, params, result, user_query, primary_profile, et, verbose: turn_support.suggest_tool_recovery_params(
-                tool,
-                params,
-                result,
-                user_query,
-                primary_profile,
-                et,
-                verbose,
-                call_ollama_chat=call_ollama_chat,
-                merge_aliases=turn_support.merge_tool_param_aliases,
-                ensure_defaults=turn_support.ensure_tool_defaults,
-            ),
-            confirm_tool_recovery_retry=_confirm_tool_recovery_retry,
-            agent_progress=_agent_progress,
-            tool_progress_message=_tool_progress_message,
-            is_tool_result_weak_for_dedup=turn_support.is_tool_result_weak_for_dedup,
-            tool_result_user_message=_tool_result_user_message,
-        )
-    return _CACHED_CONVERSATION_TURN_DEPS
-
-
-def _maybe_compact_context_window(messages: list, *, user_query: str, primary_profile, verbose: int, context_cfg=None) -> list:
-    # Provide a patchable summarize hook for tests.
-    return maybe_compact_context_window(
-        messages,
-        user_query=user_query,
-        primary_profile=primary_profile,
-        verbose=verbose,
-        context_cfg=context_cfg,
-        settings_get_bool=_APP.settings.get_bool,
-        settings_get_int=_APP.settings.get_int,
-        call_hosted_chat_plain=_APP.call_hosted_chat_plain,
-        call_ollama_plaintext=_APP.call_ollama_plaintext,
-        ollama_model=_APP.ollama_model(),
-        summarize_conversation_fn=_summarize_conversation_for_context,
-    )
-
-
-def _summarize_conversation_for_context(*, profile, user_query: str, text: str, **_kw) -> str:
-    return summarize_conversation_for_context(
-        profile=profile,
-        user_query=user_query,
-        text=text,
-        call_hosted_chat_plain=_APP.call_hosted_chat_plain,
-        call_ollama_plaintext=_APP.call_ollama_plaintext,
-        ollama_model=_APP.ollama_model(),
-    )
-
-
-def _route_requires_websearch(user_query: str, today_str: str, primary_profile=None, enabled_tools=None, transcript_messages=None, **_kw):
-    prof = primary_profile or default_primary_llm_profile()
-    return routing.route_requires_websearch(
-        user_query,
-        today_str,
-        prof,
-        enabled_tools,
-        transcript_messages,
-        coerce_enabled_tools=_TOOL_REGISTRY.coerce_enabled_tools,
-        call_ollama_chat=call_ollama_chat,
-        parse_agent_json=parse_agent_json,
-        scalar_to_str=scalar_to_str,
-        router_transcript_max_messages=_APP.settings.get_int(("agent", "router_transcript_max_messages"), 80),
-    )
-
-
-def _route_requires_websearch_after_answer(
-    user_query: str,
-    today_str: str,
-    proposed_answer: str,
-    primary_profile=None,
-    enabled_tools=None,
-    transcript_messages=None,
-    **_kw,
-):
-    prof = primary_profile or default_primary_llm_profile()
-    return routing.route_requires_websearch_after_answer(
-        user_query,
-        today_str,
-        proposed_answer,
-        prof,
-        enabled_tools,
-        transcript_messages,
-        coerce_enabled_tools=_TOOL_REGISTRY.coerce_enabled_tools,
-        call_ollama_chat=call_ollama_chat,
-        parse_agent_json=parse_agent_json,
-        scalar_to_str=scalar_to_str,
-        router_transcript_max_messages=_APP.settings.get_int(("agent", "router_transcript_max_messages"), 80),
-    )
-
-
-_user_wants_written_deliverable = user_wants_written_deliverable
-_deliverable_skip_mandatory_web = deliverable_skip_mandatory_web
-_deliverable_first_answer_followup = deliverable_first_answer_followup
-_answer_missing_written_body = answer_missing_written_body
-_is_self_capability_question = routing_followups.is_self_capability_question
-_self_capability_followup = routing_followups.self_capability_followup
-
-
-def _parse_and_apply_cli_config_flag(argv: list[str]) -> list[str]:
-    from agentlib.cli import parse_and_apply_cli_config_flag
-
-    return parse_and_apply_cli_config_flag(argv)
-
-
-_set_agent_prefs_path_override = prefs.set_agent_prefs_path_override
-_agent_prefs_path = prefs.agent_prefs_path
-_load_agent_prefs = prefs.load_agent_prefs
-_write_agent_prefs_file = prefs.write_agent_prefs_file
-
-
-def _session_defaults_from_prefs(prefs_obj: Optional[dict]) -> dict:
-    return _APP.session_defaults_from_prefs(prefs_obj)
-
-
-def _build_agent_prefs_payload(**kwargs) -> dict:
-    return prefs_bootstrap.build_agent_prefs_payload(
-        settings=_APP.settings,
-        core_tools=_APP.registry.core_tools,
-        plugin_toolsets=_APP.registry.plugin_toolsets,
-        **kwargs,
-    )
-
-
-# coercion helpers (tests expect these names)
-_scalar_to_str = scalar_to_str
-_scalar_to_int = scalar_to_int
-
-
-# Ollama usage helpers (tests expect these names)
-from agentlib.llm.usage import (
-    format_ollama_usage_line as _format_ollama_usage_line,
-    ollama_eval_generation_tok_per_sec as _ollama_eval_generation_tok_per_sec,
-)
-
-
-def _confirm_tool_recovery_retry(
-    tool: str,
-    old_params: dict,
-    new_params: dict,
-    rationale: str,
-    *,
-    interactive_tool_recovery: bool,
-) -> bool:
-    return turn_support.confirm_tool_recovery_retry(
-        tool,
-        old_params,
-        new_params,
-        rationale,
-        interactive_tool_recovery=interactive_tool_recovery,
-        stdin_isatty=sys.stdin.isatty(),
-    )
-
-
-_merge_partial_tool_calls = streaming.merge_partial_tool_calls
-
-
-def _router_prompt(user_query: str, today_str: str, *, has_prior_transcript: bool = False) -> str:
-    return routing.router_prompt(user_query, today_str, has_prior_transcript=has_prior_transcript)
-
-
-def _router_transcript_slice(transcript_messages: Optional[list]) -> list:
-    return routing.router_transcript_slice(
-        transcript_messages,
-        router_transcript_max_messages=_APP.settings.get_int(("agent", "router_transcript_max_messages"), 80),
-    )
-
-
-def _repl_buffered_line_max_bytes() -> int:
-    v = _APP.settings.get_int(("agent", "repl_input_max_bytes"), 0)
-    if v <= 0:
-        v = 131072
-    return max(4096, int(v))
-
-
-def _tool_recovery_may_run(interactive_tool_recovery: bool) -> bool:
-    return (interactive_tool_recovery and sys.stdin.isatty()) or _APP.settings.get_bool(
-        ("agent", "auto_confirm_tool_retry"), False
-    )
-
-
-_TOOL_RECOVERY_TOOLS = turn_support.TOOL_RECOVERY_TOOLS
-
-_parse_while_judge_bit = parse_while_judge_bit
-
-_parse_while_repl_tokens = parse_while_repl_tokens
-
-clean_json_response = agent_json.clean_json_response
-
-
-def _extract_json_object_from_text(text: str):
-    return agent_json.extract_json_object_from_text(text, _APP.agent_json_deps())
-
-
-def _tool_params_fingerprint(tool: str, params: object) -> str:
-    return turn_support.tool_params_fingerprint(
-        tool,
-        params,
-        scalar_to_str_fn=scalar_to_str,
-        search_web_effective_max_results=lambda p: search_web_effective_max_results(p, settings=_APP.settings),
-    )
-
-
-def _search_web_effective_max_results(params: object) -> int:
-    return search_web_effective_max_results(params, settings=_APP.settings)
-
-
-def _deliverable_followup_block(path: str) -> str:
-    return deliverable_followup_block(path, scalar_to_str)
-
-
-def _settings_group_keys_lines(group: str) -> str:
-    return _APP.settings.group_keys_lines(group)
-
-
-def _settings_group_show(group: str) -> str:
-    return _APP.settings.group_show(group)
-
-
-def _settings_group_set(group: str, raw_key: str, raw_value: str) -> str:
-    return _APP.settings.group_set(group, raw_key, raw_value)
-
-
-def _settings_group_unset(group: str, raw_key: str) -> str:
-    return _APP.settings.group_unset(group, raw_key)
+__all__ = ["AgentApp", "default_app", "get_default_app", "main"]
 
