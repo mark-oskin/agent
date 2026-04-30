@@ -15,7 +15,7 @@ At a high level the agent runs a loop:
 
 The main loop is implemented in:
 
-- `agent._run_agent_conversation_turn(...)`
+- `agentlib.runtime.run_agent_conversation_turn(...)` (wiring: `agent._conversation_turn_deps()`)
 - `agent.call_ollama_chat(...)` (agent JSON via Ollama) and hosted equivalents
 
 ## Data directories

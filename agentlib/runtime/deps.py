@@ -1,0 +1,58 @@
+"""Dependency bundle for `run_agent_conversation_turn` (injected from agent.py wiring)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import AbstractSet, Any, Callable, Dict, FrozenSet, Optional, Tuple
+
+
+@dataclass
+class ConversationTurnDeps:
+    coerce_enabled_tools: Callable[[Optional[AbstractSet[str]]], AbstractSet[str]]
+    maybe_compact_context_window: Callable[..., list]
+    call_ollama_chat: Callable[..., str]
+    parse_agent_json: Callable[[str], dict]
+    deliverable_followup_block: Callable[[str], str]
+    answer_missing_written_body: Callable[[str, int], bool]
+    scalar_to_str: Callable[..., str]
+    hosted_review_ready: Callable[[bool, Any], bool]
+    second_opinion_reviewer_messages: Callable[[str, str, str], list]
+    second_opinion_result_user_message: Callable[[str], str]
+    call_ollama_plaintext: Callable[[list, str], str]
+    call_hosted_chat_plain: Callable[[list, Any], str]
+    call_openai_chat_plain: Callable[[list], str]
+    ollama_second_opinion_model: Callable[[], str]
+    route_requires_websearch_after_answer: Callable[..., Optional[str]]
+    deliverable_skip_mandatory_web: Callable[[str], bool]
+    deliverable_first_answer_followup: Callable[[str, str], str]
+    is_self_capability_question: Callable[[str], bool]
+    self_capability_followup: Callable[[str, str], str]
+    tool_need_review_followup: Callable[[str, str], str]
+    extract_json_object_from_text: Callable[[str], Optional[str]]
+    all_known_tools: Callable[[], FrozenSet[str]]
+    merge_tool_param_aliases: Callable[[str, dict], dict]
+    ensure_tool_defaults: Callable[[str, dict, str], dict]
+    tool_params_fingerprint: Callable[[str, Any], str]
+    search_backend_banner_line: Callable[[], str]
+    search_web: Callable[..., str]
+    fetch_page: Callable[[Any], str]
+    run_command: Callable[[Any], str]
+    use_git: Callable[[Any], str]
+    write_file: Callable[[Any, Any], str]
+    list_directory: Callable[[Any], str]
+    read_file: Callable[[Any], str]
+    download_file: Callable[[Any, Any], str]
+    tail_file: Callable[[Any, Any], str]
+    replace_text: Callable[..., str]
+    call_python: Callable[..., str]
+    plugin_tool_handlers: Dict[str, Callable[[dict], str]]
+    tool_fault_result: Callable[[str, BaseException], str]
+    tool_recovery_may_run: Callable[[bool], bool]
+    tool_recovery_tools: FrozenSet[str]
+    tool_result_indicates_retryable_failure: Callable[[str, Any], bool]
+    suggest_tool_recovery_params: Callable[..., Optional[Tuple[dict, str]]]
+    confirm_tool_recovery_retry: Callable[..., bool]
+    agent_progress: Callable[[str], None]
+    tool_progress_message: Callable[[str, dict], str]
+    is_tool_result_weak_for_dedup: Callable[[str], bool]
+    tool_result_user_message: Callable[..., str]

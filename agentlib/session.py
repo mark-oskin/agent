@@ -7,6 +7,7 @@ import shlex
 from dataclasses import dataclass
 from typing import AbstractSet, Callable, Optional
 
+from .runtime import ConversationTurnDeps, run_agent_conversation_turn
 from .settings import AgentSettings
 
 
@@ -58,7 +59,7 @@ class AgentSession:
         deliverable_skip_mandatory_web: Callable[[str], bool],
         user_wants_written_deliverable: Callable[[str], bool],
         interactive_turn_user_message: Callable[..., str],
-        run_agent_conversation_turn: Callable[..., tuple[bool, Optional[str]]],
+        conversation_turn_deps: ConversationTurnDeps,
         save_context_bundle: Callable[..., None],
         load_context_messages: Callable[[str], list],
         resolve_prompt_template_text: Callable[[str, dict], Optional[str]],
@@ -137,7 +138,7 @@ class AgentSession:
         self._deliverable_skip_mandatory_web = deliverable_skip_mandatory_web
         self._user_wants_written_deliverable = user_wants_written_deliverable
         self._interactive_turn_user_message = interactive_turn_user_message
-        self._run_agent_conversation_turn = run_agent_conversation_turn
+        self._conversation_turn_deps = conversation_turn_deps
         self._save_context_bundle = save_context_bundle
         self._load_context_messages = load_context_messages
         self._resolve_prompt_template_text = resolve_prompt_template_text
@@ -250,10 +251,11 @@ class AgentSession:
                     ),
                 }
             )
-        answered, final_answer = self._run_agent_conversation_turn(
+        answered, final_answer = run_agent_conversation_turn(
             self.messages,
             user_query,
             today_str,
+            self._conversation_turn_deps,
             web_required=web_required,
             deliverable_wanted=deliverable_wanted,
             verbose=self.verbose,
@@ -401,10 +403,11 @@ class AgentSession:
                             ),
                         }
                     )
-                answered, final_answer = self._run_agent_conversation_turn(
+                answered, final_answer = run_agent_conversation_turn(
                     self.messages,
                     step_user,
                     today_str,
+                    self._conversation_turn_deps,
                     web_required=web_required if i == 1 else False,
                     deliverable_wanted=deliverable_wanted,
                     verbose=self.verbose,
@@ -456,10 +459,11 @@ class AgentSession:
                     ),
                 }
             )
-        self._run_agent_conversation_turn(
+        run_agent_conversation_turn(
             self.messages,
             req,
             today_str,
+            self._conversation_turn_deps,
             web_required=web_required,
             deliverable_wanted=deliverable_wanted,
             verbose=self.verbose,

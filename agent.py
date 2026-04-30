@@ -36,6 +36,7 @@ import requests
 
 from agentlib import AgentSettings
 from agentlib import prefs as _prefs
+from agentlib.runtime import ConversationTurnDeps, run_agent_conversation_turn
 
 # Module-global settings object (defaults until main() applies prefs/CLI).
 _SETTINGS_OBJ: AgentSettings = AgentSettings.defaults()
@@ -3724,10 +3725,11 @@ def _interactive_repl(
                         }
                     )
                 try:
-                    answered, final_answer = _run_agent_conversation_turn(
+                    answered, final_answer = run_agent_conversation_turn(
                         messages,
                         step_user,
                         today_str,
+                        _conversation_turn_deps(),
                         web_required=web_required if i == 1 else False,
                         deliverable_wanted=deliverable_wanted,
                         verbose=verbose,
@@ -3798,10 +3800,11 @@ def _interactive_repl(
                 }
             )
         try:
-            _run_agent_conversation_turn(
+            run_agent_conversation_turn(
                 messages,
                 req,
                 today_str,
+                _conversation_turn_deps(),
                 web_required=web_required,
                 deliverable_wanted=deliverable_wanted,
                 verbose=verbose,
@@ -3882,10 +3885,11 @@ def _interactive_repl(
                     ),
                 }
             )
-        answered, final_answer = _run_agent_conversation_turn(
+        answered, final_answer = run_agent_conversation_turn(
             messages,
             user_query,
             today_str,
+            _conversation_turn_deps(),
             web_required=web_required,
             deliverable_wanted=deliverable_wanted,
             verbose=verbose,
@@ -3944,7 +3948,7 @@ def _interactive_repl(
         deliverable_skip_mandatory_web=_deliverable_skip_mandatory_web,
         user_wants_written_deliverable=_user_wants_written_deliverable,
         interactive_turn_user_message=_interactive_turn_user_message,
-        run_agent_conversation_turn=_run_agent_conversation_turn,
+        conversation_turn_deps=_conversation_turn_deps(),
         save_context_bundle=_save_context_bundle,
         load_context_messages=_load_context_messages,
         resolve_prompt_template_text=_resolve_prompt_template_text,
@@ -4007,485 +4011,64 @@ def _interactive_repl(
     _flush_repl_readline_history()
 
 
-def _run_agent_conversation_turn(
-    messages: list,
-    user_query: str,
-    today_str: str,
-    *,
-    web_required: bool,
-    deliverable_wanted: bool,
-    verbose: int,
-    second_opinion_enabled: bool,
-    cloud_ai_enabled: bool,
-    primary_profile: Optional[LlmProfile] = None,
-    reviewer_hosted_profile: Optional[LlmProfile] = None,
-    reviewer_ollama_model: Optional[str] = None,
-    enabled_tools: Optional[AbstractSet[str]] = None,
-    interactive_tool_recovery: bool = False,
-    context_cfg: Optional[dict] = None,
-    print_answer: bool = True,
-) -> Tuple[bool, Optional[str]]:
-    et = _coerce_enabled_tools(enabled_tools)
-    if web_required and "search_web" not in et:
-        web_required = False
-    seen_tool_fingerprints: set = set()
-    reviewed_tool_need = False
-    saw_strong_web_result = False
-    answered = False
-    tool_executed = False
-    second_opinion_rounds = 0
-    final_answer: Optional[str] = None
-    deliverable_path: Optional[str] = None
-    deliverable_read_ok = False
-    deliverable_file_chars = 0
-    for _ in range(30):
-        messages = _maybe_compact_context_window(
-            messages,
-            user_query=user_query,
-            primary_profile=primary_profile,
-            verbose=verbose,
-            context_cfg=context_cfg,
+_CACHED_CONVERSATION_TURN_DEPS: Optional[ConversationTurnDeps] = None
+
+
+def _conversation_turn_deps() -> ConversationTurnDeps:
+    """Lazily-built deps for `agentlib.runtime.run_agent_conversation_turn` (module wiring)."""
+    global _CACHED_CONVERSATION_TURN_DEPS
+    if _CACHED_CONVERSATION_TURN_DEPS is None:
+        _CACHED_CONVERSATION_TURN_DEPS = ConversationTurnDeps(
+            coerce_enabled_tools=_coerce_enabled_tools,
+            maybe_compact_context_window=_maybe_compact_context_window,
+            call_ollama_chat=call_ollama_chat,
+            parse_agent_json=parse_agent_json,
+            deliverable_followup_block=_deliverable_followup_block,
+            answer_missing_written_body=_answer_missing_written_body,
+            scalar_to_str=_scalar_to_str,
+            hosted_review_ready=_hosted_review_ready,
+            second_opinion_reviewer_messages=_second_opinion_reviewer_messages,
+            second_opinion_result_user_message=_second_opinion_result_user_message,
+            call_ollama_plaintext=call_ollama_plaintext,
+            call_hosted_chat_plain=call_hosted_chat_plain,
+            call_openai_chat_plain=call_openai_chat_plain,
+            ollama_second_opinion_model=_ollama_second_opinion_model,
+            route_requires_websearch_after_answer=_route_requires_websearch_after_answer,
+            deliverable_skip_mandatory_web=_deliverable_skip_mandatory_web,
+            deliverable_first_answer_followup=_deliverable_first_answer_followup,
+            is_self_capability_question=_is_self_capability_question,
+            self_capability_followup=_self_capability_followup,
+            tool_need_review_followup=_tool_need_review_followup,
+            extract_json_object_from_text=_extract_json_object_from_text,
+            all_known_tools=_all_known_tools,
+            merge_tool_param_aliases=_merge_tool_param_aliases,
+            ensure_tool_defaults=_ensure_tool_defaults,
+            tool_params_fingerprint=_tool_params_fingerprint,
+            search_backend_banner_line=_search_backend_banner_line,
+            search_web=search_web,
+            fetch_page=fetch_page,
+            run_command=run_command,
+            use_git=use_git,
+            write_file=write_file,
+            list_directory=list_directory,
+            read_file=read_file,
+            download_file=download_file,
+            tail_file=tail_file,
+            replace_text=replace_text,
+            call_python=call_python,
+            plugin_tool_handlers=_PLUGIN_TOOL_HANDLERS,
+            tool_fault_result=_tool_fault_result,
+            tool_recovery_may_run=_tool_recovery_may_run,
+            tool_recovery_tools=_TOOL_RECOVERY_TOOLS,
+            tool_result_indicates_retryable_failure=_tool_result_indicates_retryable_failure,
+            suggest_tool_recovery_params=_suggest_tool_recovery_params,
+            confirm_tool_recovery_retry=_confirm_tool_recovery_retry,
+            agent_progress=_agent_progress,
+            tool_progress_message=_tool_progress_message,
+            is_tool_result_weak_for_dedup=_is_tool_result_weak_for_dedup,
+            tool_result_user_message=_tool_result_user_message,
         )
-        response_text = call_ollama_chat(
-            messages, primary_profile, et, verbose=verbose
-        )
-        response_data = parse_agent_json(response_text)
-        action = response_data.get("action")
-        if action == "answer":
-            # Robustness: if the model attempted JSON-only but truncated/malformed its JSON,
-            # do not treat that as an answer. Ask for a clean retry.
-            rt = (response_text or "").strip()
-            if rt.startswith("{") and ("\"action\"" in rt or "'action'" in rt) and not rt.rstrip().endswith("}"):
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your last response looked like a JSON object but it was truncated/malformed "
-                            "(missing closing braces/quotes). Respond again with a SINGLE valid JSON object "
-                            "and no other text."
-                        ),
-                    }
-                )
-                continue
-            if web_required and not saw_strong_web_result:
-                # If routing determined web is required, do not allow a final answer
-                # until we've observed at least one non-weak web result in this session.
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "You must not answer from memory for this request because web verification is required. "
-                            "No usable web results have been obtained yet (or they were empty/blocked). "
-                            "Call search_web again with a different, more effective query, or fetch_page on a credible source URL "
-                            "from any results you do have. Respond with JSON tool_call only."
-                        ),
-                    }
-                )
-                continue
-            if (
-                deliverable_wanted
-                and deliverable_path
-                and not deliverable_read_ok
-            ):
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": _deliverable_followup_block(deliverable_path),
-                    }
-                )
-                continue
-            if deliverable_wanted and deliverable_read_ok and _answer_missing_written_body(
-                response_data.get("answer") or "", deliverable_file_chars
-            ):
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your answer is too short to be the requested multi-page document. "
-                            "Use read_file to load the written file, then respond with action answer whose "
-                            "answer field contains the FULL document text (the user asked for the document itself). "
-                            "If the file is still too short, expand it with write_file and read_file again."
-                        ),
-                    }
-                )
-                continue
-            na = (response_data.get("next_action") or "finalize").strip().lower()
-            if na == "second_opinion":
-                rationale = _scalar_to_str(response_data.get("rationale"), "").strip()
-                primary = response_data.get("answer") or ""
-                if not rationale:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "second_opinion requires a non-empty string field \"rationale\" explaining why "
-                                "you want a review. Respond with JSON only."
-                            ),
-                        }
-                    )
-                    continue
-                hosted_ready = _hosted_review_ready(
-                    cloud_ai_enabled, reviewer_hosted_profile
-                )
-                if not second_opinion_enabled and not hosted_ready:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Second opinion is not available in this session. Respond with JSON only using "
-                                '{"action":"answer","answer":"...","next_action":"finalize","rationale":"..."}.'
-                            ),
-                        }
-                    )
-                    continue
-                # Session configuration picks the reviewer; model-supplied second_opinion_backend is ignored.
-                backend = (
-                    "ollama"
-                    if second_opinion_enabled
-                    else ("openai" if hosted_ready else "")
-                )
-                if second_opinion_rounds >= 3:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Second opinion limit reached for this session. Respond with JSON only using "
-                                '{"action":"answer","answer":"...","next_action":"finalize","rationale":"..."}.'
-                            ),
-                        }
-                    )
-                    continue
-                reviewer_msgs = _second_opinion_reviewer_messages(user_query, primary, rationale)
-                if backend == "ollama":
-                    rm = (reviewer_ollama_model or "").strip() or _ollama_second_opinion_model()
-                    review = call_ollama_plaintext(reviewer_msgs, rm)
-                else:
-                    if (
-                        reviewer_hosted_profile is not None
-                        and reviewer_hosted_profile.backend == "hosted"
-                        and (reviewer_hosted_profile.api_key or "").strip()
-                    ):
-                        review = call_hosted_chat_plain(
-                            reviewer_msgs, reviewer_hosted_profile
-                        )
-                    else:
-                        review = call_openai_chat_plain(reviewer_msgs)
-                second_opinion_rounds += 1
-                tool_executed = True
-                reviewed_tool_need = True
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": _second_opinion_result_user_message(review),
-                    }
-                )
-                continue
-            if not reviewed_tool_need and not tool_executed:
-                reviewed_tool_need = True
-                messages.append({"role": "assistant", "content": response_text})
-                proposed = response_data.get("answer") or ""
-                router_q2 = _route_requires_websearch_after_answer(
-                    user_query,
-                    today_str,
-                    proposed,
-                    primary_profile,
-                    et,
-                    transcript_messages=messages,
-                )
-                if _deliverable_skip_mandatory_web(user_query):
-                    router_q2 = None
-                if router_q2:
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Before finalizing, you MUST call the tool search_web to verify.\n"
-                                "Respond with JSON only in tool_call form.\n"
-                                f'Suggested query: "{router_q2}"'
-                            ),
-                        }
-                    )
-                    continue
-                if deliverable_wanted:
-                    follow = _deliverable_first_answer_followup(user_query, proposed)
-                elif _is_self_capability_question(user_query):
-                    follow = _self_capability_followup(user_query, proposed)
-                else:
-                    follow = _tool_need_review_followup(user_query, proposed)
-                messages.append({"role": "user", "content": follow})
-                continue
-            messages.append({"role": "assistant", "content": response_text})
-            ans_out = response_data.get("answer")
-            if ans_out is None or (isinstance(ans_out, str) and not ans_out.strip()):
-                # Models sometimes include the final JSON inside a longer string; if parsing
-                # picked an incomplete object (e.g. {"action":"answer"}), recover.
-                extracted = _extract_json_object_from_text(response_text)
-                if extracted:
-                    try:
-                        recovered = parse_agent_json(extracted)
-                    except Exception:
-                        recovered = None
-                    if isinstance(recovered, dict) and recovered.get("action") == "answer":
-                        ra = recovered.get("answer")
-                        if isinstance(ra, str) and ra.strip():
-                            response_data = recovered
-                            ans_out = ra
-                if ans_out is None or (isinstance(ans_out, str) and not ans_out.strip()):
-                    # Treat as invalid agent JSON rather than printing "None" or echoing JSON back.
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                'Your JSON had action "answer" but was missing a non-empty string field "answer". '
-                                "Respond again with a SINGLE valid JSON object in this exact shape:\n"
-                                '{"action":"answer","answer":"..."}\n'
-                                "No other keys, and no other text."
-                            ),
-                        }
-                    )
-                    continue
-            if print_answer:
-                print(ans_out if ans_out is not None else "")
-            final_answer = ans_out if isinstance(ans_out, str) else str(ans_out)
-            answered = True
-            break
-        elif action == "error":
-            messages.append({"role": "assistant", "content": response_text})
-            err = response_data.get("error")
-            print(f"Agent error: {err}")
-            final_answer = str(err) if err is not None else None
-            answered = True
-            break
-        elif action == "tool_call" or action in _all_known_tools():
-            tool = response_data.get("tool")
-            if tool == None:
-                tool = action
-            params = response_data.get("parameters", {})
-            if not isinstance(params, dict):
-                params = {}
-            params = _merge_tool_param_aliases(tool, params)
-            params = _ensure_tool_defaults(tool, params, user_query)
-            fp = _tool_params_fingerprint(tool, params)
-            orig_fp = fp
-            # Re-reading the same path can return different content after write_file/replace_text;
-            # do not dedupe read_file/tail_file.
-            dedupe_ok = tool not in ("read_file", "tail_file")
-            skipped_duplicate = bool(dedupe_ok and fp in seen_tool_fingerprints)
-            policy_blocked = False
-            if verbose >= 1:
-                if skipped_duplicate:
-                    print(f"[*] Skipping duplicate tool: {tool} (same logical parameters as earlier)")
-                else:
-                    if tool == "search_web":
-                        print(
-                            f"[*] Executing tool: {tool} ({_search_backend_banner_line()}) with {params}"
-                        )
-                    else:
-                        print(f"[*] Executing tool: {tool} with {params}")
-            if skipped_duplicate:
-                result = (
-                    "[Duplicate call skipped: this tool was already run with the same parameters "
-                    "in this session. Use the earlier tool output in this conversation to answer.]"
-                )
-            else:
-                tool_executed = True
-                if verbose < 1:
-                    _agent_progress(_tool_progress_message(tool, params))
-                result = ""
-                if tool in _all_known_tools() and tool not in et:
-                    policy_blocked = True
-                    result = (
-                        f"Tool error: {tool} is disabled for this run (tool policy). "
-                        "Pick a different allowed tool or respond with action answer."
-                    )
-                else:
-                    try:
-                        if tool == "search_web":
-                            result = search_web(params.get("query"), params=params)
-                        elif tool == "fetch_page":
-                            result = fetch_page(params.get("url"))
-                        elif tool == "run_command":
-                            cmd = _scalar_to_str(params.get("command"), "")
-                            if web_required and re.search(r"\b(curl|wget)\b", cmd):
-                                result = (
-                                    "Command error: blocked. When web verification is required, do not use run_command "
-                                    "with curl/wget to fetch web content. Use fetch_page instead."
-                                )
-                            else:
-                                result = run_command(cmd)
-                        elif tool == "use_git":
-                            result = use_git(params)
-                        elif tool == "write_file":
-                            result = write_file(params.get("path"), params.get("content"))
-                        elif tool == "list_directory":
-                            result = list_directory(params.get("path"))
-                        elif tool == "read_file":
-                            result = read_file(params.get("path"))
-                        elif tool == "download_file":
-                            result = download_file(params.get("url"), params.get("path"))
-                        elif tool == "tail_file":
-                            result = tail_file(params.get("path"), params.get("lines", 20))
-                        elif tool == "replace_text":
-                            result = replace_text(
-                                params.get("path"),
-                                params.get("pattern"),
-                                params.get("replacement"),
-                                params.get("replace_all", True),
-                            )
-                        elif tool == "call_python":
-                            result = call_python(params.get("code"), params.get("globals"))
-                        elif tool in _PLUGIN_TOOL_HANDLERS:
-                            result = _PLUGIN_TOOL_HANDLERS[tool](params)
-                        else:
-                            result = f"Unknown tool: {tool}"
-                    except KeyboardInterrupt:
-                        raise
-                    except BaseException as e:
-                        result = _tool_fault_result(str(tool), e)
-            if (
-                _tool_recovery_may_run(interactive_tool_recovery)
-                and not skipped_duplicate
-                and not policy_blocked
-                and tool in _TOOL_RECOVERY_TOOLS
-                and _tool_result_indicates_retryable_failure(tool, result)
-            ):
-                old_params = dict(params)
-                sug = _suggest_tool_recovery_params(
-                    tool,
-                    old_params,
-                    result,
-                    user_query,
-                    primary_profile,
-                    et,
-                    verbose,
-                )
-                if sug is not None:
-                    new_params, rationale = sug
-                    new_fp = _tool_params_fingerprint(tool, new_params)
-                    if new_fp == orig_fp:
-                        if verbose >= 1:
-                            print("[*] Tool recovery: proposed parameters unchanged; skip retry.")
-                    elif dedupe_ok and new_fp in seen_tool_fingerprints:
-                        if verbose >= 1:
-                            print(
-                                "[*] Tool recovery: proposed parameters match an earlier "
-                                "tool call; skip retry."
-                            )
-                    elif _confirm_tool_recovery_retry(
-                        tool,
-                        old_params,
-                        new_params,
-                        rationale,
-                        interactive_tool_recovery=interactive_tool_recovery,
-                    ):
-                        params = new_params
-                        fp = new_fp
-                        if verbose >= 1:
-                            print(f"[*] Re-running {tool} after confirmed recovery.")
-                        else:
-                            _agent_progress(f"Tool: {tool} (retry)")
-                        tool_executed = True
-                        if tool == "run_command":
-                            cmd = _scalar_to_str(params.get("command"), "")
-                            if web_required and re.search(r"\b(curl|wget)\b", cmd):
-                                result = (
-                                    "Command error: blocked. When web verification is required, do not use run_command "
-                                    "with curl/wget to fetch web content. Use fetch_page instead."
-                                )
-                            else:
-                                result = run_command(cmd)
-                        elif tool == "call_python":
-                            result = call_python(params.get("code"), params.get("globals"))
-                        elif tool == "search_web":
-                            result = search_web(params.get("query"), params=params)
-                        elif tool == "fetch_page":
-                            result = fetch_page(params.get("url"))
-                        note = "[After one user-confirmed corrected retry]\n"
-                        if isinstance(result, str) and not result.startswith(
-                            "[After one user-confirmed corrected retry]"
-                        ):
-                            result = note + result
-                    elif verbose >= 1:
-                        print("[*] Tool recovery: retry not confirmed.")
-            if tool == "write_file" and deliverable_wanted and not policy_blocked:
-                wp = _scalar_to_str(params.get("path"), "").strip()
-                if wp and (not str(result).startswith("Write error:")):
-                    deliverable_path = wp
-                    deliverable_read_ok = False
-                    deliverable_file_chars = 0
-            if tool == "read_file" and deliverable_wanted and deliverable_path and not policy_blocked:
-                rp = _scalar_to_str(params.get("path"), "").strip()
-                if rp == deliverable_path and (not str(result).startswith("Read error:")):
-                    deliverable_read_ok = True
-                    deliverable_file_chars = len(str(result))
-            if (
-                tool == "search_web"
-                and not skipped_duplicate
-                and not policy_blocked
-                and not _is_tool_result_weak_for_dedup(result)
-            ):
-                saw_strong_web_result = True
-            # Record fingerprints so identical parameters cannot loop forever; keep both the
-            # first attempt and a corrected retry when they differ.
-            if dedupe_ok and not skipped_duplicate and not policy_blocked:
-                if orig_fp not in seen_tool_fingerprints:
-                    seen_tool_fingerprints.add(orig_fp)
-                if fp != orig_fp and fp not in seen_tool_fingerprints:
-                    seen_tool_fingerprints.add(fp)
-            deliverable_reminder = ""
-            if deliverable_wanted and deliverable_path and not deliverable_read_ok:
-                deliverable_reminder = (
-                    f"Goal reminder (user request): {user_query}\n"
-                    + _deliverable_followup_block(deliverable_path)
-                )
-            elif deliverable_wanted and not deliverable_path:
-                deliverable_reminder = (
-                    f"Goal reminder (user request): {user_query}\n"
-                    "If you will satisfy this with write_file, plan to read_file that same path before answering."
-                )
-            messages.append({"role": "assistant", "content": response_text})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": _tool_result_user_message(
-                        tool, params, result, deliverable_reminder=deliverable_reminder
-                    ),
-                }
-            )
-        else:
-            # Malformed model JSON (e.g. action=null) — recover instead of exiting.
-            messages.append({"role": "assistant", "content": response_text})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Your last message was not valid agent JSON. "
-                        "Respond with JSON only and include a non-null string action. "
-                        'Use {"action":"tool_call","tool":<one of the allowed tools>,'
-                        '"parameters":{...}} or {"action":"answer","answer":"..."}.'
-                    ),
-                }
-            )
-            continue
-    if not answered:
-        if web_required and not saw_strong_web_result:
-            print(
-                "Unable to verify with web: no strong search result (URL-backed) was obtained in this turn. "
-                "Refusing to answer from memory alone. "
-                "Try again with a more specific query, fetch_page on a URL the user provided, "
-                "or check network / site blocking."
-            )
-        else:
-            print("Unable to complete the request within the step limit.")
-    return answered, final_answer
+    return _CACHED_CONVERSATION_TURN_DEPS
 
 
 def main():
@@ -4713,10 +4296,11 @@ def main():
                 ),
             }
         )
-    answered, final_answer = _run_agent_conversation_turn(
+    answered, final_answer = run_agent_conversation_turn(
         messages,
         user_query,
         today_str,
+        _conversation_turn_deps(),
         web_required=web_required,
         deliverable_wanted=deliverable_wanted,
         verbose=verbose,
