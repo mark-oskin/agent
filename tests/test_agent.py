@@ -95,8 +95,8 @@ def test_tools_dir_override_loads_plugins(tmp_path, monkeypatch):
         "}\n",
         encoding="utf-8",
     )
-    d._load_plugin_toolsets(str(tdir))
-    d._register_tool_aliases()
+    d._TOOL_REGISTRY.load_plugin_toolsets(str(tdir))
+    d._TOOL_REGISTRY.register_aliases()
     assert "xset" in d._PLUGIN_TOOLSETS
     assert "x_hi" in d._PLUGIN_TOOL_HANDLERS
 

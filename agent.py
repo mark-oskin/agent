@@ -62,6 +62,7 @@ from agentlib.skills.loader import expand_skill_artifacts as _expand_skill_artif
 from agentlib.skills.loader import load_skills_from_dir as _load_skills_from_dir
 from agentlib.skills.loader import safe_path_under_dir as _safe_path_under_dir
 from agentlib.tools import builtins as tool_builtins
+from agentlib.tools.registry import ToolRegistry
 from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
 from agentlib.llm.profile import llm_profile_from_pref as _llm_profile_from_pref
 from agentlib.llm.profile import llm_profile_to_pref as _llm_profile_to_pref
@@ -155,174 +156,6 @@ def _format_session_reviewer_line(
     if hosted is not None and hosted.backend == "hosted":
         return _describe_llm_profile_short(hosted)
     return f"ollama ({(ollama_model or _ollama_second_opinion_model())!r})"
-
-
-# Core tools we implement in this script (Ollama may emit other native tool names — ignore those).
-_CORE_TOOLS = frozenset(
-    {
-        "search_web",
-        "fetch_page",
-        "run_command",
-        "use_git",
-        "write_file",
-        "read_file",
-        "list_directory",
-        "download_file",
-        "tail_file",
-        "replace_text",
-        "call_python",
-    }
-)
-
-
-def _all_known_tools() -> frozenset[str]:
-    """Core tools + currently loaded plugin tools."""
-    return frozenset(set(_CORE_TOOLS) | set(_PLUGIN_TOOL_HANDLERS.keys()))
-
-# (internal_id, short description, user-facing aliases — spaces and hyphens ok)
-_TOOL_ENTRIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
-    (
-        "search_web",
-        "Web search (DuckDuckGo)",
-        (
-            "web",
-            "web search",
-            "internet search",
-            "duckduckgo",
-            "ddg",
-            "lookup",
-        ),
-    ),
-    (
-        "fetch_page",
-        "Fetch a URL / read HTML",
-        ("fetch", "fetch page", "read page", "http get", "url fetch", "get url"),
-    ),
-    (
-        "run_command",
-        "Run a shell command",
-        ("shell", "terminal", "bash", "sh", "command line", "cmd", "subprocess"),
-    ),
-    (
-        "use_git",
-        "Git operations (vetted; prefer over raw shell for git)",
-        ("git", "commit", "push", "pull", "diff", "rebase", "merge", "clone"),
-    ),
-    (
-        "write_file",
-        "Write or overwrite a file",
-        ("write", "save file", "create file", "file write"),
-    ),
-    ("read_file", "Read a file", ("read", "cat", "open file", "slurp")),
-    (
-        "list_directory",
-        "List directory contents",
-        ("ls", "dir", "list dir", "folder", "directory"),
-    ),
-    ("download_file", "Download a file from URL", ("download", "wget", "curl download")),
-    ("tail_file", "Read end of a file (tail)", ("tail", "log tail")),
-    (
-        "replace_text",
-        "Search-and-replace in a file",
-        ("replace", "search replace", "sed"),
-    ),
-    ("call_python", "Run Python code in-process", ("python", "py", "eval", "code eval")),
-)
-
-
-from agentlib.tools import plugins as _tool_plugins
-from agentlib.tools import routing as _tool_routing
-
-# Plugin toolsets (loaded from tools/ directory).
-# Toolsets are off by default and can be enabled by the user.
-_PLUGIN_TOOLSETS = _tool_plugins.PLUGIN_TOOLSETS
-_PLUGIN_TOOL_HANDLERS = _tool_plugins.PLUGIN_TOOL_HANDLERS
-_PLUGIN_TOOL_TO_TOOLSET = _tool_plugins.PLUGIN_TOOL_TO_TOOLSET
-_PLUGIN_TOOLSET_TRIGGERS = _tool_plugins.PLUGIN_TOOLSET_TRIGGERS
-
-
-def _load_plugin_toolsets(tools_dir: Optional[str] = None) -> None:
-    _tool_plugins.load_plugin_toolsets(
-        tools_dir=tools_dir,
-        default_tools_dir=_default_tools_dir(),
-    )
-
-
-def _plugin_tool_entries() -> Tuple[Tuple[str, str, Tuple[str, ...]], ...]:
-    return _tool_plugins.plugin_tool_entries()
-
-_TOOL_ALIASES = _tool_routing.TOOL_ALIASES
-
-
-def _canonicalize_user_tool_phrase(phrase: str) -> str:
-    return _tool_routing.canonicalize_user_tool_phrase(phrase)
-
-
-def _register_tool_aliases() -> None:
-    _tool_routing.register_tool_aliases()
-
-
-
-
-
-def _coerce_enabled_tools(ets: Optional[AbstractSet[str]]):
-    """None means all tools enabled (default)."""
-    if ets is None:
-        return _all_known_tools()
-    return frozenset(ets)
-
-
-def _resolve_tool_token(phrase: str) -> Optional[str]:
-    return _tool_routing.resolve_tool_token(phrase)
-
-
-def _normalize_tool_name(token: str) -> Optional[str]:
-    """Map user text or internal id to canonical tool name."""
-    return _tool_routing.normalize_tool_name(token)
-
-
-def _plugin_tools_for_toolset(toolset: str) -> set[str]:
-    return _tool_plugins.plugin_tools_for_toolset(toolset)
-
-
-def _route_active_toolsets_for_request(user_query: str, enabled_toolsets: AbstractSet[str]) -> set[str]:
-    return _tool_routing.route_active_toolsets_for_request(user_query, enabled_toolsets)
-
-
-def _effective_enabled_tools_for_turn(
-    *,
-    base_enabled_tools: AbstractSet[str],
-    enabled_toolsets: AbstractSet[str],
-    user_query: str,
-) -> frozenset[str]:
-    return _tool_routing.effective_enabled_tools_for_turn(
-        base_enabled_tools=base_enabled_tools,
-        enabled_toolsets=enabled_toolsets,
-        user_query=user_query,
-    )
-
-
-def _all_tool_name_suggestion_pool() -> list[str]:
-    pool = set(_all_known_tools())
-    pool.update(_TOOL_ALIASES.keys())
-    pool.add("second_opinion")
-    return sorted(pool)
-
-
-def _format_unknown_tool_hint(phrase: str) -> str:
-    return _tool_routing.format_unknown_tool_hint(phrase)
-
-
-def _format_settings_tools_list(enabled_tools: AbstractSet[str]) -> str:
-    return _tool_routing.format_settings_tools_list(enabled_tools)
-
-
-def _describe_tool_call_contract(tool_id: str) -> str:
-    return _tool_routing.describe_tool_call_contract(tool_id)
-
-
-def _tool_policy_runner_text(ets: Optional[AbstractSet[str]]) -> str:
-    return _tool_routing.tool_policy_runner_text(ets)
 
 
 def _strip_leading_dashes_flag(a: str) -> str:
@@ -465,10 +298,26 @@ def _default_tools_dir() -> str:
     return os.path.join(_agent_module_dir(), "tools")
 
 
-# Load bundled plugin toolsets (default tools_dir) at import time.
-# If tools_dir is overridden in prefs/env, main() / _session_defaults_from_prefs will reload.
-_load_plugin_toolsets(_default_tools_dir())
-_register_tool_aliases()
+# Tool registry (core + plugin tools). Loaded at import time.
+# If tools_dir is overridden in prefs, main() will reload.
+_TOOL_REGISTRY = ToolRegistry(default_tools_dir=_default_tools_dir())
+_TOOL_REGISTRY.load_plugin_toolsets(_default_tools_dir())
+_TOOL_REGISTRY.register_aliases()
+
+# Tool registry helpers (core tools + plugins + aliases).
+_all_known_tools = _TOOL_REGISTRY.all_known_tools
+_coerce_enabled_tools = _TOOL_REGISTRY.coerce_enabled_tools
+_normalize_tool_name = _TOOL_REGISTRY.normalize_tool_name
+_format_unknown_tool_hint = _TOOL_REGISTRY.format_unknown_tool_hint
+_format_settings_tools_list = _TOOL_REGISTRY.format_settings_tools_list
+_describe_tool_call_contract = _TOOL_REGISTRY.describe_tool_call_contract
+_tool_policy_runner_text = _TOOL_REGISTRY.tool_policy_runner_text
+_plugin_tools_for_toolset = _TOOL_REGISTRY.plugin_tools_for_toolset
+_route_active_toolsets_for_request = _TOOL_REGISTRY.route_active_toolsets_for_request
+_effective_enabled_tools_for_turn = _TOOL_REGISTRY.effective_enabled_tools_for_turn
+
+_PLUGIN_TOOL_HANDLERS = _TOOL_REGISTRY.plugin_tool_handlers
+_PLUGIN_TOOLSETS = _TOOL_REGISTRY.plugin_toolsets
 
 
 def _resolved_prompt_templates_dir(prefs: Optional[dict] = None) -> str:
@@ -752,7 +601,7 @@ def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
         prefs,
         migrate_prefs=_migrate_settings_groups_from_prefs,
         settings=_SETTINGS_OBJ,
-        core_tools=_CORE_TOOLS,
+        core_tools=_TOOL_REGISTRY.core_tools,
         plugin_toolsets=_PLUGIN_TOOLSETS,
         normalize_tool_name=_normalize_tool_name,
         merge_prompt_templates=lambda p: prompt_templates_io.merge_prompt_templates(
@@ -766,8 +615,8 @@ def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
         resolved_tools_dir=_resolved_tools_dir,
         default_prompt_templates_dir=_default_prompt_templates_dir,
         default_skills_dir=_default_skills_dir,
-        load_plugin_toolsets=_load_plugin_toolsets,
-        register_tool_aliases=_register_tool_aliases,
+        load_plugin_toolsets=lambda tools_dir=None: _TOOL_REGISTRY.load_plugin_toolsets(tools_dir),
+        register_tool_aliases=_TOOL_REGISTRY.register_aliases,
     )
 
 
@@ -817,7 +666,7 @@ def _build_agent_prefs_payload(
         second_opinion_on=second_opinion_on,
         cloud_ai_enabled=cloud_ai_enabled,
         enabled_tools=enabled_tools,
-        core_tools=_CORE_TOOLS,
+        core_tools=_TOOL_REGISTRY.core_tools,
         plugin_toolsets=_PLUGIN_TOOLSETS,
         reviewer_hosted_profile=reviewer_hosted_profile,
         reviewer_ollama_model=reviewer_ollama_model,
@@ -1589,7 +1438,7 @@ def _interactive_repl(
     context_cfg = context_cfg if isinstance(context_cfg, dict) else {}
     primary_profile = primary_profile or default_primary_llm_profile()
     enabled_tools = (
-        set(enabled_tools) if enabled_tools is not None else set(_CORE_TOOLS)
+        set(enabled_tools) if enabled_tools is not None else set(_TOOL_REGISTRY.core_tools)
     )
     enabled_toolsets = set(enabled_toolsets) if enabled_toolsets is not None else set()
 
@@ -1634,17 +1483,7 @@ def _interactive_repl(
         conversation_turn_deps=_conversation_turn_deps(),
         save_context_bundle=_save_context_bundle,
         load_context_messages=_load_context_messages,
-        resolve_prompt_template_text=agent_prompts.resolve_prompt_template_text,
-        effective_system_instruction_text=agent_prompts.effective_system_instruction_text,
-        canonicalize_user_tool_phrase=_canonicalize_user_tool_phrase,
-        normalize_tool_name=_normalize_tool_name,
-        format_unknown_tool_hint=_format_unknown_tool_hint,
-        format_settings_tools_list=_format_settings_tools_list,
-        describe_tool_call_contract=_describe_tool_call_contract,
-        plugin_toolsets=_PLUGIN_TOOLSETS,
-        plugin_tools_for_toolset=_plugin_tools_for_toolset,
-        load_plugin_toolsets=_load_plugin_toolsets,
-        register_tool_aliases=_register_tool_aliases,
+        registry=_TOOL_REGISTRY,
         build_agent_prefs_payload=_build_agent_prefs_payload,
         write_agent_prefs_file=_write_agent_prefs_file,
         agent_prefs_path=_agent_prefs_path,
@@ -1744,8 +1583,8 @@ def main():
     st = _session_defaults_from_prefs(raw_prefs)
     # Reload plugin toolsets after prefs/env are applied so AGENT_TOOLS_DIR / tools_dir override works.
     try:
-        _load_plugin_toolsets(_resolved_tools_dir(raw_prefs))
-        _register_tool_aliases()
+        _TOOL_REGISTRY.load_plugin_toolsets(_resolved_tools_dir(raw_prefs))
+        _TOOL_REGISTRY.register_aliases()
     except Exception:
         pass
     from agentlib.cli import parse_main_argv

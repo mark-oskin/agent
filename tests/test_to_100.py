@@ -243,7 +243,7 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=True,
         cloud_ai_enabled=True,
-        enabled_tools=set(d._CORE_TOOLS) - {"run_command"},
+        enabled_tools=set(d._TOOL_REGISTRY.core_tools) - {"run_command"},
         reviewer_hosted_profile=None,
         reviewer_ollama_model="mymodel:latest",
         session_save_path="/tmp/x.json",
@@ -320,7 +320,7 @@ def test_prefs_system_prompt_inline_roundtrip(tmp_path, monkeypatch):
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=False,
         cloud_ai_enabled=False,
-        enabled_tools=set(d._CORE_TOOLS),
+        enabled_tools=set(d._TOOL_REGISTRY.core_tools),
         reviewer_hosted_profile=None,
         reviewer_ollama_model=None,
         session_save_path=None,
@@ -344,7 +344,7 @@ def test_prefs_system_prompt_path_roundtrip(tmp_path, monkeypatch):
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=False,
         cloud_ai_enabled=False,
-        enabled_tools=set(d._CORE_TOOLS),
+        enabled_tools=set(d._TOOL_REGISTRY.core_tools),
         reviewer_hosted_profile=None,
         reviewer_ollama_model=None,
         session_save_path=None,
@@ -629,7 +629,7 @@ def test_interactive_settings_tools(monkeypatch):
 
 def test_route_requires_websearch_skips_when_search_web_disabled(monkeypatch):
     d = _d()
-    et = frozenset(t for t in d._CORE_TOOLS if t != "search_web")
+    et = frozenset(t for t in d._TOOL_REGISTRY.core_tools if t != "search_web")
     called = []
 
     def no_chat(*a, **k):

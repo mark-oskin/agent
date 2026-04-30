@@ -7,6 +7,9 @@ import shlex
 from dataclasses import dataclass
 from typing import AbstractSet, Callable, Optional
 
+from agentlib.tools.registry import ToolRegistry
+from agentlib import prompts as agent_prompts
+
 from .runtime import ConversationTurnDeps, run_agent_conversation_turn
 from .settings import AgentSettings
 
@@ -62,18 +65,7 @@ class AgentSession:
         conversation_turn_deps: ConversationTurnDeps,
         save_context_bundle: Callable[..., None],
         load_context_messages: Callable[[str], list],
-        resolve_prompt_template_text: Callable[[str, dict], Optional[str]],
-        effective_system_instruction_text: Callable[[Optional[str]], str],
-        # tool/plugin helpers
-        canonicalize_user_tool_phrase: Callable[[str], str],
-        normalize_tool_name: Callable[[str], Optional[str]],
-        format_unknown_tool_hint: Callable[[str], str],
-        format_settings_tools_list: Callable[[AbstractSet[str]], str],
-        describe_tool_call_contract: Callable[[str], str],
-        plugin_toolsets: dict,
-        plugin_tools_for_toolset: Callable[[str], set[str]],
-        load_plugin_toolsets: Callable[[str], None],
-        register_tool_aliases: Callable[[], None],
+        registry: ToolRegistry,
         # prefs / persistence
         build_agent_prefs_payload: Callable[..., dict],
         write_agent_prefs_file: Callable[[dict], None],
@@ -141,18 +133,7 @@ class AgentSession:
         self._conversation_turn_deps = conversation_turn_deps
         self._save_context_bundle = save_context_bundle
         self._load_context_messages = load_context_messages
-        self._resolve_prompt_template_text = resolve_prompt_template_text
-        self._effective_system_instruction_text = effective_system_instruction_text
-
-        self._canonicalize_user_tool_phrase = canonicalize_user_tool_phrase
-        self._normalize_tool_name = normalize_tool_name
-        self._format_unknown_tool_hint = format_unknown_tool_hint
-        self._format_settings_tools_list = format_settings_tools_list
-        self._describe_tool_call_contract = describe_tool_call_contract
-        self._PLUGIN_TOOLSETS = plugin_toolsets
-        self._plugin_tools_for_toolset = plugin_tools_for_toolset
-        self._load_plugin_toolsets = load_plugin_toolsets
-        self._register_tool_aliases = register_tool_aliases
+        self._registry = registry
 
         self._build_agent_prefs_payload = build_agent_prefs_payload
         self._write_agent_prefs_file = write_agent_prefs_file
@@ -909,14 +890,15 @@ class AgentSession:
 
         if key == "tools":
             if len(toks) == 2 or (len(toks) >= 3 and toks[2].lower() in ("list", "ls", "show")):
-                print(self._format_settings_tools_list(self.enabled_tools))
-                if self._PLUGIN_TOOLSETS:
+                print(self._registry.format_settings_tools_list(self.enabled_tools))
+                plugin_toolsets = self._registry.plugin_toolsets
+                if plugin_toolsets:
                     lines = ["\nToolsets (plugins):"]
-                    for nm in sorted(self._PLUGIN_TOOLSETS.keys()):
+                    for nm in sorted(plugin_toolsets.keys()):
                         on = "on" if nm in self.enabled_toolsets else "off"
-                        desc = str((self._PLUGIN_TOOLSETS.get(nm) or {}).get("description") or "").strip()
+                        desc = str((plugin_toolsets.get(nm) or {}).get("description") or "").strip()
                         lines.append(f"  [{on}] {nm}" + (f" — {desc}" if desc else ""))
-                        tnames = sorted(self._plugin_tools_for_toolset(nm))
+                        tnames = sorted(self._registry.plugin_tools_for_toolset(nm))
                         for tid in tnames:
                             td_on = (nm in self.enabled_toolsets) and (tid in self.enabled_tools)
                             reason = ""
@@ -933,9 +915,10 @@ class AgentSession:
                 return SessionLineResult()
             if len(toks) >= 4 and toks[2].lower() in ("enable", "on"):
                 nm = toks[3].strip().lower()
-                if nm in self._PLUGIN_TOOLSETS:
+                plugin_toolsets = self._registry.plugin_toolsets
+                if nm in plugin_toolsets:
                     self.enabled_toolsets.add(nm)
-                    for tid in self._plugin_tools_for_toolset(nm):
+                    for tid in self._registry.plugin_tools_for_toolset(nm):
                         self.enabled_tools.add(tid)
                     print(
                         f"Toolset enabled: {nm!r} (tools may be routed per request). Use /settings save to persist."
@@ -945,17 +928,18 @@ class AgentSession:
                 return SessionLineResult()
             if len(toks) >= 4 and toks[2].lower() in ("disable", "off"):
                 nm = toks[3].strip().lower()
-                if nm in self._PLUGIN_TOOLSETS:
+                plugin_toolsets = self._registry.plugin_toolsets
+                if nm in plugin_toolsets:
                     self.enabled_toolsets.discard(nm)
-                    for tid in self._plugin_tools_for_toolset(nm):
+                    for tid in self._registry.plugin_tools_for_toolset(nm):
                         self.enabled_tools.discard(tid)
                     print(f"Toolset disabled: {nm!r}. Use /settings save to persist.")
                 else:
                     print(f"Unknown toolset {nm!r}. Try: /settings tools")
                 return SessionLineResult()
             if len(toks) >= 3 and toks[2].lower() in ("reload", "refresh"):
-                self._load_plugin_toolsets(self.tools_dir)
-                self._register_tool_aliases()
+                self._registry.load_plugin_toolsets(self.tools_dir)
+                self._registry.register_aliases()
                 print(f"Reloaded plugin toolsets from {self.tools_dir!r}.")
                 return SessionLineResult()
             if len(toks) >= 4 and toks[2].lower() in ("describe", "desc", "help"):
@@ -964,15 +948,16 @@ class AgentSession:
                     print("Usage: /settings tools describe <tool-id>")
                     return SessionLineResult()
                 nm = tid.strip().lower()
-                if nm in self._PLUGIN_TOOLSETS:
-                    rec = self._PLUGIN_TOOLSETS.get(nm) or {}
+                plugin_toolsets = self._registry.plugin_toolsets
+                if nm in plugin_toolsets:
+                    rec = plugin_toolsets.get(nm) or {}
                     desc = str(rec.get("description") or "").strip()
                     print(f"Toolset: {nm}\nDescription: {desc if desc else '(none)'}")
                     print("Tools:")
-                    for one in sorted(self._plugin_tools_for_toolset(nm)):
+                    for one in sorted(self._registry.plugin_tools_for_toolset(nm)):
                         print("  - " + one)
                     return SessionLineResult()
-                print(self._describe_tool_call_contract(tid))
+                print(self._registry.describe_tool_call_contract(tid))
                 return SessionLineResult()
             print("Usage: /settings tools [list] | enable <toolset> | disable <toolset>")
             return SessionLineResult()
@@ -990,7 +975,7 @@ class AgentSession:
                 return SessionLineResult()
             sub = toks[2].lower()
             if sub == "show":
-                body = self._effective_system_instruction_text(self.session_system_prompt)
+                body = agent_prompts.effective_system_instruction_text(self.session_system_prompt)
                 print(f"Effective system prompt ({len(body)} chars):\n{body}")
                 if self.session_system_prompt_path:
                     print(f"(File-backed: {self.session_system_prompt_path!r})")
@@ -1030,7 +1015,7 @@ class AgentSession:
                     print("Usage: /settings system_prompt save <path>")
                     return SessionLineResult()
                 path = os.path.expanduser(" ".join(toks[3:]).strip())
-                body = self._effective_system_instruction_text(self.session_system_prompt)
+                body = agent_prompts.effective_system_instruction_text(self.session_system_prompt)
                 try:
                     parent = os.path.dirname(path)
                     if parent and not os.path.isdir(parent):
@@ -1090,7 +1075,7 @@ class AgentSession:
                 return SessionLineResult()
             if sub == "show":
                 active = self.session_prompt_template or self.template_default
-                body = self._resolve_prompt_template_text(active, self.prompt_templates) or ""
+                body = agent_prompts.resolve_prompt_template_text(active, self.prompt_templates) or ""
                 print(f"Active template: {active!r}\nPrompt ({len(body)} chars):\n{body}")
                 return SessionLineResult()
             if sub in ("use", "select"):
@@ -1101,7 +1086,7 @@ class AgentSession:
                 if nm not in self.prompt_templates:
                     print(f"Unknown template {nm!r}. Try: /settings prompt_template list")
                     return SessionLineResult()
-                resolved = self._resolve_prompt_template_text(nm, self.prompt_templates)
+                resolved = agent_prompts.resolve_prompt_template_text(nm, self.prompt_templates)
                 if not resolved:
                     print(f"Template {nm!r} has no usable text/path.")
                     return SessionLineResult()
@@ -1301,7 +1286,7 @@ class AgentSession:
                 )
                 return SessionLineResult()
             phrase = " ".join(toks[2:])
-            feat = self._canonicalize_user_tool_phrase(phrase)
+            feat = self._registry.canonicalize_user_tool_phrase(phrase)
             if feat == "second_opinion":
                 self.second_opinion_on = True
                 print("second_opinion enabled for this session.")
@@ -1316,12 +1301,12 @@ class AgentSession:
                 self.verbose = 2
                 print(self._verbose_ack_message(self.verbose))
                 return SessionLineResult()
-            tn = self._normalize_tool_name(phrase)
+            tn = self._registry.normalize_tool_name(phrase)
             if tn:
                 self.enabled_tools.add(tn)
                 print(f"Tool enabled: {tn}")
                 return SessionLineResult()
-            print(self._format_unknown_tool_hint(phrase))
+            print(self._registry.format_unknown_tool_hint(phrase))
             return SessionLineResult()
 
         if key == "disable":
@@ -1333,7 +1318,7 @@ class AgentSession:
                 )
                 return SessionLineResult()
             phrase = " ".join(toks[2:])
-            feat = self._canonicalize_user_tool_phrase(phrase)
+            feat = self._registry.canonicalize_user_tool_phrase(phrase)
             if feat == "second_opinion":
                 self.second_opinion_on = False
                 print("second_opinion disabled for this session.")
@@ -1346,12 +1331,12 @@ class AgentSession:
                 self.verbose = 0
                 print(self._verbose_ack_message(self.verbose))
                 return SessionLineResult()
-            tn = self._normalize_tool_name(phrase)
+            tn = self._registry.normalize_tool_name(phrase)
             if tn:
                 self.enabled_tools.discard(tn)
                 print(f"Tool disabled: {tn}")
                 return SessionLineResult()
-            print(self._format_unknown_tool_hint(phrase))
+            print(self._registry.format_unknown_tool_hint(phrase))
             return SessionLineResult()
 
         if key == "thinking":
