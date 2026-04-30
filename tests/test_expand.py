@@ -628,6 +628,36 @@ def test_is_tool_result_weak_for_fetch_error():
     assert turn_support.is_tool_result_weak_for_dedup("Fetch error: timeout") is True
 
 
+def test_resolved_http_url_from_href_dd_uddg():
+    from agentlib.tools.websearch import resolved_http_url_from_href
+
+    h = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.usa.gov%2Fpresidents&rut=abc"
+    assert resolved_http_url_from_href(h) == "https://www.usa.gov/presidents"
+    assert resolved_http_url_from_href("https://example.com/path") == "https://example.com/path"
+    assert resolved_http_url_from_href("//example.com/foo") == "https://example.com/foo"
+
+
+def test_is_tool_result_weak_false_for_dd_redirect_without_literal_https():
+    body = (
+        "[Search backend] duckduckgo\n\n"
+        "[Web results]\n"
+        "- Title\n"
+        "  //duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.example.org%2Fpage"
+    )
+    assert turn_support.is_tool_result_weak_for_dedup(body) is False
+
+
+def test_parse_ddg_html_results_resolves_uddg_redirect():
+    from agentlib.tools import websearch as ws
+
+    html = (
+        '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwhitehouse.gov%2Fpath">WH</a>'
+    )
+    rows = ws._parse_ddg_html_results(html, max_results=5)
+    assert len(rows) == 1
+    assert "https://whitehouse.gov/path" in rows[0]
+
+
 def test_clean_json_response_strips_prefix():
     assert agent_json.clean_json_response('noise {"a":1}') == '{"a":1}'
 
@@ -712,6 +742,18 @@ def test_search_web_effective_max_results_clamped(monkeypatch):
     assert search_web_effective_max_results({"max_results": 0}, settings=settings) == 1
     settings.set(("agent", "search_web_max_results"), 5)
     assert search_web_effective_max_results({}, settings=settings) == 5
+
+
+def test_debug_search_web_defaults_off_and_group_set():
+    from agentlib.tools.websearch import _debug_search_web_log
+
+    settings = AgentSettings.defaults()
+    assert settings.get_bool(("agent", "debug_search_web"), True) is False
+    assert _debug_search_web_log(settings) is None
+    msg = settings.group_set("agent", "debug_search_web", "on")
+    assert "set" in msg.lower()
+    assert settings.get_bool(("agent", "debug_search_web"), False) is True
+    assert callable(_debug_search_web_log(settings))
 
 
 def test_write_file_rejects_empty_content():

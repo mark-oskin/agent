@@ -153,6 +153,12 @@ def is_tool_result_weak_for_dedup(result: str) -> bool:
     if ("[DuckDuckGo instant answer]" in r or "[Web results]" in r or "[Wikipedia search]" in r) and not re.search(
         r"https?://", r
     ):
+        # DuckDuckGo HTML links are often scheme-relative redirects:
+        #   //duckduckgo.com/l/?uddg=https%3A%2F%2F...
+        # Treat encoded destination URLs as URL-backed for verification gating.
+        low = r.lower()
+        if "uddg=" in low and "duckduckgo" in low:
+            return False
         return True
     return False
 

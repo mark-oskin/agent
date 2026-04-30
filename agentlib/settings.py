@@ -33,6 +33,7 @@ DEFAULT_SETTINGS: dict = {
         "stream_thinking": False,
         "search_web_max_results": 5,
         "search_web_backend": "ddg",
+        "debug_search_web": False,
         "searxng_url": "https://searx.party",
         "auto_confirm_tool_retry": False,
         "context_tokens": 0,
