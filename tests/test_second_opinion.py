@@ -7,7 +7,7 @@ import json
 import sys
 from contextlib import redirect_stdout
 
-from tests.harness import reload_agent
+from tests.harness import build_test_app
 from agentlib.settings import AgentSettings
 
 
@@ -164,36 +164,25 @@ def _run_with_seq(
             return json.dumps({"action": "error", "error": f"no response #{idx}"})
         return responses[idx]
 
-    d = reload_agent(monkeypatch, call_ollama_chat=fake_chat)
-    # Keep tests deterministic: ignore the developer's ~/.agent.json entirely.
-    monkeypatch.setattr(d, "_load_agent_prefs", lambda: None)
-    # Reset module settings for deterministic behavior.
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    app = build_test_app(monkeypatch)
+    app.settings = AgentSettings.defaults()
+    monkeypatch.setattr(app, "call_ollama_chat", fake_chat)
     # Provide a placeholder API key when cloud-ai is enabled so hosted reviewer paths are "ready".
     if cloud:
-        d._settings_set(("openai", "api_key"), "sk-test-placeholder")
-    monkeypatch.setattr(
-        d,
-        "_route_requires_websearch",
-        lambda u, t, pp=None, et=None, transcript_messages=None, **kw: None,
-    )
-    monkeypatch.setattr(
-        d,
-        "_route_requires_websearch_after_answer",
-        lambda u, t, p, pp=None, et=None, transcript_messages=None, **kw: None,
-    )
+        app.settings.set(("openai", "api_key"), "sk-test-placeholder")
+    monkeypatch.setattr(app, "route_requires_websearch", lambda *a, **k: None)
+    monkeypatch.setattr(app, "route_requires_websearch_after_answer", lambda *a, **k: None)
     if stub_plain is not None:
-        monkeypatch.setattr(d, "call_ollama_plaintext", stub_plain)
+        monkeypatch.setattr(app, "call_ollama_plaintext", stub_plain)
     if stub_openai is not None:
-        monkeypatch.setattr(d, "call_openai_chat_plain", stub_openai)
+        monkeypatch.setattr(app, "call_openai_chat_plain", stub_openai)
 
-    pre = ["agent.py"]
+    pre: list[str] = []
     if second_opinion:
         pre.append("--second-opinion")
     if cloud:
         pre.append("--cloud-ai")
-    monkeypatch.setattr(sys, "argv", pre + list(argv_tail))
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d.main()
+        app.run(pre + list(argv_tail))
     return buf.getvalue().strip()

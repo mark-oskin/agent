@@ -22,7 +22,7 @@ WEB = "[Web results]\nLink: https://a.example/x\nTitle: t\nSnippet: s\n"
 
 
 def _d():
-    return importlib.import_module("agent")
+    return importlib.import_module("agentlib.app")
 
 
 # --- native Ollama tool_calls → agent JSON ---
@@ -139,7 +139,7 @@ def test_enrich_who_is_president_appends_current_year(monkeypatch):
 
 def test_enrich_respects_ollama_search_enrich_off(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("ollama", "search_enrich"), False)
     q = "Who is the president of France?"
     assert d._enrich_search_query_for_present_day(q) == q
@@ -165,7 +165,7 @@ def test_main_interactive_mode_exits_on_eof(monkeypatch):
 
 def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     ctx_file = tmp_path / "ctx.json"
     ctx_file.write_text(
         json.dumps([{"role": "user", "content": "hi from file"}]),
@@ -238,7 +238,7 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
     d = _d()
     pref_path = tmp_path / ".agent.json"
     d._set_agent_prefs_path_override(str(pref_path))
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     payload = d._build_agent_prefs_payload(
         primary_profile=d.default_primary_llm_profile(),
         second_opinion_on=True,
@@ -275,7 +275,7 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
 
 def test_prefs_ollama_openai_agent_blobs_apply_to_settings(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     prefs = {
         "version": 4,
         "ollama": {"HOST": "http://o.test:11434"},
@@ -290,7 +290,7 @@ def test_prefs_ollama_openai_agent_blobs_apply_to_settings(monkeypatch):
 
 def test_prefs_stored_env_overrides_existing_settings(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("ollama", "host"), "http://from-shell:1")
     prefs = {"version": 4, "ollama": {"HOST": "http://from-file:2"}}
     d._session_defaults_from_prefs(prefs)
@@ -384,7 +384,7 @@ def test_interactive_settings_ollama_show_renders(tmp_path, monkeypatch):
 
 def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._set_agent_prefs_path_override(str(tmp_path / "x.json"))
     lines = [
         "/settings thinking show",
@@ -793,7 +793,7 @@ def test_parse_while_repl_tokens_and_judge_bit():
 
 def test_interactive_show_model_and_reviewer(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("ollama", "model"), "custom-llm:latest")
     lines = ["/show model", "/show reviewer", "/quit"]
     it = iter(lines)

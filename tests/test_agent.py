@@ -23,12 +23,12 @@ from agentlib.settings import AgentSettings
 
 
 def test_safe_path_under_dir_rejects_traversal():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     assert d._safe_path_under_dir("/a/b/skills", "../../etc/passwd") is None
 
 
 def test_expand_skill_artifacts_includes_reference(tmp_path):
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     refd = tmp_path / "references"
     refd.mkdir(parents=True)
     (refd / "note.txt").write_text("REFBODY", encoding="utf-8")
@@ -44,8 +44,8 @@ def test_expand_skill_artifacts_includes_reference(tmp_path):
 
 
 def test_grounded_cli_skill_loads_bundled_reference():
-    d = importlib.import_module("agent")
-    skills = os.path.join(os.path.dirname(d.__file__), "skills")
+    d = importlib.import_module("agentlib.app")
+    skills = d._default_skills_dir()
     m = d._load_skills_from_dir(skills)
     assert "grounded_cli" in m
     p = m["grounded_cli"]["prompt"]
@@ -54,7 +54,7 @@ def test_grounded_cli_skill_loads_bundled_reference():
 
 
 def test_parse_action_null_with_tool():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = json.dumps({"action": None, "tool": "search_web", "parameters": {"query": "x"}})
     out = d.parse_agent_json(raw)
     assert out["action"] == "tool_call"
@@ -63,7 +63,7 @@ def test_parse_action_null_with_tool():
 
 
 def test_tool_progress_message_includes_useful_params():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     s1 = d._tool_progress_message("search_web", {"query": "hello world"})
     assert "query" in s1 and "hello world" in s1
     s2 = d._tool_progress_message("read_file", {"path": "/tmp/x.txt"})
@@ -71,7 +71,7 @@ def test_tool_progress_message_includes_useful_params():
 
 
 def test_plugin_toolsets_load_and_route(monkeypatch):
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     assert "dev" in d._PLUGIN_TOOLSETS
     assert "desktop" in d._PLUGIN_TOOLSETS
     # If both are enabled, routing should pick dev for a pytest-y query.
@@ -81,7 +81,7 @@ def test_plugin_toolsets_load_and_route(monkeypatch):
 
 
 def test_tools_dir_override_loads_plugins(tmp_path, monkeypatch):
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     tdir = tmp_path / "tools"
     tdir.mkdir()
     (tdir / "x.py").write_text(
@@ -102,8 +102,8 @@ def test_tools_dir_override_loads_plugins(tmp_path, monkeypatch):
 
 
 def test_ollama_request_think_value_gpt_oss_defaults_to_medium(monkeypatch):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("ollama", "model"), "gpt-oss:20b")
     d._settings_set(("agent", "thinking"), True)
     d._settings_set(("agent", "thinking_level"), "")
@@ -112,16 +112,16 @@ def test_ollama_request_think_value_gpt_oss_defaults_to_medium(monkeypatch):
 
 def test_ollama_request_think_false_when_disabled_even_if_level_set(monkeypatch):
     """Stale AGENT_THINKING_LEVEL must not send think= to Ollama when thinking is off."""
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "thinking"), False)
     d._settings_set(("agent", "thinking_level"), "high")
     assert d._ollama_request_think_value() is False
 
 
 def test_stream_thinking_prints_done_thinking_separator(monkeypatch):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "stream_thinking"), True)
     lines = iter(
         [
@@ -138,7 +138,7 @@ def test_stream_thinking_prints_done_thinking_separator(monkeypatch):
 
 
 def test_parse_action_string_null_with_tool():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = '{"action": "null", "tool": "read_file", "parameters": {"path": "/tmp/a"}}'
     out = d.parse_agent_json(raw)
     assert out["action"] == "tool_call"
@@ -146,7 +146,7 @@ def test_parse_action_string_null_with_tool():
 
 
 def test_parse_content_promoted_to_answer():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = json.dumps({"content": "hello", "action": None})
     out = d.parse_agent_json(raw)
     assert out["action"] == "answer"
@@ -155,7 +155,7 @@ def test_parse_content_promoted_to_answer():
 
 
 def test_parse_tool_top_level_run_command():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = json.dumps({"action": "run_command", "command": "echo hi"})
     out = d.parse_agent_json(raw)
     assert out["action"] == "tool_call"
@@ -164,7 +164,7 @@ def test_parse_tool_top_level_run_command():
 
 
 def test_parse_use_git_top_level_op_and_worktree():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = json.dumps(
         {
             "action": "use_git",
@@ -180,7 +180,7 @@ def test_parse_use_git_top_level_op_and_worktree():
 
 def test_parse_agent_json_literal_newlines_inside_answer():
     """Many models emit RFC-invalid JSON with literal control chars inside quoted strings."""
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = '{"action":"answer","answer":"Line A\nLine B"}'.replace("\\n", "\n")
     assert "\n" in raw and "\\n" not in raw
     out = d.parse_agent_json(raw)
@@ -190,7 +190,7 @@ def test_parse_agent_json_literal_newlines_inside_answer():
 
 def test_parse_agent_json_unicode_quote_delimiters():
     """Unicode smart quotes occasionally wrap JSON keys/strings."""
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = "{\u201caction\u201d:\u201canswer\u201d,\u201canswer\u201d:\u201chi\u201d}"
     out = d.parse_agent_json(raw)
     assert out["action"] == "answer"
@@ -198,7 +198,7 @@ def test_parse_agent_json_unicode_quote_delimiters():
 
 
 def test_merge_tool_param_aliases_use_git():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     p = d._merge_tool_param_aliases(
         "use_git", {"operation": "log", "cwd": "/tmp/proj", "m": "hi"}
     )
@@ -208,13 +208,13 @@ def test_merge_tool_param_aliases_use_git():
 
 
 def test_merge_tool_param_aliases_search():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     p = d._merge_tool_param_aliases("search_web", {"q": "abc"})
     assert p["query"] == "abc"
 
 
 def test_merge_tool_param_aliases_write_file_body():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     p = d._merge_tool_param_aliases(
         "write_file", {"path": "x.txt", "body": "hello"}
     )
@@ -223,20 +223,20 @@ def test_merge_tool_param_aliases_write_file_body():
 
 
 def test_ensure_tool_defaults_search_query_from_user():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     p = d._ensure_tool_defaults("search_web", {}, "hello world")
     assert p["query"] == "hello world"
 
 
 def test_is_tool_result_weak_requires_url_for_search_sections():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     weak = d._is_tool_result_weak_for_dedup("[Web results]\nTitle: x\nSnippet: y")
     assert weak is True
 
 
 def test_context_window_manager_summarizes_when_over_budget(monkeypatch):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "context_tokens"), 200)
     d._settings_set(("agent", "context_trigger_frac"), 0.50)
     d._settings_set(("agent", "context_target_frac"), 0.40)
@@ -271,8 +271,8 @@ def test_context_window_manager_summarizes_when_over_budget(monkeypatch):
 
 
 def test_context_manager_prefs_applied_without_env(monkeypatch):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
 
     def fake_summary(**kwargs):  # noqa: ARG001
         return "SUMMARY"
@@ -293,7 +293,7 @@ def test_context_manager_prefs_applied_without_env(monkeypatch):
 
 
 def test_prompt_templates_resolve_overlay_and_full(tmp_path):
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     from agentlib import prompt_templates_io
 
     templates = prompt_templates_io.load_prompt_templates_from_dir(d._default_prompt_templates_dir())
@@ -319,7 +319,7 @@ def test_prompt_templates_resolve_overlay_and_full(tmp_path):
 
 
 def test_enrich_search_query_adds_year_for_current(monkeypatch):
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     from datetime import date as real_date
 
     class FakeDate(real_date):
@@ -336,8 +336,8 @@ def test_enrich_search_query_adds_year_for_current(monkeypatch):
 
 
 def test_agent_progress_prints_to_stderr_when_enabled(monkeypatch, capsys):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "quiet"), False)
     d._settings_set(("agent", "progress"), True)
     d._agent_progress("hello")
@@ -347,16 +347,16 @@ def test_agent_progress_prints_to_stderr_when_enabled(monkeypatch, capsys):
 
 
 def test_agent_progress_silent_when_quiet(monkeypatch, capsys):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "quiet"), True)
     d._agent_progress("hello")
     assert capsys.readouterr().err == ""
 
 
 def test_agent_progress_silent_when_progress_off(monkeypatch, capsys):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "quiet"), False)
     d._settings_set(("agent", "progress"), False)
     d._agent_progress("hello")
@@ -364,8 +364,8 @@ def test_agent_progress_silent_when_progress_off(monkeypatch, capsys):
 
 
 def test_apply_cli_primary_model_ollama_sets_setting(monkeypatch):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("ollama", "model"), "before")
     p = d.default_primary_llm_profile()
     p2 = d._apply_cli_primary_model("after", p)
@@ -374,8 +374,8 @@ def test_apply_cli_primary_model_ollama_sets_setting(monkeypatch):
 
 
 def test_apply_cli_primary_model_hosted_replaces_model_only(monkeypatch):
-    d = importlib.import_module("agent")
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d = importlib.import_module("agentlib.app")
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("ollama", "model"), "ollama-unchanged")
     h = d.LlmProfile(
         backend="hosted",
@@ -680,7 +680,7 @@ def test_write_file_error_does_not_set_deliverable_path(monkeypatch):
 
 
 def test_fetch_page_prefix_contains_urls(monkeypatch):
-    d = importlib.import_module("agent")
+    import requests
 
     class Resp:
         status_code = 200
@@ -694,43 +694,39 @@ def test_fetch_page_prefix_contains_urls(monkeypatch):
         assert "example.com" in url
         return Resp()
 
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(d.requests, "get", fake_get)
-    try:
-        from agentlib.tools import builtins as tool_builtins
+    monkeypatch.setattr(requests, "get", fake_get)
+    from agentlib.tools import builtins as tool_builtins
 
-        out = tool_builtins.fetch_page("https://example.com/here")
-        assert "Fetched URL:" in out
-        assert "Final URL:" in out
-        assert "https://example.com/there" in out
-    finally:
-        monkeypatch.undo()
+    out = tool_builtins.fetch_page("https://example.com/here")
+    assert "Fetched URL:" in out
+    assert "Final URL:" in out
+    assert "https://example.com/there" in out
 
 
 def test_user_wants_written_deliverable_true():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     assert d._user_wants_written_deliverable("Give me a 2 page document about foo. Write the document.") is True
 
 
 def test_user_wants_written_deliverable_letter():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     assert d._user_wants_written_deliverable("Write a letter to the mayor about parking.") is True
 
 
 def test_deliverable_skip_mandatory_web_letter_without_sources():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     assert d._deliverable_skip_mandatory_web("Write a letter to the president.")
 
 
 def test_deliverable_skip_mandatory_web_false_when_sources_asked():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     assert not d._deliverable_skip_mandatory_web(
         "Write a 2 page document about X. Source from web. Write the document."
     )
 
 
 def test_is_self_capability_question():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     h = d._is_self_capability_question
     assert h("What kind of model are you?")
     assert h("What kinds of outputs can you produce and inputs can you take?")
@@ -738,14 +734,14 @@ def test_is_self_capability_question():
 
 
 def test_self_capability_followup_lists_tools():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     msg = d._self_capability_followup("What can you do?", "meta only")
     assert "search_web" in msg and "call_python" in msg
     assert "directly" in msg.lower()
 
 
 def test_deliverable_first_answer_followup_demands_artifact():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     msg = d._deliverable_first_answer_followup(
         "Write a letter to the president.",
         "No web search is needed because this is timeless.",
@@ -755,25 +751,25 @@ def test_deliverable_first_answer_followup_demands_artifact():
 
 
 def test_user_wants_written_deliverable_false():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     assert d._user_wants_written_deliverable("What is 2+2?") is False
 
 
 def test_answer_missing_written_body_threshold():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     body = "A" * 1000
     assert d._answer_missing_written_body(body[:100], len(body)) is True
     assert d._answer_missing_written_body(body, len(body)) is False
 
 
 def test_tool_result_user_message_includes_deliverable_reminder():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     msg = d._tool_result_user_message("fetch_page", {"url": "u"}, "out", deliverable_reminder="REM")
     assert "REM" in msg
 
 
 def test_parse_prose_json_embedded():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = 'prefix {"action":"answer","answer":"ok"} suffix'
     out = d.parse_agent_json(raw)
     assert out["action"] == "answer"
@@ -809,7 +805,7 @@ def test_web_required_step_limit_when_never_strong_search(monkeypatch):
 
 
 def test_normalize_tool_name_alias_toolName():
-    d = importlib.import_module("agent")
+    d = importlib.import_module("agentlib.app")
     raw = json.dumps({"action": "tool_call", "toolName": "list_directory", "parameters": {"path": "."}})
     out = d.parse_agent_json(raw)
     assert out["tool"] == "list_directory"

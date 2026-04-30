@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import agent as d
+import agentlib.app as d
 
 
 def test_parse_context_messages_bare_list():

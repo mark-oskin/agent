@@ -4,7 +4,6 @@ Shared test harness: mock Ollama + stub tools for agent.main().
 
 from __future__ import annotations
 
-import importlib
 import io
 import json
 import sys
@@ -14,15 +13,20 @@ from typing import Any, Callable, List, Optional
 import pytest
 
 
-def reload_agent(monkeypatch: pytest.MonkeyPatch, **patches: Callable[..., Any]):
-    if "agent" in sys.modules:
-        del sys.modules["agent"]
-    import agent as d  # noqa: WPS433
+def build_test_app(monkeypatch: pytest.MonkeyPatch):
+    """
+    Create a fresh app instance for tests.
 
-    importlib.reload(d)
-    for attr, fn in patches.items():
-        monkeypatch.setattr(d, attr, fn)
-    return d
+    Tests should not depend on `agent.py` internals; `agent.py` is a shim.
+    """
+    from agentlib.app import default_app
+    from agentlib import AgentSettings
+
+    app = default_app()
+    app.settings = AgentSettings.defaults()
+    # Keep tests deterministic: ignore the developer's ~/.agent.json entirely.
+    monkeypatch.setattr(app, "load_prefs", lambda: None)
+    return app
 
 
 def run_main(
@@ -43,7 +47,7 @@ def run_main(
     stub_download_file: Optional[Callable[..., str]] = None,
     stub_call_python: Optional[Callable[..., str]] = None,
 ) -> str:
-    """Run agent.main() capturing stdout."""
+    """Run app.run(argv) capturing stdout."""
     call_i = {"i": 0}
 
     def fake_call_ollama_chat(
@@ -76,12 +80,11 @@ def run_main(
     ):  # noqa: ARG001
         return route_after_answer
 
-    d = reload_agent(monkeypatch, call_ollama_chat=fake_call_ollama_chat)
+    app = build_test_app(monkeypatch)
     from agentlib.tools import builtins as tool_builtins
-    # Keep tests deterministic: ignore the developer's ~/.agent.json entirely.
-    monkeypatch.setattr(d, "_load_agent_prefs", lambda: None)
-    monkeypatch.setattr(d, "_route_requires_websearch", fake_route_requires_websearch)
-    monkeypatch.setattr(d, "_route_requires_websearch_after_answer", fake_route_after_answer)
+    monkeypatch.setattr(app, "call_ollama_chat", fake_call_ollama_chat)
+    monkeypatch.setattr(app, "route_requires_websearch", fake_route_requires_websearch)
+    monkeypatch.setattr(app, "route_requires_websearch_after_answer", fake_route_after_answer)
     if stub_search_web is not None:
         monkeypatch.setattr(
             tool_builtins,
@@ -113,10 +116,11 @@ def run_main(
     if stub_call_python is not None:
         monkeypatch.setattr(tool_builtins, "call_python", lambda code, globals=None: stub_call_python(code, globals=globals))
 
-    monkeypatch.setattr(sys, "argv", ["agent.py", *argv])
+    from agentlib.app import main as app_main
+
     buf = io.StringIO()
     with redirect_stdout(buf):
-        d.main()
+        app_main(argv, app=app)
     return buf.getvalue().strip()
 
 

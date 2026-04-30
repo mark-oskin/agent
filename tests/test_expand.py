@@ -16,7 +16,7 @@ WEB = "[Web results]\nLink: https://a.example/x\nTitle: t\nSnippet: s\n"
 
 
 def _d():
-    return importlib.import_module("agent")
+    return importlib.import_module("agentlib.app")
 
 
 # --- parse / normalize ---
@@ -218,14 +218,14 @@ def test_confirm_tool_recovery_retry_non_tty_returns_true_without_env(monkeypatc
 
 def test_repl_buffered_line_max_bytes_setting(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "repl_input_max_bytes"), 200000)
     assert d._repl_buffered_line_max_bytes() == 200000
 
 
 def test_repl_buffered_line_max_bytes_minimum(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "repl_input_max_bytes"), 100)
     assert d._repl_buffered_line_max_bytes() == 4096
 
@@ -233,7 +233,7 @@ def test_repl_buffered_line_max_bytes_minimum(monkeypatch):
 def test_tool_recovery_may_run_gated_on_tty_or_setting(monkeypatch):
     d = _d()
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "auto_confirm_tool_retry"), False)
     assert not d._tool_recovery_may_run(True)
     d._settings_set(("agent", "auto_confirm_tool_retry"), True)
@@ -525,7 +525,7 @@ def test_transcript_two_sequential_fetch_different_urls(monkeypatch):
 
 def test_tool_result_user_message_truncates_long_output(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("ollama", "tool_output_max"), 50)
     long_body = "x" * 100
     msg = d._tool_result_user_message("search_web", {"query": "q"}, long_body)
@@ -586,7 +586,7 @@ def test_route_requires_websearch_passes_transcript_to_llm(monkeypatch):
 
 def test_router_transcript_slice_respects_max_messages(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "router_transcript_max_messages"), 2)
     t = [{"role": "user", "content": str(i)} for i in range(5)]
     s = d._router_transcript_slice(t)
@@ -667,7 +667,7 @@ def test_tool_params_fingerprint_search_web_canonical_query():
 
 def test_search_web_effective_max_results_clamped(monkeypatch):
     d = _d()
-    d._SETTINGS_OBJ = AgentSettings.defaults()
+    d._APP.settings = AgentSettings.defaults()
     d._settings_set(("agent", "search_web_max_results"), 12)
     assert d._search_web_effective_max_results({}) == 12
     assert d._search_web_effective_max_results({"max_results": "7"}) == 7
