@@ -46,6 +46,20 @@ from agentlib.coercion import scalar_to_str as _scalar_to_str
 from agentlib.context.compaction import maybe_compact_context_window as _compact_context_window_impl
 from agentlib.context.compaction import summarize_conversation_for_context as _summarize_conversation_impl
 from agentlib.llm import streaming as llm_streaming
+from agentlib.llm import usage as llm_usage
+from agentlib.llm.discovery import fetch_ollama_local_model_names as _fetch_ollama_local_model_names_impl
+from agentlib.llm.second_opinion import (
+    second_opinion_result_user_message as _second_opinion_result_user_message,
+    second_opinion_reviewer_messages as _second_opinion_reviewer_messages,
+)
+from agentlib import prompt_templates_io
+from agentlib.repl import run_interactive_repl_loop
+from agentlib.context import io as context_io
+from agentlib.repl import while_cmd as repl_while_cmd
+from agentlib import routing_followups
+from agentlib.skills.loader import expand_skill_artifacts as _expand_skill_artifacts
+from agentlib.skills.loader import load_skills_from_dir as _load_skills_from_dir
+from agentlib.skills.loader import safe_path_under_dir as _safe_path_under_dir
 from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
 from agentlib.llm.profile import llm_profile_from_pref as _llm_profile_from_pref
 from agentlib.llm.profile import llm_profile_to_pref as _llm_profile_to_pref
@@ -102,12 +116,6 @@ def _apply_cli_primary_model(name: str, profile: LlmProfile) -> LlmProfile:
         return replace(profile, model=s)
     _settings_set(("ollama", "model"), s)
     return profile
-
-
-def _read_api_key(env_name: str) -> str:
-    # Environment variables are intentionally not used for settings; keep this helper name for
-    # legacy call sites but interpret the argument as the key itself.
-    return (env_name or "").strip()
 
 
 def _hosted_review_ready(
@@ -477,46 +485,6 @@ def _resolved_tools_dir(prefs: Optional[dict] = None) -> str:
     if prefs and isinstance(prefs, dict) and (prefs.get("tools_dir") or "").strip():
         return os.path.abspath(os.path.expanduser(str(prefs["tools_dir"]).strip()))
     return _default_tools_dir()
-
-
-def _load_prompt_templates_from_dir(dir_path: str) -> dict:
-    out: dict = {}
-    if not os.path.isdir(dir_path):
-        return out
-    for fn in sorted(os.listdir(dir_path)):
-        if not fn.endswith(".json") or fn.startswith("."):
-            continue
-        name, _ = os.path.splitext(fn)
-        name = (name or "").strip()
-        if not name:
-            continue
-        path = os.path.join(dir_path, fn)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                obj = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(obj, dict):
-            out[name] = obj
-    return out
-
-
-def _safe_path_under_dir(base_dir: str, relpath: str) -> Optional[str]:
-    from agentlib.skills.loader import safe_path_under_dir
-
-    return safe_path_under_dir(base_dir, relpath)
-
-
-def _expand_skill_artifacts(skills_dir: str, meta: dict, base_prompt: str) -> str:
-    from agentlib.skills.loader import expand_skill_artifacts
-
-    return expand_skill_artifacts(skills_dir, meta, base_prompt)
-
-
-def _load_skills_from_dir(dir_path: str) -> dict:
-    from agentlib.skills.loader import load_skills_from_dir
-
-    return load_skills_from_dir(dir_path)
 
 
 def _format_skills_for_selector(skills_map: dict) -> str:
@@ -943,37 +911,8 @@ def _enrich_search_query_for_present_day(query: str) -> str:
 _ollama_usage_from_chat_response = llm_streaming.ollama_usage_from_chat_response
 _merge_partial_tool_calls = llm_streaming.merge_partial_tool_calls
 
-
-def _ollama_eval_generation_tok_per_sec(usage: dict) -> Optional[float]:
-    """Tokens generated per second during the eval (decode) phase; needs eval_duration from Ollama."""
-    n = usage.get("eval_count")
-    dt_ns = usage.get("eval_duration")
-    if not isinstance(n, int) or n < 0:
-        return None
-    if not isinstance(dt_ns, int) or dt_ns <= 0:
-        return None
-    return n / (dt_ns / 1e9)
-
-
-def _format_ollama_usage_line(usage: dict) -> str:
-    parts = []
-    # Ollama names these fields; they are not the same contract as OpenAI "prompt_tokens"/"completion_tokens".
-    if "prompt_eval_count" in usage:
-        parts.append(f"prompt_eval_count={usage['prompt_eval_count']}")
-    if "eval_count" in usage:
-        parts.append(f"eval_count={usage['eval_count']}")
-    rate = _ollama_eval_generation_tok_per_sec(usage)
-    if rate is not None:
-        parts.append(f"gen_tok/s≈{rate:.1f}")
-    for key, label in (
-        ("total_duration", "total"),
-        ("load_duration", "load"),
-        ("prompt_eval_duration", "prompt"),
-        ("eval_duration", "gen"),
-    ):
-        if key in usage:
-            parts.append(f"{label}_s={usage[key] / 1e9:.3f}")
-    return "[Ollama usage] " + ", ".join(parts) if parts else "[Ollama usage] (no counts in response)"
+_ollama_eval_generation_tok_per_sec = llm_usage.ollama_eval_generation_tok_per_sec
+_format_ollama_usage_line = llm_usage.format_ollama_usage_line
 
 
 _last_ollama_chat_usage: Optional[dict] = None
@@ -981,17 +920,7 @@ _last_ollama_chat_usage: Optional[dict] = None
 
 def _format_last_ollama_usage_for_repl() -> str:
     """Human-readable report for /usage (last local Ollama agent chat only)."""
-    if _last_ollama_chat_usage is None:
-        return (
-            "No Ollama usage captured yet. Stats come from the local primary model’s last "
-            "/api/chat response (not hosted APIs). After a turn, try again, or use "
-            "/settings verbose 2 to print usage after each Ollama call (level 2)."
-        )
-    return (
-        _format_ollama_usage_line(_last_ollama_chat_usage)
-        + "\n(Ollama: prompt_eval_count / eval_count — not identical to OpenAI-style prompt/completion tokens; "
-        "gen_tok/s uses eval_count ÷ eval_duration when both are present.)"
-    )
+    return llm_usage.format_last_ollama_usage_for_repl(_last_ollama_chat_usage)
 
 
 def _merge_stream_message_chunks(lines_iter, *, stream_chunks: bool = False):
@@ -1291,41 +1220,6 @@ def call_hosted_agent_chat(
     )
 
 
-def _second_opinion_reviewer_messages(user_query: str, primary_answer: str, rationale: str) -> list:
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are an independent reviewer. Reply in plain text (not JSON). "
-                "Be concise: note agreement, corrections, caveats, or missing checks. "
-                "Do not refuse solely because the topic is sensitive—give a substantive review."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "User request:\n"
-                f"{user_query}\n\n"
-                "Primary model answer:\n"
-                f"{primary_answer}\n\n"
-                "The primary model asked for a second opinion for this reason:\n"
-                f"{rationale}\n\n"
-                "Provide your second opinion."
-            ),
-        },
-    ]
-
-
-def _second_opinion_result_user_message(review_text: str) -> str:
-    return (
-        "An independent review was obtained. Review text:\n\n"
-        f"{review_text}\n\n"
-        "Using this review (and earlier context), respond with JSON only. "
-        'Typically merge into a single {"action":"answer","answer":"...","next_action":"finalize",'
-        '"rationale":"..."} unless you still need tools.'
-    )
-
-
 def call_ollama_chat(
     messages: list,
     primary_profile: Optional[LlmProfile] = None,
@@ -1453,26 +1347,16 @@ def _default_system_instruction_text() -> str:
 
 def _default_prompt_templates() -> dict:
     """Default templates live under prompt_templates/ as one JSON per template name."""
-    return _load_prompt_templates_from_dir(_default_prompt_templates_dir())
+    return prompt_templates_io.load_prompt_templates_from_dir(_default_prompt_templates_dir())
 
 
 def _merge_prompt_templates(prefs: Optional[dict]) -> dict:
     """Load templates from the configured directory, then apply ~/.agent.json object overrides (user wins)."""
-    dpath = _resolved_prompt_templates_dir(prefs)
-    base = _load_prompt_templates_from_dir(dpath)
-    if not base:
-        base = _load_prompt_templates_from_dir(_default_prompt_templates_dir())
-    if not prefs or not isinstance(prefs, dict):
-        return base
-    raw = prefs.get("prompt_templates")
-    if not isinstance(raw, dict):
-        return base
-    out = dict(base)
-    for name, obj in raw.items():
-        if not isinstance(name, str) or not name.strip() or not isinstance(obj, dict):
-            continue
-        out[name.strip()] = dict(obj)
-    return out
+    return prompt_templates_io.merge_prompt_templates(
+        prefs,
+        resolved_prompt_templates_dir=_resolved_prompt_templates_dir,
+        default_prompt_templates_dir=_default_prompt_templates_dir,
+    )
 
 
 def _resolve_prompt_template_text(name: str, templates: dict) -> Optional[str]:
@@ -1511,71 +1395,9 @@ def _router_prompt(
     )
 
 
-def _tool_need_review_followup(user_query: str, proposed_answer: str) -> str:
-    """
-    Model-driven check when the assistant answered tool-free on the first turn.
-
-    The old wording invited models to discuss \"timeless vs current\" in the answer field instead
-    of answering the user; the user only ever sees the `answer` string.
-    """
-    uq = (user_query or "").strip()
-    ans = (proposed_answer or "").strip()
-    return (
-        "You just responded with action=answer without using any tools.\n\n"
-        "User request:\n"
-        f"{uq}\n\n"
-        "Your proposed answer (the user will NOT see this self-review—only your NEXT JSON matters):\n"
-        f"{ans}\n\n"
-        "Internally decide: does answering the user's question correctly require fresh, verifiable "
-        "facts from the web (news, prices, who holds an office today, versions, outages, etc.)?\n\n"
-        "Respond with JSON only:\n"
-        '- If YES, use {"action":"tool_call","tool":"search_web","parameters":{"query":"..."}} with a focused query.\n'
-        '- If NO, use {"action":"answer","answer":"..."} where the `answer` value is your **complete** reply to the '
-        "user's question—normal helpful content only. Do **not** fill `answer` with meta about whether web search "
-        'is needed, "timeless" facts, or timeliness—those belong in your internal decision, not in `answer`.\n'
-        "If unsure whether facts may be stale, prefer search_web.\n"
-        "Do not include any other keys."
-    )
-
-
-def _is_self_capability_question(user_query: str) -> bool:
-    """Questions about the assistant itself (not third-party facts) — generic web-review misfires."""
-    q = (user_query or "").strip().lower()
-    if not q:
-        return False
-    return bool(
-        re.search(
-            r"\b(what\s+(kind\s+of\s+)?model|which\s+model|what\s+llm|"
-            r"who\s+are\s+you|what\s+are\s+you|your\s+capabilities|"
-            r"what\s+can\s+you\s+do|what\s+do\s+you\s+support|what\s+tools\s+do\s+you|"
-            r"describe\s+yourself|your\s+limitations|"
-            r"what\s+kinds?\s+of\s+(outputs?|inputs?)|\binputs?\s+and\s+outputs?)\b",
-            q,
-        )
-    )
-
-
-def _self_capability_followup(user_query: str, proposed_answer: str) -> str:
-    """Replace generic web-vs-memory wording for identity/capability asks."""
-    uq = (user_query or "").strip()
-    ans = (proposed_answer or "").strip()
-    tools = (
-        "search_web, fetch_page, run_command, use_git, write_file, read_file, list_directory, "
-        "download_file, tail_file, replace_text, call_python"
-    )
-    return (
-        "The user is asking about **this assistant**: what model/setup it is, what it can accept or "
-        "produce, and/or what tools exist in this agent—not for a lecture on web search, timeliness, "
-        "or \"timeless\" vs current facts.\n\n"
-        f"User request:\n{uq}\n\n"
-        f"Your last `answer` was not what they asked for (do not repeat this pattern):\n{ans}\n\n"
-        "Respond with JSON only:\n"
-        '{"action":"answer","answer":"..."}\n'
-        "The `answer` string must **directly** address their question: plain-language description of "
-        "what you are (as far as this session's context allows), that interaction here is JSON "
-        f"tool/answer messages, and the concrete tools available in this script ({tools}). "
-        "No preamble about whether web search is required."
-    )
+_tool_need_review_followup = routing_followups.tool_need_review_followup
+_is_self_capability_question = routing_followups.is_self_capability_question
+_self_capability_followup = routing_followups.self_capability_followup
 
 
 def _route_requires_websearch(
@@ -1628,68 +1450,31 @@ def _route_requires_websearch_after_answer(
 
 def _parse_context_messages_data(raw) -> list:
     """Normalize JSON (bundle dict or bare list) into Ollama-style message dicts."""
-    if isinstance(raw, dict) and isinstance(raw.get("messages"), list):
-        msgs = raw["messages"]
-    elif isinstance(raw, list):
-        msgs = raw
-    else:
-        raise ValueError("context must be a JSON array of messages or {\"messages\": [...]}")
-    out = []
-    for i, m in enumerate(msgs):
-        if not isinstance(m, dict):
-            continue
-        role = (m.get("role") or "").strip()
-        if role not in ("user", "assistant", "system"):
-            raise ValueError(f"message {i}: invalid role {role!r}")
-        content = m.get("content")
-        if content is None:
-            content = ""
-        elif not isinstance(content, str):
-            content = str(content)
-        out.append({"role": role, "content": content})
-    if not out:
-        raise ValueError("no valid messages in context file")
-    return out
+    return context_io.parse_context_messages_data(raw)
 
 
 def _load_context_messages(path: str) -> list:
     """Load a prior chat from JSON written by --save_context (or a bare list of {role, content})."""
-    p = _scalar_to_str(path, "").strip()
-    if not p:
-        raise ValueError("empty path")
-    with open(p, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    return _parse_context_messages_data(raw)
+    return context_io.load_context_messages(path, scalar_to_str_fn=_scalar_to_str)
 
 
 def _save_context_bundle(path: str, messages: list, user_query: str, final_answer: Optional[str], answered: bool):
     """Persist full message list plus the new question and final answer (if any)."""
-    p = _scalar_to_str(path, "").strip()
-    if not p:
-        raise ValueError("empty save path")
-    bundle = {
-        "version": 1,
-        "user_query": user_query,
-        "final_answer": final_answer,
-        "answered": answered,
-        "messages": messages,
-    }
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, indent=2, ensure_ascii=False)
+    context_io.save_context_bundle(
+        path,
+        messages,
+        user_query,
+        final_answer,
+        answered,
+        scalar_to_str_fn=_scalar_to_str,
+    )
 
 
 def _fetch_ollama_local_model_names():
     """Return sorted unique model names from GET /api/tags (local Ollama)."""
-    base = _ollama_base_url()
-    r = requests.get(f"{base}/api/tags", timeout=60)
-    r.raise_for_status()
-    data = r.json() or {}
-    names = []
-    for m in data.get("models") or []:
-        n = (m.get("name") or "").strip()
-        if n:
-            names.append(n)
-    return sorted(set(names))
+    return _fetch_ollama_local_model_names_impl(
+        _ollama_base_url(), http_get=requests.get, timeout=60
+    )
 
 
 def _runner_instruction_bits(
@@ -1749,139 +1534,16 @@ def _interactive_turn_user_message(
     )
 
 
-_WHILE_JUDGE_SYSTEM = (
-    "You are a strict boolean judge for a /while command in a coding assistant.\n"
-    "The human gave a natural-language /while CONDITION (like C: while (CONDITION) { body }).\n"
-    "Decide whether that CONDITION is TRUE or FALSE right now, using ONLY the conversation excerpt below.\n"
-    "Reply with EXACTLY one character and nothing else: 0 or 1.\n"
-    "Meaning (must follow this mapping):\n"
-    "- 1 = the condition is TRUE — the /while should KEEP GOING (run the `do` body, then re-check).\n"
-    "- 0 = the condition is FALSE — the /while should EXIT (do not run the body; stop the loop).\n"
-    "Do not output markdown, words, explanations, or whitespace around the digit."
-)
-
-
 def _while_conversation_excerpt_for_judge(messages: list, max_chars: int = 12000) -> str:
     """Compact transcript text for condition judging (truncate per message)."""
-    if not messages:
-        return "(empty conversation)"
-    chunks: list[str] = []
-    remaining = max_chars
-    per_cap = max(400, max_chars // max(6, len(messages)))
-    for m in messages[-40:]:
-        role = str((m or {}).get("role") or "?")
-        content = _scalar_to_str((m or {}).get("content"), "")[:per_cap]
-        piece = f"[{role}]:\n{content}"
-        if len(piece) > remaining:
-            piece = piece[: max(0, remaining - 1)] + "…"
-        chunks.append(piece)
-        remaining -= len(piece) + 2
-        if remaining <= 0:
-            break
-    body = "\n\n".join(chunks)
-    if len(body) > max_chars:
-        body = body[: max_chars - 1] + "…"
-    return body
+    return repl_while_cmd.while_conversation_excerpt_for_judge(
+        messages, max_chars, scalar_to_str_fn=_scalar_to_str
+    )
 
 
-def _parse_while_judge_bit(text: str) -> int:
-    """Extract first 0 or 1 from model output; default 0 (false / exit) if ambiguous."""
-    t = (text or "").strip()
-    if not t:
-        return 0
-    # Prefer first line / first alphanumeric scan
-    for chunk in (t.splitlines()[0], t):
-        for c in chunk.strip():
-            if c == "1":
-                return 1
-            if c == "0":
-                return 0
-    return 0
-
-
-def _post_do_tokens_to_body_prompts(post_do_tokens: list[str]) -> list[str]:
-    """
-    Build prompt strings after `do`. Commas separate prompts.
-
-    shlex often attaches a comma to the previous token (`"p1", "p2"` -> `p1,`, `p2`).
-    Split those so comma becomes its own delimiter between prompts.
-    """
-    expanded: list[str] = []
-    for t in post_do_tokens:
-        s = str(t)
-        while s.endswith(","):
-            core = s[:-1].strip()
-            if core:
-                expanded.append(core)
-            expanded.append(",")
-            s = ""
-        if s.strip():
-            expanded.append(s.strip())
-    groups: list[list[str]] = []
-    cur: list[str] = []
-    for t in expanded:
-        if t == ",":
-            groups.append(cur)
-            cur = []
-        else:
-            cur.append(t)
-    groups.append(cur)
-    prompts: list[str] = []
-    for g in groups:
-        if not g:
-            continue
-        if len(g) != 1:
-            raise ValueError(
-                "each /while body prompt must be one quoted phrase; separate prompts with commas "
-                '(example: /while "c" do "step one", "step two")'
-            )
-        prompts.append(g[0])
-    if not prompts:
-        raise ValueError("missing body prompts after do")
-    return prompts
-
-
-def _parse_while_repl_tokens(toks: list[str]) -> Tuple[int, str, list[str]]:
-    """
-    Parse shlex tokens after splitting the full REPL line.
-    Expected: ['/while', optional --max N, ...condition..., 'do', ...body tokens...]
-    Body: one or more comma-separated quoted prompts (space before comma optional).
-    """
-    if not toks or toks[0].lower() != "/while":
-        raise ValueError("internal: not a /while command")
-    i = 1
-    max_iter = 50
-    if i + 1 < len(toks) and toks[i] == "--max":
-        try:
-            max_iter = int(toks[i + 1], 10)
-        except (ValueError, TypeError) as e:
-            raise ValueError("--max must be followed by a positive integer") from e
-        if max_iter < 1:
-            raise ValueError("--max must be at least 1")
-        i += 2
-    rest = toks[i:]
-    if len(rest) < 3:
-        raise ValueError("missing condition, 'do', or body")
-    do_idx = None
-    for j, t in enumerate(rest):
-        if str(t).lower() == "do":
-            do_idx = j
-            break
-    if do_idx is None:
-        raise ValueError(
-            "missing literal 'do' between condition and body "
-            '(example: /while \"tests still failing\" do \"fix failures and rerun\")'
-        )
-    if do_idx == 0 or do_idx >= len(rest) - 1:
-        raise ValueError("condition and body must be non-empty")
-    condition = " ".join(rest[:do_idx]).strip()
-    post_do = rest[do_idx + 1 :]
-    if not post_do:
-        raise ValueError("missing body after do")
-    if not condition:
-        raise ValueError("condition must be non-empty")
-    body_prompts = _post_do_tokens_to_body_prompts(post_do)
-    return max_iter, condition, body_prompts
+_parse_while_judge_bit = repl_while_cmd.parse_while_judge_bit
+_post_do_tokens_to_body_prompts = repl_while_cmd.post_do_tokens_to_body_prompts
+_parse_while_repl_tokens = repl_while_cmd.parse_while_repl_tokens
 
 
 def _call_while_condition_judge(
@@ -1891,30 +1553,17 @@ def _call_while_condition_judge(
     primary_profile: Optional[LlmProfile],
     verbose: int,
 ) -> int:
-    excerpt = _while_conversation_excerpt_for_judge(messages)
-    user_body = (
-        "Evaluate this /while CONDITION as TRUE or FALSE right now "
-        "(reply 1 if TRUE — keep looping; 0 if FALSE — exit):\n"
-        f"{condition}\n\n"
-        "--- Conversation excerpt (may be truncated) ---\n"
-        f"{excerpt}"
+    return repl_while_cmd.call_while_condition_judge(
+        condition,
+        messages,
+        primary_profile=primary_profile,
+        verbose=verbose,
+        default_primary_llm_profile=default_primary_llm_profile,
+        call_hosted_chat_plain=call_hosted_chat_plain,
+        call_ollama_plaintext=call_ollama_plaintext,
+        ollama_model=_ollama_model(),
+        scalar_to_str_fn=_scalar_to_str,
     )
-    judge_msgs = [
-        {"role": "system", "content": _WHILE_JUDGE_SYSTEM},
-        {"role": "user", "content": user_body},
-    ]
-    prof = primary_profile or default_primary_llm_profile()
-    if prof.backend == "hosted":
-        raw = call_hosted_chat_plain(judge_msgs, prof)
-    else:
-        raw = call_ollama_plaintext(judge_msgs, _ollama_model())
-    bit = _parse_while_judge_bit(raw)
-    if verbose >= 1:
-        preview = (raw or "").replace("\n", " ").strip()
-        if len(preview) > 200:
-            preview = preview[:199] + "…"
-        print(f"[/while judge] model={prof.backend!r} raw={preview!r} -> {bit}")
-    return bit
 
 
 _SKILL_HELP_TEXT = (
@@ -2031,338 +1680,6 @@ def _interactive_repl(
         set(enabled_tools) if enabled_tools is not None else set(_CORE_TOOLS)
     )
     enabled_toolsets = set(enabled_toolsets) if enabled_toolsets is not None else set()
-    prim_line = _format_session_primary_llm_line(primary_profile)
-    rev_line = _format_session_reviewer_line(
-        reviewer_hosted_profile, reviewer_ollama_model
-    )
-    # Keep startup minimal; /help and /show can reveal details.
-    _interactive_repl_install_readline()
-    print("Interactive mode. Type /help for commands.")
-    messages: list = []
-    last_reuse_skill_id: Optional[str] = None
-
-    def repl_run_with_selected_skill(
-        req: str, sid: str, *, source: str, selection_rationale: str
-    ) -> None:
-        nonlocal last_reuse_skill_id
-        last_reuse_skill_id = sid
-        src = (source or "").strip().lower()
-        if src == "reuse":
-            _agent_progress("/skill reuse: using stored skill; starting…")
-        elif src == "explicit":
-            _agent_progress("/skill: explicit skill selected; starting…")
-        else:
-            _agent_progress("/skill auto: skill selected; starting…")
-        et_turn0 = _effective_enabled_tools_for_skill(
-            frozenset(enabled_tools), skills_m, sid
-        )
-        et_turn = _effective_enabled_tools_for_turn(
-            base_enabled_tools=et_turn0,
-            enabled_toolsets=enabled_toolsets,
-            user_query=req,
-        )
-        rec = skills_m.get(sid) or {}
-        skill_prompt = (rec.get("prompt") or "").strip() if isinstance(rec, dict) else ""
-        if src == "reuse":
-            print(
-                f"/skill reuse: using skill {sid!r} (model skill selection skipped). "
-                f"{selection_rationale}".strip()
-            )
-        elif src == "explicit":
-            print(f"/skill: using skill {sid!r}. {selection_rationale}".strip())
-        else:
-            print(f"/skill auto selected {sid!r}. {selection_rationale}".strip())
-        if verbose >= 1:
-            _print_skill_usage_verbose(
-                verbose,
-                source=f"skill_{src or 'auto'}",
-                skill_id=sid,
-                base_tools=enabled_tools,
-                effective_tools=et_turn,
-                detail=(
-                    "reuse: same skill id as last /skill auto|reuse|<id>"
-                    if src == "reuse"
-                    else (
-                        f"explicit skill id: {sid!r}"
-                        if src == "explicit"
-                        else f"model skill_id (not trigger): rationale={selection_rationale!r}"
-                    )
-                ),
-            )
-        today = datetime.date.today()
-        today_str = today.strftime("%Y-%m-%d (%A)")
-        deliverable_wanted = _user_wants_written_deliverable(req)
-        router_query = _route_requires_websearch(
-            req,
-            today_str,
-            primary_profile,
-            et_turn,
-            transcript_messages=messages,
-        )
-        if _deliverable_skip_mandatory_web(req):
-            router_query = None
-        web_required = bool(router_query)
-
-        steps, raw_plan = _skill_plan_steps(
-            user_request=req,
-            today_str=today_str,
-            skill_id=sid,
-            skills_map=skills_m,
-            primary_profile=primary_profile,
-            _enabled_tools=et_turn,
-            verbose=verbose,
-            _system_prompt_override=session_system_prompt,
-        )
-        if steps:
-            wf = ((rec.get("workflow") or {}) if isinstance(rec, dict) else {}) or {}
-            step_prompt = (wf.get("step_prompt") or "").strip()
-            print(f"Skill workflow: executing {len(steps)} step(s).", flush=True)
-            _agent_progress(f"Running {len(steps)}-step skill workflow…")
-            if verbose >= 1:
-                rp = raw_plan or ""
-                cap = 1200
-                preview = rp if len(rp) <= cap else rp[:cap] + "…"
-                print(f"[*] [skills:planner] raw ({len(rp)} chars): {preview}")
-            step_answers: list[str] = []
-            for i, st in enumerate(steps, start=1):
-                title = st.get("title") or f"step {i}"
-                details = st.get("details") or ""
-                success = st.get("success") or ""
-                step_user = (
-                    f"{req}\n\n"
-                    f"Step {i}/{len(steps)}: {title}\n"
-                    + (f"Details: {details}\n" if details else "")
-                    + (f"Success: {success}\n" if success else "")
-                    + ("\n" + step_prompt if step_prompt else "")
-                )
-                sid_step = sid
-                et_step = _effective_enabled_tools_for_skill(
-                    frozenset(enabled_tools), skills_m, sid_step
-                )
-                tit_one = (title or "")[:120]
-                if len(title or "") > 120:
-                    tit_one += "…"
-                _agent_progress(f"Workflow step {i}/{len(steps)}: {tit_one}")
-                if verbose >= 1:
-                    _print_skill_usage_verbose(
-                        verbose,
-                        source=f"workflow_step_{i}",
-                        skill_id=sid_step,
-                        base_tools=enabled_tools,
-                        effective_tools=et_step,
-                        detail=f"step {i}/{len(steps)}: {title!r}",
-                    )
-                sprompt0 = skill_prompt
-                turn_msg = _interactive_turn_user_message(
-                    step_user,
-                    today_str,
-                    second_opinion_on,
-                    cloud_ai_enabled,
-                    primary_profile=primary_profile,
-                    reviewer_ollama_model=reviewer_ollama_model,
-                    reviewer_hosted_profile=reviewer_hosted_profile,
-                    enabled_tools=et_step,
-                    system_instruction_override=session_system_prompt,
-                    skill_suffix=sprompt0,
-                )
-                messages.append({"role": "user", "content": turn_msg})
-                if router_query and "search_web" in et_step and i == 1:
-                    # If web is required, force web search only once at start of workflow.
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Before answering, you MUST call the tool search_web.\n"
-                                "Respond with JSON only in tool_call form.\n"
-                                f'Suggested query: "{router_query}"'
-                            ),
-                        }
-                    )
-                try:
-                    answered, final_answer = run_agent_conversation_turn(
-                        messages,
-                        step_user,
-                        today_str,
-                        _conversation_turn_deps(),
-                        web_required=web_required if i == 1 else False,
-                        deliverable_wanted=deliverable_wanted,
-                        verbose=verbose,
-                        second_opinion_enabled=second_opinion_on,
-                        cloud_ai_enabled=cloud_ai_enabled,
-                        primary_profile=primary_profile,
-                        reviewer_hosted_profile=reviewer_hosted_profile,
-                        reviewer_ollama_model=reviewer_ollama_model,
-                        enabled_tools=et_step,
-                        interactive_tool_recovery=True,
-                        context_cfg=context_cfg,
-                        print_answer=False,
-                    )
-                except KeyboardInterrupt:
-                    _agent_progress("Cancelled current request (Ctrl-C).")
-                    print("\n[Cancelled]\n")
-                    return
-                _agent_progress(f"Step {i}/{len(steps)} finished.")
-                if final_answer:
-                    step_answers.append(final_answer)
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": json.dumps(
-                                {"action": "answer", "answer": final_answer}
-                            ),
-                        }
-                    )
-            if step_answers:
-                # Print the final step answer as the visible output.
-                print(step_answers[-1])
-            return
-        if verbose >= 1:
-            wf0 = (rec.get("workflow") or {}) if isinstance(rec, dict) else {}
-            if isinstance(wf0, dict) and wf0:
-                rp = raw_plan or ""
-                cap = 1000
-                preview = rp if len(rp) <= cap else rp[:cap] + "…"
-                print(
-                    f"[*] [skills:planner] no parsed steps; single-turn fallback. "
-                    f"raw ({len(rp)} chars): {preview}"
-                )
-
-        # No workflow: run as a single normal turn with the selected skill.
-        _agent_progress("Running a single agent turn with the selected skill…")
-        turn_msg = _interactive_turn_user_message(
-            req,
-            today_str,
-            second_opinion_on,
-            cloud_ai_enabled,
-            primary_profile=primary_profile,
-            reviewer_ollama_model=reviewer_ollama_model,
-            reviewer_hosted_profile=reviewer_hosted_profile,
-            enabled_tools=et_turn,
-            system_instruction_override=session_system_prompt,
-            skill_suffix=skill_prompt,
-        )
-        messages.append({"role": "user", "content": turn_msg})
-        if router_query and "search_web" in et_turn:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Before answering, you MUST call the tool search_web.\n"
-                        "Respond with JSON only in tool_call form.\n"
-                        f'Suggested query: "{router_query}"'
-                    ),
-                }
-            )
-        try:
-            run_agent_conversation_turn(
-                messages,
-                req,
-                today_str,
-                _conversation_turn_deps(),
-                web_required=web_required,
-                deliverable_wanted=deliverable_wanted,
-                verbose=verbose,
-                second_opinion_enabled=second_opinion_on,
-                cloud_ai_enabled=cloud_ai_enabled,
-                primary_profile=primary_profile,
-                reviewer_hosted_profile=reviewer_hosted_profile,
-                reviewer_ollama_model=reviewer_ollama_model,
-                enabled_tools=et_turn,
-                interactive_tool_recovery=True,
-                context_cfg=context_cfg,
-            )
-        except KeyboardInterrupt:
-            _agent_progress("Cancelled current request (Ctrl-C).")
-            print("\n[Cancelled]\n")
-            return
-
-    def repl_run_normal_user_request(user_query: str) -> None:
-        """One normal REPL turn: append messages and run the agent loop."""
-        today = datetime.date.today()
-        today_str = today.strftime("%Y-%m-%d (%A)")
-        deliverable_wanted = _user_wants_written_deliverable(user_query)
-        sid0, tr0 = _match_skill_detail(user_query, skills_m)
-        et_turn0 = _effective_enabled_tools_for_skill(
-            frozenset(enabled_tools), skills_m, sid0
-        )
-        et_turn = _effective_enabled_tools_for_turn(
-            base_enabled_tools=et_turn0,
-            enabled_toolsets=enabled_toolsets,
-            user_query=user_query,
-        )
-        if verbose >= 1:
-            d0 = (
-                f"trigger match: longest substring {tr0!r} (skill {sid0!r})"
-                if sid0 and tr0
-                else "trigger match: no skill (no trigger substring matched)"
-            )
-            _print_skill_usage_verbose(
-                verbose,
-                source="repl",
-                skill_id=sid0,
-                base_tools=enabled_tools,
-                effective_tools=et_turn,
-                detail=d0,
-            )
-        sprompt0 = (skills_m.get(sid0) or {}).get("prompt") if sid0 else None
-        router_query = _route_requires_websearch(
-            user_query,
-            today_str,
-            primary_profile,
-            et_turn,
-            transcript_messages=messages,
-        )
-        if _deliverable_skip_mandatory_web(user_query):
-            router_query = None
-        web_required = bool(router_query)
-        turn_msg = _interactive_turn_user_message(
-            user_query,
-            today_str,
-            second_opinion_on,
-            cloud_ai_enabled,
-            primary_profile=primary_profile,
-            reviewer_ollama_model=reviewer_ollama_model,
-            reviewer_hosted_profile=reviewer_hosted_profile,
-            enabled_tools=et_turn,
-            system_instruction_override=session_system_prompt,
-            skill_suffix=sprompt0,
-        )
-        messages.append({"role": "user", "content": turn_msg})
-        if router_query and "search_web" in et_turn:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Before answering, you MUST call the tool search_web.\n"
-                        "Respond with JSON only in tool_call form.\n"
-                        f'Suggested query: "{router_query}"'
-                    ),
-                }
-            )
-        answered, final_answer = run_agent_conversation_turn(
-            messages,
-            user_query,
-            today_str,
-            _conversation_turn_deps(),
-            web_required=web_required,
-            deliverable_wanted=deliverable_wanted,
-            verbose=verbose,
-            second_opinion_enabled=second_opinion_on,
-            cloud_ai_enabled=cloud_ai_enabled,
-            primary_profile=primary_profile,
-            reviewer_hosted_profile=reviewer_hosted_profile,
-            reviewer_ollama_model=reviewer_ollama_model,
-            enabled_tools=et_turn,
-            interactive_tool_recovery=True,
-            context_cfg=context_cfg,
-        )
-        if session_save_path:
-            try:
-                _save_context_bundle(
-                    session_save_path, messages, user_query, final_answer, answered
-                )
-            except OSError as e:
-                print(f"Warning: could not save context: {e}", file=sys.stderr)
 
     from agentlib.session import AgentSession
 
@@ -2438,31 +1755,13 @@ def _interactive_repl(
         call_while_condition_judge=_call_while_condition_judge,
     )
 
-    while True:
-        try:
-            line = _repl_read_line("> ")
-        except EOFError:
-            print()
-            break
-        except KeyboardInterrupt:
-            # Ctrl-C at the prompt: cancel the current line, keep REPL alive.
-            print("\n[Cancelled]\n")
-            continue
-        s = line.strip()
-        if not s:
-            continue
-        try:
-            res = session.execute_line(s)
-        except KeyboardInterrupt:
-            _agent_progress("Cancelled current request (Ctrl-C).")
-            print("\n[Cancelled]\n")
-            continue
-        if res.quit:
-            break
-        if res.output:
-            print(res.output)
-
-    _flush_repl_readline_history()
+    run_interactive_repl_loop(
+        session,
+        install_readline=_interactive_repl_install_readline,
+        repl_read_line=_repl_read_line,
+        flush_repl_history=_flush_repl_readline_history,
+        agent_progress=_agent_progress,
+    )
 
 
 _CACHED_CONVERSATION_TURN_DEPS: Optional[ConversationTurnDeps] = None
