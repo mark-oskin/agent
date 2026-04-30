@@ -254,7 +254,7 @@ def _wikipedia_opensearch(query: str, result_limit: int = 5) -> str:
         return ""
 
 
-def _first_url_in_text(s: str) -> str:
+def first_url_in_text(s: str) -> str:
     if not s:
         return ""
     m = re.search(r"https?://\S+", s)
@@ -263,7 +263,7 @@ def _first_url_in_text(s: str) -> str:
 
 def wikipedia_top_page_extract(query: str, *, fetch_page: callable) -> str:
     listing = _wikipedia_opensearch(query)
-    url = _first_url_in_text(listing)
+    url = first_url_in_text(listing)
     if not url:
         return ""
     page = fetch_page(url)

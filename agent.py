@@ -13,8 +13,7 @@ import time
 import tempfile
 import datetime
 import warnings
-import html as html_module
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import AbstractSet, Callable, Optional, Tuple
 
 import importlib
@@ -36,7 +35,24 @@ import requests
 
 from agentlib import AgentSettings
 from agentlib import prefs as _prefs
+from agentlib.agent_json import AgentJsonDeps
+from agentlib import agent_json
+from agentlib import deliverables as _deliverables
+from agentlib import routing as _routing
 from agentlib.runtime import ConversationTurnDeps, run_agent_conversation_turn
+from agentlib.coercion import coerce_verbose_level as _coerce_verbose_level
+from agentlib.coercion import scalar_to_int as _scalar_to_int
+from agentlib.coercion import scalar_to_str as _scalar_to_str
+from agentlib.context.compaction import maybe_compact_context_window as _compact_context_window_impl
+from agentlib.context.compaction import summarize_conversation_for_context as _summarize_conversation_impl
+from agentlib.llm import streaming as llm_streaming
+from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
+from agentlib.llm.profile import llm_profile_from_pref as _llm_profile_from_pref
+from agentlib.llm.profile import llm_profile_to_pref as _llm_profile_to_pref
+from agentlib.prefs import bootstrap as prefs_bootstrap
+from agentlib.tools import turn_support
+from agentlib.tools.websearch import first_url_in_text as _first_url_in_text
+from agentlib.tools.websearch import search_backend_banner_line as _websearch_backend_banner_line
 
 # Module-global settings object (defaults until main() applies prefs/CLI).
 _SETTINGS_OBJ: AgentSettings = AgentSettings.defaults()
@@ -72,20 +88,6 @@ def _ollama_base_url():
 
 def _ollama_model():
     return _settings_get_str(("ollama", "model"), "gemma4:e4b")
-
-
-@dataclass
-class LlmProfile:
-    """Primary or reviewer endpoint: local Ollama or an OpenAI-compatible HTTPS API."""
-
-    backend: str  # "ollama" | "hosted"
-    base_url: str = ""
-    model: str = ""
-    api_key: str = ""
-
-
-def default_primary_llm_profile() -> LlmProfile:
-    return LlmProfile(backend="ollama")
 
 
 def _apply_cli_primary_model(name: str, profile: LlmProfile) -> LlmProfile:
@@ -346,56 +348,6 @@ def _print_cli_help() -> None:
         "Config:   persist Ollama / OpenAI / process options in ~/.agent.json via  /settings ollama|openai|agent  in the REPL "
         "(exporting variables still overrides the file for a one-off run).\n"
     )
-
-
-def _scalar_to_str(value, default=""):
-    """Coerce tool parameters to str (models may emit numbers, lists, etc.)."""
-    if value is None:
-        return default
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, (list, tuple)):
-        parts = [_scalar_to_str(x, "") for x in value]
-        parts = [p for p in parts if p]
-        return " ".join(parts) if parts else default
-    if isinstance(value, dict):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
-
-
-def _scalar_to_int(value, default):
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return default
-    return default
-
-
-def _coerce_verbose_level(v) -> int:
-    """0 = off, 1 = log tool invocations, 2 = log tools + stream model JSON (local Ollama)."""
-    if isinstance(v, bool):
-        return 2 if v else 0
-    if v is None:
-        return 0
-    n = _scalar_to_int(v, 0)
-    if n < 0:
-        return 0
-    if n > 2:
-        return 2
-    return n
 
 
 def _verbose_ack_message(level: int) -> str:
@@ -825,6 +777,26 @@ def _migrate_settings_groups_from_prefs(prefs: dict) -> None:
     _prefs.apply_prefs_to_settings(_SETTINGS_OBJ, prefs)
 
 
+def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
+    return prefs_bootstrap.session_defaults_from_prefs(
+        prefs,
+        migrate_prefs=_migrate_settings_groups_from_prefs,
+        settings=_SETTINGS_OBJ,
+        core_tools=_CORE_TOOLS,
+        plugin_toolsets=_PLUGIN_TOOLSETS,
+        normalize_tool_name=_normalize_tool_name,
+        merge_prompt_templates=_merge_prompt_templates,
+        load_skills_from_dir=_load_skills_from_dir,
+        resolved_prompt_templates_dir=_resolved_prompt_templates_dir,
+        resolved_skills_dir=_resolved_skills_dir,
+        resolved_tools_dir=_resolved_tools_dir,
+        default_prompt_templates_dir=_default_prompt_templates_dir,
+        default_skills_dir=_default_skills_dir,
+        load_plugin_toolsets=_load_plugin_toolsets,
+        register_tool_aliases=_register_tool_aliases,
+    )
+
+
 def _settings_group_keys_lines(group: str) -> str:
     return _SETTINGS_OBJ.group_keys_lines(group)
 
@@ -839,38 +811,6 @@ def _settings_group_set(group: str, raw_key: str, raw_value: str) -> str:
 
 def _settings_group_unset(group: str, raw_key: str) -> str:
     return _SETTINGS_OBJ.group_unset(group, raw_key)
-
-
-def _llm_profile_to_pref(profile: LlmProfile) -> dict:
-    if profile.backend != "hosted":
-        return {"backend": "ollama"}
-    d: dict = {
-        "backend": "hosted",
-        "base_url": profile.base_url,
-        "model": profile.model,
-    }
-    if (profile.api_key or "").strip():
-        d["api_key"] = profile.api_key.strip()
-    return d
-
-
-def _llm_profile_from_pref(obj: object) -> Optional[LlmProfile]:
-    if not isinstance(obj, dict):
-        return None
-    bk = _scalar_to_str(obj.get("backend"), "").strip().lower()
-    if bk == "ollama":
-        return LlmProfile(backend="ollama")
-    if bk != "hosted":
-        return None
-    bu = _scalar_to_str(obj.get("base_url"), "").strip().rstrip("/")
-    mod = _scalar_to_str(obj.get("model"), "").strip()
-    if not bu.startswith(("http://", "https://")) or not mod:
-        return None
-    prof = LlmProfile(backend="hosted", base_url=bu, model=mod)
-    ak = obj.get("api_key")
-    if isinstance(ak, str) and ak.strip():
-        prof.api_key = ak.strip()
-    return prof
 
 
 def _write_agent_prefs_file(payload: dict) -> None:
@@ -897,173 +837,28 @@ def _build_agent_prefs_payload(
     context_manager: Optional[dict] = None,
     verbose_level: int = 0,
 ) -> dict:
-    payload: dict = {
-        "version": _AGENT_PREFS_VERSION,
-        "second_opinion_enabled": bool(second_opinion_on),
-        "cloud_ai_enabled": bool(cloud_ai_enabled),
-        "verbose": _coerce_verbose_level(verbose_level),
-        "primary_llm": _llm_profile_to_pref(primary_profile),
-        "enabled_tools": sorted(enabled_tools)
-        if len(enabled_tools) < len(_CORE_TOOLS)
-        else None,
-    }
-    # Persist JSON-backed settings groups (lowercase keys).
-    payload.update(_SETTINGS_OBJ.as_groups_dict())
-    if reviewer_hosted_profile is not None and reviewer_hosted_profile.backend == "hosted":
-        payload["second_opinion_reviewer"] = _llm_profile_to_pref(reviewer_hosted_profile)
-    else:
-        rev: dict = {"backend": "ollama"}
-        if reviewer_ollama_model and str(reviewer_ollama_model).strip():
-            rev["ollama_model"] = str(reviewer_ollama_model).strip()
-        payload["second_opinion_reviewer"] = rev
-    if session_save_path and str(session_save_path).strip():
-        payload["save_context_path"] = str(session_save_path).strip()
-    payload["system_prompt"] = None
-    payload["system_prompt_path"] = None
-    spp = (system_prompt_path_override or "").strip()
-    if spp:
-        payload["system_prompt_path"] = os.path.abspath(os.path.expanduser(spp))
-    elif system_prompt_override is not None and str(system_prompt_override).strip():
-        payload["system_prompt"] = str(system_prompt_override)
-    if prompt_templates is not None:
-        payload["prompt_templates"] = prompt_templates
-    if prompt_template_default is not None:
-        payload["prompt_template_default"] = str(prompt_template_default).strip() or None
-    ptd = (prompt_templates_dir or "").strip()
-    if ptd:
-        payload["prompt_templates_dir"] = os.path.abspath(os.path.expanduser(ptd))
-    skd = (skills_dir or "").strip()
-    if skd:
-        payload["skills_dir"] = os.path.abspath(os.path.expanduser(skd))
-    tld = (tools_dir or "").strip()
-    if tld:
-        payload["tools_dir"] = os.path.abspath(os.path.expanduser(tld))
-    if context_manager is not None:
-        payload["context_manager"] = context_manager
-    ets = {str(x).strip().lower() for x in (enabled_toolsets or set()) if str(x).strip()}
-    ets = {x for x in ets if x in _PLUGIN_TOOLSETS}
-    payload["enabled_toolsets"] = sorted(ets) if ets else None
-    return payload
-
-
-def _session_defaults_from_prefs(prefs: Optional[dict]) -> dict:
-    if isinstance(prefs, dict):
-        _migrate_settings_groups_from_prefs(prefs)
-    # Ensure plugin toolsets are loaded from the resolved tools_dir for this prefs object.
-    try:
-        _load_plugin_toolsets(_resolved_tools_dir(prefs))
-        _register_tool_aliases()
-    except Exception:
-        pass
-    _pt = _default_prompt_templates_dir()
-    _sk = _default_skills_dir()
-    out = {
-        "enabled_tools": set(_CORE_TOOLS),
-        "enabled_toolsets": set(),
-        "second_opinion_enabled": False,
-        "cloud_ai_enabled": False,
-        "verbose": 0,
-        "primary_profile": default_primary_llm_profile(),
-        "reviewer_hosted_profile": None,
-        "reviewer_ollama_model": None,
-        "save_context_path": None,
-        "system_prompt": None,
-        "system_prompt_path": None,
-        "prompt_templates_dir": _pt,
-        "skills_dir": _sk,
-        "tools_dir": _resolved_tools_dir(prefs),
-        "prompt_templates": _merge_prompt_templates(None),
-        "skills": _load_skills_from_dir(_resolved_skills_dir(None)),
-        "prompt_template_default": "coding",
-        "context_manager": {
-            "enabled": True,
-            "tokens": 0,
-            "trigger_frac": 0.75,
-            "target_frac": 0.55,
-            "keep_tail_messages": 12,
-        },
-    }
-    if not prefs or not isinstance(prefs, dict):
-        return out
-    ver = _scalar_to_int(prefs.get("version"), _AGENT_PREFS_VERSION)
-    if ver > _AGENT_PREFS_VERSION:
-        return out
-    if isinstance(prefs.get("second_opinion_enabled"), bool):
-        out["second_opinion_enabled"] = prefs["second_opinion_enabled"]
-    if isinstance(prefs.get("cloud_ai_enabled"), bool):
-        out["cloud_ai_enabled"] = prefs["cloud_ai_enabled"]
-    if "verbose" in prefs:
-        out["verbose"] = _coerce_verbose_level(prefs.get("verbose"))
-    pl = prefs.get("primary_llm")
-    if isinstance(pl, dict):
-        pp = _llm_profile_from_pref(pl)
-        if pp:
-            out["primary_profile"] = pp
-    raw_et = prefs.get("enabled_tools")
-    if isinstance(raw_et, list):
-        et = set()
-        for t in raw_et:
-            tn = _normalize_tool_name(str(t))
-            if tn:
-                et.add(tn)
-        if et:
-            out["enabled_tools"] = et
-    raw_ts = prefs.get("enabled_toolsets")
-    if isinstance(raw_ts, list):
-        ts: set[str] = set()
-        for one in raw_ts:
-            nm = str(one).strip().lower()
-            if nm and nm in _PLUGIN_TOOLSETS:
-                ts.add(nm)
-        out["enabled_toolsets"] = ts
-    rev = prefs.get("second_opinion_reviewer")
-    if isinstance(rev, dict):
-        rb = _scalar_to_str(rev.get("backend"), "").strip().lower()
-        if rb == "hosted":
-            hp = _llm_profile_from_pref(rev)
-            if hp and hp.backend == "hosted":
-                out["reviewer_hosted_profile"] = hp
-                out["reviewer_ollama_model"] = None
-        elif rb == "ollama":
-            out["reviewer_hosted_profile"] = None
-            rom = rev.get("ollama_model")
-            if isinstance(rom, str) and rom.strip():
-                out["reviewer_ollama_model"] = rom.strip()
-            else:
-                out["reviewer_ollama_model"] = None
-    scp = prefs.get("save_context_path")
-    if isinstance(scp, str) and scp.strip():
-        out["save_context_path"] = scp.strip()
-    spp = prefs.get("system_prompt_path")
-    if isinstance(spp, str) and spp.strip():
-        path = os.path.expanduser(spp.strip())
-        out["system_prompt_path"] = path
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                out["system_prompt"] = f.read()
-        except OSError:
-            out["system_prompt"] = None
-            out["system_prompt_path"] = None
-    elif isinstance(prefs.get("system_prompt"), str):
-        sp = prefs["system_prompt"]
-        if sp.strip():
-            out["system_prompt"] = sp
-    out["prompt_templates_dir"] = _resolved_prompt_templates_dir(prefs)
-    out["skills_dir"] = _resolved_skills_dir(prefs)
-    out["prompt_templates"] = _merge_prompt_templates(prefs)
-    out["skills"] = _load_skills_from_dir(out["skills_dir"])
-    out["tools_dir"] = _resolved_tools_dir(prefs)
-    ptd = prefs.get("prompt_template_default")
-    if isinstance(ptd, str) and ptd.strip():
-        out["prompt_template_default"] = ptd.strip()
-    cm = prefs.get("context_manager")
-    if isinstance(cm, dict):
-        merged = dict(out["context_manager"])
-        for k in ("enabled", "tokens", "trigger_frac", "target_frac", "keep_tail_messages"):
-            if k in cm:
-                merged[k] = cm[k]
-        out["context_manager"] = merged
-    return out
+    return prefs_bootstrap.build_agent_prefs_payload(
+        settings=_SETTINGS_OBJ,
+        primary_profile=primary_profile,
+        second_opinion_on=second_opinion_on,
+        cloud_ai_enabled=cloud_ai_enabled,
+        enabled_tools=enabled_tools,
+        core_tools=_CORE_TOOLS,
+        plugin_toolsets=_PLUGIN_TOOLSETS,
+        reviewer_hosted_profile=reviewer_hosted_profile,
+        reviewer_ollama_model=reviewer_ollama_model,
+        session_save_path=session_save_path,
+        system_prompt_override=system_prompt_override,
+        system_prompt_path_override=system_prompt_path_override,
+        prompt_templates=prompt_templates,
+        prompt_template_default=prompt_template_default,
+        prompt_templates_dir=prompt_templates_dir,
+        skills_dir=skills_dir,
+        tools_dir=tools_dir,
+        context_manager=context_manager,
+        verbose_level=verbose_level,
+        enabled_toolsets=enabled_toolsets,
+    )
 
 
 def _default_search_web_max_results() -> int:
@@ -1086,78 +881,57 @@ def _search_web_effective_max_results(params: object) -> int:
 
 def _merge_tool_param_aliases(tool: str, params: dict) -> dict:
     """Map alternate parameter names models use into the keys our tools expect."""
-    p = dict(params) if isinstance(params, dict) else {}
-    if tool == "search_web":
-        if not _scalar_to_str(p.get("query"), "").strip():
-            for alt in ("q", "search", "keywords", "keyword", "text"):
-                t = _scalar_to_str(p.get(alt), "").strip()
-                if t:
-                    p["query"] = t
-                    p.pop(alt, None)
-                    break
-    elif tool == "fetch_page":
-        if not _scalar_to_str(p.get("url"), "").strip():
-            for alt in ("href", "link", "uri"):
-                t = _scalar_to_str(p.get(alt), "").strip()
-                if t:
-                    p["url"] = t
-                    p.pop(alt, None)
-                    break
-    elif tool == "run_command":
-        if not _scalar_to_str(p.get("command"), "").strip():
-            for alt in ("cmd", "shell", "line"):
-                t = _scalar_to_str(p.get(alt), "").strip()
-                if t:
-                    p["command"] = t
-                    p.pop(alt, None)
-                    break
-    elif tool == "use_git":
-        if not _scalar_to_str(p.get("op"), "").strip():
-            for alt in ("operation", "git_op", "subcommand", "sub_cmd"):
-                t = _scalar_to_str(p.get(alt), "").strip()
-                if t:
-                    p["op"] = t
-                    p.pop(alt, None)
-                    break
-        if not _scalar_to_str(p.get("worktree"), "").strip():
-            for alt in ("cwd", "repo", "work_tree", "path_root"):
-                t = _scalar_to_str(p.get(alt), "").strip()
-                if t:
-                    p["worktree"] = t
-                    p.pop(alt, None)
-                    break
-        if not _scalar_to_str(p.get("message"), "").strip():
-            for alt in ("m", "msg", "commit_message"):
-                t = _scalar_to_str(p.get(alt), "").strip()
-                if t:
-                    p["message"] = t
-                    p.pop(alt, None)
-                    break
-        if p.get("paths") is None:
-            for alt in ("files", "file", "file_paths"):
-                if p.get(alt) is not None:
-                    p["paths"] = p.get(alt)
-                    p.pop(alt, None)
-                    break
-    elif tool == "write_file":
-        if not _scalar_to_str(p.get("content"), "").strip():
-            for alt in ("body", "text", "contents", "data"):
-                t = _scalar_to_str(p.get(alt), "").strip()
-                if t:
-                    p["content"] = t
-                    p.pop(alt, None)
-                    break
-    return p
+    return turn_support.merge_tool_param_aliases(tool, params, scalar_to_str_fn=_scalar_to_str)
+
+
+_CACHED_AGENT_JSON_DEPS: Optional[AgentJsonDeps] = None
+
+
+def _agent_json_deps() -> AgentJsonDeps:
+    global _CACHED_AGENT_JSON_DEPS
+    if _CACHED_AGENT_JSON_DEPS is None:
+        _CACHED_AGENT_JSON_DEPS = AgentJsonDeps(
+            all_known_tools=_all_known_tools,
+            coerce_enabled_tools=_coerce_enabled_tools,
+            merge_tool_param_aliases=_merge_tool_param_aliases,
+        )
+    return _CACHED_AGENT_JSON_DEPS
+
+
+def parse_agent_json(resp_text):
+    return agent_json.parse_agent_json(resp_text, _agent_json_deps())
+
+
+def _message_to_agent_json_text(msg, enabled_tools=None):
+    return agent_json.message_to_agent_json_text(msg, enabled_tools, _agent_json_deps())
+
+
+def _extract_json_object_from_text(text: str) -> Optional[str]:
+    return agent_json.extract_json_object_from_text(text, _agent_json_deps())
+
+
+_iter_balanced_brace_objects = agent_json.iter_balanced_brace_objects
+_try_json_loads_object = agent_json.try_json_loads_object
+_tool_call_to_agent_dict = agent_json.tool_call_to_agent_dict
+_parse_tool_arguments = agent_json.parse_tool_arguments
+clean_json_response = agent_json.clean_json_response
+
+
+_user_wants_written_deliverable = _deliverables.user_wants_written_deliverable
+_deliverable_skip_mandatory_web = _deliverables.deliverable_skip_mandatory_web
+_answer_missing_written_body = _deliverables.answer_missing_written_body
+_deliverable_first_answer_followup = _deliverables.deliverable_first_answer_followup
+
+
+def _deliverable_followup_block(path: str) -> str:
+    return _deliverables.deliverable_followup_block(path, _scalar_to_str)
 
 
 def _ensure_tool_defaults(tool: str, params: dict, user_query: str) -> dict:
     """Fill required parameters when the model emits an empty object."""
-    p = dict(params) if isinstance(params, dict) else {}
-    uq = (user_query or "").strip()
-    if tool == "search_web":
-        if not _scalar_to_str(p.get("query"), "").strip():
-            p["query"] = uq if uq else "web search"
-    return p
+    return turn_support.ensure_tool_defaults(
+        tool, params, user_query, scalar_to_str_fn=_scalar_to_str
+    )
 
 
 def _enrich_search_query_for_present_day(query: str) -> str:
@@ -1166,80 +940,8 @@ def _enrich_search_query_for_present_day(query: str) -> str:
     return enrich_search_query_for_present_day(query, settings=_SETTINGS_OBJ)
 
 
-def _merge_tool_arguments_delta(old_a, new_a):
-    """Combine streamed `arguments` chunks without duplicating full JSON objects."""
-    if old_a is None:
-        return new_a
-    if new_a is None:
-        return old_a
-    if isinstance(old_a, dict) and isinstance(new_a, dict):
-        return {**old_a, **new_a}
-    if isinstance(old_a, str) and isinstance(new_a, str):
-        o, n = old_a.strip(), new_a.strip()
-        if not o:
-            return new_a
-        if not n:
-            return old_a
-        merged = old_a + new_a
-        for cand in (merged, new_a, old_a):
-            try:
-                json.loads(cand)
-                return cand
-            except json.JSONDecodeError:
-                continue
-        return merged
-    if isinstance(new_a, dict):
-        return new_a
-    return old_a
-
-
-def _merge_partial_tool_calls(prev, new):
-    """Merge streaming tool_call fragments (Ollama/OpenAI-style deltas)."""
-    if not new:
-        return prev or []
-    if not prev:
-        return new
-    by_idx = {}
-    for tc in prev:
-        i = tc.get("index", 0)
-        by_idx[i] = tc
-    for tc in new:
-        i = tc.get("index", 0)
-        if i not in by_idx:
-            by_idx[i] = tc
-            continue
-        old = by_idx[i]
-        fn_old = (old.get("function") or {}) if isinstance(old.get("function"), dict) else {}
-        fn_new = (tc.get("function") or {}) if isinstance(tc.get("function"), dict) else {}
-        name = (fn_new.get("name") or fn_old.get("name") or "").strip()
-        merged_args = _merge_tool_arguments_delta(fn_old.get("arguments"), fn_new.get("arguments"))
-        by_idx[i] = {
-            **old,
-            **tc,
-            "function": {
-                **fn_old,
-                **fn_new,
-                "name": name,
-                "arguments": merged_args,
-            },
-        }
-    return [by_idx[k] for k in sorted(by_idx.keys())]
-
-
-def _ollama_usage_from_chat_response(data: dict) -> Optional[dict]:
-    """Extract token/duration stats Ollama includes on /api/chat (esp. final stream chunk)."""
-    if not isinstance(data, dict):
-        return None
-    out: dict = {}
-    for k in ("prompt_eval_count", "eval_count"):
-        v = data.get(k)
-        if isinstance(v, int) and v >= 0:
-            out[k] = v
-    for k in ("total_duration", "load_duration", "prompt_eval_duration", "eval_duration"):
-        v = data.get(k)
-        if isinstance(v, int) and v >= 0:
-            out[k] = v
-    return out or None
+_ollama_usage_from_chat_response = llm_streaming.ollama_usage_from_chat_response
+_merge_partial_tool_calls = llm_streaming.merge_partial_tool_calls
 
 
 def _ollama_eval_generation_tok_per_sec(usage: dict) -> Optional[float]:
@@ -1293,419 +995,23 @@ def _format_last_ollama_usage_for_repl() -> str:
 
 
 def _merge_stream_message_chunks(lines_iter, *, stream_chunks: bool = False):
-    """Merge streaming /api/chat chunks into one assistant message dict + final usage dict.
-
-    When ``stream_chunks`` is True, prints each ``message.content`` delta as it arrives (the raw JSON
-    string fragments Ollama streams for ``format: json``). Returns whether any content was printed.
-    """
-    acc = {"role": "assistant", "content": "", "thinking": ""}
-    tool_calls = None
-    usage: Optional[dict] = None
-    streamed_content = False
-    show_thinking = _agent_stream_thinking_enabled()
-    thinking_started = False
-    done_thinking_banner_printed = False
-    for line in lines_iter:
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg = data.get("message") or {}
-        if msg.get("content"):
-            chunk = msg["content"]
-            if show_thinking and thinking_started and not done_thinking_banner_printed:
-                # Make the transition visually obvious: thinking ended and content began.
-                print("\n\n[Done thinking]\n", end="", flush=True)
-                done_thinking_banner_printed = True
-            if stream_chunks:
-                print(chunk, end="", flush=True)
-                streamed_content = True
-            acc["content"] += chunk
-        if msg.get("thinking"):
-            tchunk = msg["thinking"]
-            acc["thinking"] += tchunk
-            if show_thinking:
-                if not thinking_started:
-                    print("\n[Thinking]\n", end="", flush=True)
-                    thinking_started = True
-                print(tchunk, end="", flush=True)
-        if msg.get("tool_calls"):
-            tool_calls = _merge_partial_tool_calls(tool_calls, msg["tool_calls"])
-        if data.get("done"):
-            u = _ollama_usage_from_chat_response(data)
-            if u:
-                usage = u
-            break
-    if tool_calls is not None:
-        acc["tool_calls"] = tool_calls
-    return acc, usage, streamed_content
-
-
-def _parse_tool_arguments(arguments):
-    """Normalize tool `arguments` from Ollama (str, dict, or malformed JSON)."""
-    if arguments is None:
-        return {}
-    if isinstance(arguments, dict):
-        return dict(arguments)
-    if isinstance(arguments, str):
-        s = arguments.strip()
-        if not s:
-            return {}
-        try:
-            parsed = json.loads(s)
-            return dict(parsed) if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            pass
-        # Trailing commas / truncated fragments
-        for fix in (s, re.sub(r",\s*}", "}", s), re.sub(r",\s*]", "]", s)):
-            try:
-                parsed = json.loads(fix)
-                return dict(parsed) if isinstance(parsed, dict) else {}
-            except json.JSONDecodeError:
-                continue
-        # Single quotes used like Python dict (best-effort)
-        if "'" in s and '"' not in s:
-            try:
-                parsed = json.loads(s.replace("'", '"'))
-                return dict(parsed) if isinstance(parsed, dict) else {}
-            except json.JSONDecodeError:
-                pass
-    return {}
-
-
-def _tool_call_to_agent_dict(function_name: str, arguments):
-    """Map Ollama native tool_calls to our agent JSON shape."""
-    raw = _parse_tool_arguments(arguments)
-    if not raw:
-        raw = {}
-    if raw.get("action") == "tool_call" and raw.get("tool"):
-        return {
-            "action": "tool_call",
-            "tool": raw["tool"],
-            "parameters": raw.get("parameters") or {},
-        }
-    name = (function_name or "").strip()
-    if name == "tool_call" and raw.get("tool"):
-        return {
-            "action": "tool_call",
-            "tool": raw["tool"],
-            "parameters": raw.get("parameters") or {},
-        }
-    params = dict(raw)
-    if name.startswith("tool."):
-        tool = name.split(".", 1)[1]
-    elif name.startswith("functions.") or name.startswith("function."):
-        tool = name.split(".", 1)[1]
-    else:
-        tool = name or "unknown"
-    if "filename" in params and "path" not in params:
-        params["path"] = params.pop("filename")
-    return {"action": "tool_call", "tool": tool, "parameters": params}
-
-
-def _tool_calls_to_agent_json_text(
-    tool_calls, enabled_tools: Optional[AbstractSet[str]] = None
-) -> Optional[str]:
-    """Pick the first native tool_call that maps to a known, session-enabled tool."""
-    et = _coerce_enabled_tools(enabled_tools)
-    if not tool_calls:
-        return None
-    for tc in tool_calls:
-        fn = tc.get("function") or {}
-        name = fn.get("name") or ""
-        args = fn.get("arguments")
-        mapped = _tool_call_to_agent_dict(name, args)
-        t = mapped.get("tool") if mapped else None
-        if mapped and t in _all_known_tools() and t in et:
-            return json.dumps(mapped)
-    return None
-
-
-def _iter_balanced_brace_objects(text: str):
-    """Yield `{...}` spans with brace depth matching outside of JSON strings (double-quoted)."""
-    depth = 0
-    start = -1
-    in_str = False
-    escape = False
-    for i, c in enumerate(text):
-        if escape:
-            escape = False
-            continue
-        if in_str:
-            if c == "\\":
-                escape = True
-            elif c == '"':
-                in_str = False
-            continue
-        if c == '"':
-            in_str = True
-            continue
-        if c == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif c == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    yield text[start : i + 1]
-                    start = -1
-
-
-def _normalize_unicode_json_quotes(s: str) -> str:
-    """Map common Unicode “smart” double quotes to ASCII so delimiters parse as JSON."""
-    if not s:
-        return s
-    trans = str.maketrans(
-        {
-            "\u201c": '"',
-            "\u201d": '"',
-            "\u201e": '"',
-            "\u2033": '"',
-            "\uff02": '"',
-        }
+    """Merge streaming /api/chat chunks into one assistant message dict + final usage dict."""
+    return llm_streaming.merge_stream_message_chunks(
+        lines_iter,
+        stream_chunks=stream_chunks,
+        agent_stream_thinking_enabled=_agent_stream_thinking_enabled,
+        ollama_usage_from_chat_response_fn=_ollama_usage_from_chat_response,
     )
-    return s.translate(trans)
-
-
-def _escape_controls_inside_json_strings(s: str) -> str:
-    """
-    RFC 8259 forbids literal ASCII control characters inside JSON strings.
-    Many LLMs emit literal newlines/tabs inside \"answer\" values anyway — escape them so json.loads succeeds.
-    Tracks double-quoted regions using the same rules as _iter_balanced_brace_objects.
-    """
-    if not s:
-        return s
-    out: list[str] = []
-    in_str = False
-    escape = False
-    for c in s:
-        if escape:
-            escape = False
-            out.append(c)
-            continue
-        if in_str:
-            if c == "\\":
-                escape = True
-                out.append(c)
-                continue
-            if c == '"':
-                in_str = False
-                out.append(c)
-                continue
-            o = ord(c)
-            if o < 32:
-                if c == "\n":
-                    out.append("\\n")
-                elif c == "\r":
-                    out.append("\\r")
-                elif c == "\t":
-                    out.append("\\t")
-                elif c == "\f":
-                    out.append("\\f")
-                elif c == "\b":
-                    out.append("\\b")
-                else:
-                    out.append("\\u%04x" % o)
-                continue
-            out.append(c)
-            continue
-        if c == '"':
-            in_str = True
-        out.append(c)
-    return "".join(out)
-
-
-def _fallback_extract_answer_field(raw: str) -> Optional[str]:
-    """
-    Last resort when JSON is too broken to parse: scan for \"answer\"\\s*:\\s*\" and read a
-    double-quoted string with standard JSON-style escapes (handles embedded quotes and newlines badly; good enough).
-    """
-    text = _normalize_unicode_json_quotes(raw.strip())
-    # Avoid scraping unrelated JSON fragments that mention "answer" as a word or nested keys.
-    if not re.search(r'"action"\s*:\s*"answer"', text):
-        return None
-    m = re.search(r'"answer"\s*:\s*"', text)
-    if not m:
-        return None
-    i = m.end()
-    buf: list[str] = []
-    escape = False
-    while i < len(text):
-        c = text[i]
-        if escape:
-            escape = False
-            # Map common JSON escapes back to literal text for the answer we return.
-            if c == "n":
-                buf.append("\n")
-            elif c == "r":
-                buf.append("\r")
-            elif c == "t":
-                buf.append("\t")
-            elif c == '"':
-                buf.append('"')
-            elif c == "\\":
-                buf.append("\\")
-            elif c == "/":
-                buf.append("/")
-            elif c == "f":
-                buf.append("\f")
-            elif c == "b":
-                buf.append("\b")
-            elif c == "u" and i + 4 < len(text):
-                hex_part = text[i + 1 : i + 5]
-                if len(hex_part) == 4 and all(ch in "0123456789abcdefABCDEF" for ch in hex_part):
-                    buf.append(chr(int(hex_part, 16)))
-                    i += 4
-                else:
-                    buf.append("\\")
-                    buf.append(c)
-            else:
-                buf.append("\\")
-                buf.append(c)
-            i += 1
-            continue
-        if c == "\\":
-            escape = True
-            i += 1
-            continue
-        if c == '"':
-            return "".join(buf)
-        buf.append(c)
-        i += 1
-    return None
-
-
-def _try_json_loads_object(s: str):
-    """Parse a JSON object string; apply light repairs for common model mistakes."""
-    if not s or not s.strip():
-        return None
-    s = s.strip()
-
-    variants = [
-        s,
-        _normalize_unicode_json_quotes(s),
-        _escape_controls_inside_json_strings(s),
-        _escape_controls_inside_json_strings(_normalize_unicode_json_quotes(s)),
-    ]
-    seen = set()
-    uniq_variants = []
-    for v in variants:
-        if v not in seen:
-            seen.add(v)
-            uniq_variants.append(v)
-
-    for cand in uniq_variants:
-        fixes = (
-            cand,
-            re.sub(r",\s*}", "}", cand),
-            re.sub(r",\s*]", "]", cand),
-        )
-        for fix in fixes:
-            try:
-                v = json.loads(fix)
-                if isinstance(v, dict):
-                    return v
-            except json.JSONDecodeError:
-                continue
-
-    extracted = _fallback_extract_answer_field(_normalize_unicode_json_quotes(s))
-    if extracted is not None and extracted.strip():
-        return {"action": "answer", "answer": extracted}
-
-    return None
-
-
-def _best_agent_dict_from_text(text: str) -> Optional[dict]:
-    """
-    Find the best JSON object in mixed prose: prefer dicts with 'action',
-    then dicts whose tool name is known.
-    """
-    if not text or not text.strip():
-        return None
-    candidates = []
-    for span in _iter_balanced_brace_objects(text):
-        parsed = _try_json_loads_object(span)
-        if isinstance(parsed, dict):
-            candidates.append(parsed)
-    if not candidates:
-        return None
-
-    def score(d: dict) -> tuple:
-        action = d.get("action")
-        tool = d.get("tool") or (action if action in _all_known_tools() else None)
-        has_action = 1 if action else 0
-        known_tool = 1 if tool in _all_known_tools() else 0
-        tool_call_shape = 1 if action == "tool_call" and tool in _all_known_tools() else 0
-        return (tool_call_shape, known_tool, has_action)
-
-    candidates.sort(key=score, reverse=True)
-    return candidates[0]
-
-
-def _extract_json_object_from_text(text: str) -> Optional[str]:
-    """If the model buried JSON in prose/thinking, pull out the best object span."""
-    best = _best_agent_dict_from_text(text)
-    if not best:
-        return None
-    try:
-        return json.dumps(best)
-    except (TypeError, ValueError):
-        return None
-
-
-def _message_to_agent_json_text(
-    msg: dict, enabled_tools: Optional[AbstractSet[str]] = None
-) -> str:
-    """Build a JSON string for parse_agent_json from an Ollama chat message."""
-    # Prefer structured native tool_calls when present (works even if content is noise).
-    from_tools = _tool_calls_to_agent_json_text(
-        msg.get("tool_calls"), enabled_tools
-    )
-    if from_tools:
-        return from_tools
-
-    text = (msg.get("content") or "").strip()
-    if text:
-        extracted = _extract_json_object_from_text(text)
-        if extracted:
-            return extracted
-        best = _best_agent_dict_from_text(text)
-        if best:
-            try:
-                return json.dumps(best)
-            except (TypeError, ValueError):
-                pass
-        return text
-
-    thinking = (msg.get("thinking") or "").strip()
-    if thinking:
-        extracted = _extract_json_object_from_text(thinking)
-        if extracted:
-            return extracted
-        best = _best_agent_dict_from_text(thinking)
-        if best:
-            try:
-                return json.dumps(best)
-            except (TypeError, ValueError):
-                pass
-        return thinking
-    return ""
 
 
 def _tool_params_fingerprint(tool: str, params) -> str:
     """Stable key for deduplicating identical tool calls."""
-    if not isinstance(params, dict):
-        params = {}
-    # Models often add extra keys (max_results, engine, …) that bypassed dedupe; only the query matters.
-    if tool == "search_web":
-        q = _scalar_to_str(params.get("query"), "").strip()
-        qn = re.sub(r"\s+", " ", q).lower().strip(" \t.?!")
-        mrx = _search_web_effective_max_results(params)
-        return f"{tool}\0{json.dumps({'query': qn, 'max_results': mrx}, sort_keys=True, ensure_ascii=False)}"
-    return f"{tool}\0{json.dumps(params, sort_keys=True, ensure_ascii=False)}"
+    return turn_support.tool_params_fingerprint(
+        tool,
+        params,
+        scalar_to_str_fn=_scalar_to_str,
+        search_web_effective_max_results=_search_web_effective_max_results,
+    )
 
 
 def _web_tool_result_followup_hint(tool: str, result: str) -> str:
@@ -1713,123 +1019,39 @@ def _web_tool_result_followup_hint(tool: str, result: str) -> str:
     Short, tool-specific nudge when web tools return errors or no usable data,
     so the model can recover without an extra model round in some clients.
     """
-    r = (result or "").strip()
-    if not r:
-        return ""
-    t = (tool or "").strip().lower()
-    if t == "fetch_page":
-        if "Fetch error:" in r[:400] or r.startswith("Fetch error:"):
-            return (
-                "The page fetch did not return usable content. If HTTP 4xx/5xx: try another "
-                "URL (official docs, archive, or a different path). Use search_web to find a "
-                "credible page if you do not have a working link. Do not use run_command with curl/wget."
-            )
-    if t == "search_web":
-        if "No results found" in r:
-            return (
-                "Narrow or rephrase the query, add a product/site/organization name, or include a year; "
-                "or fetch a URL the user gave with fetch_page."
-            )
-        if "anomaly-modal" in r or "bot-check" in r or "bots use DuckDuckGo" in r:
-            return (
-                "DuckDuckGo may be rate-limiting. Rely on Wikipedia/inline results if present, "
-                "or use fetch_page on a URL from the user or a known-credible source."
-            )
-    return ""
+    return turn_support.web_tool_result_followup_hint(tool, result)
 
 
 def _is_tool_result_weak_for_dedup(result: str) -> bool:
     """If true, search_web output does not count toward saw_strong_web_result (no URL-backed sources)."""
-    r = (result or "").strip()
-    if not r:
-        return True
-    if "No results found" in r:
-        return True
-    if r.startswith("Fetch error:") or "Fetch error:" in r[:200]:
-        return True
-    if r.startswith("Read error:") or r.startswith("List dir error:"):
-        return True
-    # For web search specifically, treat results as weak unless they include at least one URL.
-    # This prevents the agent from "believing" a bare instant-answer string without sources.
-    if ("[DuckDuckGo instant answer]" in r or "[Web results]" in r or "[Wikipedia search]" in r) and not re.search(
-        r"https?://", r
-    ):
-        return True
-    return False
+    return turn_support.is_tool_result_weak_for_dedup(result)
 
 
 def _tool_result_user_message(
     tool: str, params: dict, result: str, deliverable_reminder: str = ""
 ) -> str:
     """User follow-up after a tool run so the model reads output and stops re-querying."""
-    params_s = json.dumps(params, ensure_ascii=False) if params else "{}"
-    max_len = max(1, _settings_get_int(("ollama", "tool_output_max"), 14000))
-    body = result if isinstance(result, str) else str(result)
-    if len(body) > max_len:
-        body = body[:max_len] + "\n...[truncated for length; use what is shown above]"
-    extra = f"\n{deliverable_reminder}\n" if deliverable_reminder else ""
-    wfh = _web_tool_result_followup_hint((tool or ""), body)
-    wfn = f"\n--- Web tool follow-up hint ---\n{wfh}\n" if wfh else ""
-    return (
-        f"Tool `{tool}` finished.\n"
-        f"Parameters: {params_s}\n\n"
-        f"Output:\n{body}\n\n"
-        f"{extra}{wfn}"
-        "Using the output above (and earlier steps in this chat if any), respond with JSON only. "
-        "IMPORTANT: Treat tool output as authoritative. If the tool output conflicts with your prior knowledge "
-        "or training data, trust the tool output. "
-        "If the tool output does not contain any concrete sources/URLs, treat it as insufficient for factual claims "
-        "that could be outdated, and call search_web again with a better query or call fetch_page on a credible URL. "
-        "If snippets are not enough to verify or resolve ambiguity, use fetch_page on a credible URL "
-        "(do NOT use run_command with curl/wget to scrape web pages). "
-        "If the user’s question is now answered, respond with "
-        '{"action":"answer","answer":"..."} '
-        "and nothing else. "
-        "Only use {\"action\":\"tool_call\",...} if the output above is empty, is clearly an error, "
-        "or is still missing facts you need (or contains conflicting/ambiguous facts that you must resolve) — "
-        "and do not repeat the same tool with the same parameters as a previous step unless that step failed."
+    return turn_support.tool_result_user_message(
+        tool,
+        params,
+        result,
+        deliverable_reminder=deliverable_reminder,
+        tool_output_max=_settings_get_int(("ollama", "tool_output_max"), 14000),
+        scalar_to_str_fn=_scalar_to_str,
     )
 
 
-_TOOL_RECOVERY_TOOLS = frozenset(
-    {"run_command", "call_python", "search_web", "fetch_page"}
-)
+_TOOL_RECOVERY_TOOLS = turn_support.TOOL_RECOVERY_TOOLS
 
 
 def _tool_result_indicates_retryable_failure(tool: str, result) -> bool:
     """True when output looks like a hard tool failure (not normal STDERR on stderr)."""
-    r = (result if isinstance(result, str) else str(result)).strip()
-    if not r:
-        return False
-    if tool == "run_command":
-        return r.startswith("Command error:")
-    if tool == "call_python":
-        return r.startswith("Exec error:")
-    if tool == "fetch_page":
-        return r.startswith("Fetch error:") or "Fetch error:" in r[:200]
-    if tool == "search_web":
-        return "No results found" in r
-    return False
+    return turn_support.tool_result_indicates_retryable_failure(tool, result)
 
 
 def _parse_tool_recovery_payload(resp_text: str) -> Optional[Tuple[dict, str]]:
     """Parse a recovery-only JSON object (not normalized as agent tool_call JSON)."""
-    if not (resp_text or "").strip():
-        return None
-    text = resp_text.strip()
-    fence = re.match(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", text, re.DOTALL | re.IGNORECASE)
-    if fence:
-        text = fence.group(1).strip()
-    parsed = _try_json_loads_object(text)
-    if not isinstance(parsed, dict):
-        return None
-    if (parsed.get("recovery") or "").strip().lower() != "retry":
-        return None
-    p = parsed.get("parameters")
-    if not isinstance(p, dict):
-        return None
-    rationale = _scalar_to_str(parsed.get("rationale"), "").strip()
-    return p, rationale
+    return turn_support.parse_tool_recovery_payload(resp_text)
 
 
 def _suggest_tool_recovery_params(
@@ -1842,44 +1064,18 @@ def _suggest_tool_recovery_params(
     verbose: int,
 ) -> Optional[Tuple[dict, str]]:
     """Ask the primary model for corrected parameters for one retry."""
-    ctx = {
-        "tool": tool,
-        "parameters": params,
-        "error_output": (result if isinstance(result, str) else str(result))[:8000],
-        "user_request": (user_query or "")[:4000],
-    }
-    rec_extra = (
-        "For run_command, parameters.command must be the full shell command string. "
-        "For call_python, parameters.code must be syntactically valid Python (string). "
-        "For search_web, parameters.query must be a different, non-empty search string than before "
-        "(e.g. shorter, alternate keywords, add a year, or a site/product name). "
-        "For fetch_page, parameters.url must be a different full http(s) URL (not the same as before): "
-        "e.g. official site, different path, or a URL from search results."
-    )
-    prompt = (
-        "A tool run failed or returned no usable data inside an autonomous agent. Read the error, "
-        "then propose fixed parameters for exactly ONE retry of the SAME tool (same tool name).\n\n"
-        f"Context JSON:\n{json.dumps(ctx, ensure_ascii=False, indent=2)}\n\n"
-        "Respond with JSON only, a single object, no markdown:\n"
-        '{"recovery":"retry","parameters":{...},"rationale":"one short line"}\n'
-        'or {"recovery":"abort","rationale":"why a blind retry is unsafe or useless"}.\n'
-        f"{rec_extra}"
-    )
-    raw = call_ollama_chat(
-        [{"role": "user", "content": prompt}],
+    return turn_support.suggest_tool_recovery_params(
+        tool,
+        params,
+        result,
+        user_query,
         primary_profile,
         et,
-        verbose=verbose,
+        verbose,
+        call_ollama_chat=call_ollama_chat,
+        merge_aliases=_merge_tool_param_aliases,
+        ensure_defaults=_ensure_tool_defaults,
     )
-    parsed = _parse_tool_recovery_payload(raw)
-    if not parsed:
-        if verbose >= 1:
-            print("[*] Tool recovery: no retry proposal (recovery≠retry or invalid JSON).")
-        return None
-    new_params, rationale = parsed
-    new_params = _merge_tool_param_aliases(tool, new_params)
-    new_params = _ensure_tool_defaults(tool, new_params, user_query)
-    return new_params, rationale or "(no rationale)"
 
 
 def _env_tool_retry_auto_confirm() -> bool:
@@ -1900,13 +1096,14 @@ def _confirm_tool_recovery_retry(
     interactive_tool_recovery: bool,
 ) -> bool:
     """Log model-proposed recovery; always proceed with one automatic retry (no y/N prompt)."""
-    if interactive_tool_recovery and sys.stdin.isatty():
-        print("\n--- Tool failed; model proposed a corrected retry ---")
-        print(f"Tool: {tool}")
-        print(f"Rationale: {rationale}")
-        print(f"Was: {json.dumps(old_params, ensure_ascii=False)}")
-        print(f"Now: {json.dumps(new_params, ensure_ascii=False)}")
-    return True
+    return turn_support.confirm_tool_recovery_retry(
+        tool,
+        old_params,
+        new_params,
+        rationale,
+        interactive_tool_recovery=interactive_tool_recovery,
+        stdin_isatty=sys.stdin.isatty(),
+    )
 
 
 def _ollama_second_opinion_model():
@@ -2024,68 +1221,21 @@ def _is_workflow_plan_obj(o) -> bool:
     return True
 
 
-def _approx_message_tokens(messages: list) -> int:
-    # Heuristic: ~4 chars/token + small per-message overhead.
-    total_chars = 0
-    for m in messages:
-        if isinstance(m, dict):
-            c = m.get("content")
-            if isinstance(c, str):
-                total_chars += len(c)
-    overhead = 8 * max(1, len(messages))
-    return overhead + (total_chars // 4)
-
-
-def _context_limit_tokens(profile: Optional[LlmProfile]) -> int:
-    # Allow explicit override (works for both ollama + hosted).
-    lim = _settings_get_int(("agent", "context_tokens"), 0)
-    if lim > 0:
-        return lim
-    if profile is not None and getattr(profile, "backend", "") == "hosted":
-        return _settings_get_int(("agent", "hosted_context_tokens"), 131072)
-    return _settings_get_int(("agent", "ollama_context_tokens"), 131072)
-
-
 def _summarize_conversation_for_context(
     *,
     profile: Optional[LlmProfile],
     user_query: str,
     text: str,
+    **_: object,
 ) -> str:
-    prompt = (
-        "Summarize the conversation so far to preserve long-term context for the assistant.\n"
-        "Keep: user goals, non-negotiable constraints, decisions made, file names/paths, commands run, "
-        "errors encountered, and next steps.\n"
-        "Omit: chit-chat, repeated content, raw tool output unless it contains critical facts.\n"
-        "Output plain text only (NOT JSON), max ~250-500 words.\n\n"
-        f"User's current request:\n{user_query}\n\n"
-        "Conversation to summarize:\n"
-        f"{text}\n"
+    return _summarize_conversation_impl(
+        profile=profile,
+        user_query=user_query,
+        text=text,
+        call_hosted_chat_plain=call_hosted_chat_plain,
+        call_ollama_plaintext=call_ollama_plaintext,
+        ollama_model=_ollama_model(),
     )
-    msgs = [
-        {"role": "system", "content": "You are a summarizer. Output plain text only."},
-        {"role": "user", "content": prompt},
-    ]
-    if profile is not None and profile.backend == "hosted":
-        return call_hosted_chat_plain(msgs, profile)
-    # Default: use local Ollama reviewer-style plaintext call.
-    return call_ollama_plaintext(msgs, _ollama_model())
-
-
-def _format_messages_for_summary(messages: list) -> str:
-    lines = []
-    for m in messages:
-        if not isinstance(m, dict):
-            continue
-        role = str(m.get("role") or "")
-        content = m.get("content")
-        if not isinstance(content, str):
-            continue
-        content = content.strip()
-        if not content:
-            continue
-        lines.append(f"{role}:\n{content}\n")
-    return "\n".join(lines).strip()
 
 
 def _maybe_compact_context_window(
@@ -2096,69 +1246,19 @@ def _maybe_compact_context_window(
     verbose: int,
     context_cfg: Optional[dict] = None,
 ) -> list:
-    cfg = context_cfg if isinstance(context_cfg, dict) else {}
-    enabled = bool(cfg.get("enabled", True))
-    if _settings_get_bool(("agent", "disable_context_manager"), False):
-        enabled = False
-    if not enabled:
-        return messages
-
-    trigger_frac = float(cfg.get("trigger_frac", 0.75))
-    target_frac = float(cfg.get("target_frac", 0.55))
-    keep_tail = int(cfg.get("keep_tail_messages", 12))
-
-    trigger_frac = max(0.05, min(0.95, trigger_frac))
-    target_frac = max(0.05, min(trigger_frac, target_frac))
-    keep_tail = max(4, keep_tail)
-
-    limit = int(cfg.get("tokens", 0) or 0)
-    if limit <= 0:
-        limit = _context_limit_tokens(primary_profile)
-    if limit <= 0:
-        return messages
-    approx = _approx_message_tokens(messages)
-    if approx <= int(limit * trigger_frac):
-        return messages
-
-    # Keep leading system message (if any) + the tail; summarize the middle.
-    head: list = []
-    rest = list(messages)
-    if rest and isinstance(rest[0], dict) and rest[0].get("role") == "system":
-        head.append(rest[0])
-        rest = rest[1:]
-    if len(rest) <= keep_tail + 2:
-        return messages
-
-    tail = rest[-keep_tail:]
-    to_summarize = rest[:-keep_tail]
-    text = _format_messages_for_summary(to_summarize)
-    if not text.strip():
-        return messages
-
-    summary = _summarize_conversation_for_context(
-        profile=primary_profile, user_query=user_query, text=text
-    ).strip()
-    if not summary:
-        return messages
-
-    summary_msg = {
-        "role": "system",
-        "content": (
-            "Running conversation summary (auto-generated to fit context window):\n"
-            f"{summary}"
-        ),
-    }
-    new_messages = [*head, summary_msg, *tail]
-    # If still too large, hard-trim more history but keep the summary.
-    approx2 = _approx_message_tokens(new_messages)
-    if approx2 > int(limit * target_frac) and len(tail) > 6:
-        new_messages = [*head, summary_msg, *tail[-6:]]
-    if verbose >= 3:
-        print(
-            f"[DEBUG] context manager compacted messages: ~{approx} -> ~{_approx_message_tokens(new_messages)} tokens",
-            file=sys.stderr,
-        )
-    return new_messages
+    return _compact_context_window_impl(
+        messages,
+        user_query=user_query,
+        primary_profile=primary_profile,
+        verbose=verbose,
+        context_cfg=context_cfg,
+        settings_get_bool=_settings_get_bool,
+        settings_get_int=_settings_get_int,
+        call_hosted_chat_plain=call_hosted_chat_plain,
+        call_ollama_plaintext=call_ollama_plaintext,
+        ollama_model=_ollama_model(),
+        summarize_conversation_fn=_summarize_conversation_for_context,
+    )
 
 
 def _verbose_emit_final_agent_readable(agent_json_text: str) -> None:
@@ -2260,265 +1360,10 @@ def call_ollama_chat(
     )
 
 
-def _ddg_search_headers():
-    return {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://html.duckduckgo.com/",
-    }
-
-
-def _ddg_instant_answer(query: str) -> str:
-    """DuckDuckGo JSON API (no HTML scrape; works when DDG blocks bots on /html/)."""
-    query = _scalar_to_str(query, "")
-    try:
-        r = requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_html": 1},
-            headers=_ddg_search_headers(),
-            timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json()
-        lines = []
-        if data.get("Answer"):
-            lines.append(f"Answer: {data['Answer']}")
-        if data.get("AbstractText"):
-            src = data.get("AbstractSource") or ""
-            lines.append(f"Summary ({src}): {data['AbstractText']}")
-            if data.get("AbstractURL"):
-                lines.append(f"Source URL: {data['AbstractURL']}")
-        for t in (data.get("RelatedTopics") or [])[:10]:
-            if isinstance(t, dict) and t.get("Text"):
-                lines.append(f"- {t['Text']}")
-            elif isinstance(t, dict) and t.get("Topics"):
-                for sub in (t.get("Topics") or [])[:3]:
-                    if isinstance(sub, dict) and sub.get("Text"):
-                        lines.append(f"- {sub['Text']}")
-        return "\n".join(lines) if lines else ""
-    except Exception:
-        return ""
-
-
-def _search_web_backend() -> str:
-    """
-    Web search backend selector.
-    - default: "ddg" (DuckDuckGo)
-    - alternative: "searxng"
-    """
-    v = _settings_get_str(("agent", "search_web_backend"), "ddg").strip().lower()
-    v = v.replace("-", "_")
-    if v in ("searx", "searxng"):
-        return "searxng"
-    return "ddg"
-
-
-def _searxng_base_url() -> str:
-    """
-    Base URL for SearXNG.
-    Default: https://searx.party (public instance).
-    """
-    return _settings_get_str(("agent", "searxng_url"), "https://searx.party").strip().rstrip("/")
-
-
 def _search_backend_banner_line() -> str:
     """Same banner prefix as prepended to search_web tool output."""
-    backend = _search_web_backend()
-    if backend == "searxng":
-        return f"[Search backend] searxng {_searxng_base_url()}"
-    return "[Search backend] ddg"
+    return _websearch_backend_banner_line(_SETTINGS_OBJ)
 
-
-def _searxng_search(query: str, *, max_results: int) -> str:
-    """
-    Query SearXNG JSON API and return rows in the same [Web results] format.
-    """
-    q = _scalar_to_str(query, "").strip()
-    if not q:
-        return ""
-    base = _searxng_base_url()
-    try:
-        r = requests.get(
-            f"{base}/search",
-            params={
-                "q": q,
-                "format": "json",
-                "language": "en-US",
-                "safesearch": 0,
-                "categories": "general",
-            },
-            headers={"Accept": "application/json", **_ddg_search_headers()},
-            timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json()
-        results = data.get("results") if isinstance(data, dict) else None
-        if not isinstance(results, list):
-            return ""
-        rows = []
-        for rec in results[: max(1, min(30, int(max_results)))]:
-            if not isinstance(rec, dict):
-                continue
-            url = _scalar_to_str(rec.get("url"), "").strip()
-            title = _scalar_to_str(rec.get("title"), "").strip()
-            snippet = _scalar_to_str(rec.get("content"), "").strip()
-            if not url:
-                continue
-            rows.append(f"Link: {url}\nTitle: {title}\nSnippet: {snippet}")
-        return "\n".join(rows) if rows else ""
-    except Exception:
-        return ""
-
-
-def _strip_html_fragment(s: str) -> str:
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return html_module.unescape(s)
-
-
-def _parse_ddg_html_results(page: str, max_results: int = 5):
-    """Extract (url, title, snippet) tuples from DDG HTML results."""
-    if "anomaly-modal" in page or "bots use DuckDuckGo" in page:
-        return []
-    # Classic HTML version: result__a + result__snippet
-    links = re.findall(
-        r'class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]*)</a>',
-        page,
-        flags=re.IGNORECASE,
-    )
-    if not links:
-        links = re.findall(
-            r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]*)</a>',
-            page,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    snippets = re.findall(
-        r'class="result__snippet"[^>]*>(.*?)</a>',
-        page,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    rows = []
-    for i, (href, title) in enumerate(links[:max_results]):
-        if href.startswith("//"):
-            href = "https:" + href
-        snip = _strip_html_fragment(snippets[i]) if i < len(snippets) else ""
-        title = title.strip()
-        line = f"Link: {href}\nTitle: {title}\nSnippet: {snip}"
-        rows.append(line)
-    return rows
-
-
-def _fetch_ddg_html(query: str) -> str:
-    """DDG often returns HTTP 202 with a full HTML body (challenge or results)."""
-    query = _scalar_to_str(query, "")
-    headers = _ddg_search_headers()
-    q = requests.utils.quote(query)
-    try:
-        r = requests.get(
-            f"https://html.duckduckgo.com/html/?q={q}",
-            headers=headers,
-            timeout=15,
-        )
-        if r.status_code in (200, 202) and r.text:
-            return r.text
-    except Exception:
-        pass
-    try:
-        s = requests.Session()
-        s.headers.update(headers)
-        s.get("https://html.duckduckgo.com/html/", timeout=15)
-        r = s.post(
-            "https://html.duckduckgo.com/html/",
-            data={"q": query, "b": ""},
-            timeout=15,
-        )
-        if r.status_code in (200, 202) and r.text:
-            return r.text
-    except Exception:
-        pass
-    return ""
-
-
-def _wikipedia_opensearch_variants(query: str):
-    """Natural-language questions often need a shorter search string."""
-    q = query.strip()
-    yield q
-    words = q.split()
-    if len(words) > 8:
-        yield " ".join(words[:8])
-    if len(words) > 4:
-        yield " ".join(words[:4])
-    if re.search(r"\bmariners\b", q, re.I):
-        yield "Seattle Mariners"
-    if re.search(r"\byankees\b", q, re.I):
-        yield "New York Yankees"
-
-
-def _wikipedia_opensearch(
-    query: str, result_limit: Optional[int] = None
-) -> str:
-    """
-    Fallback when DDG HTML is blocked or empty (respects Wikimedia User-Agent policy).
-    result_limit: 1–20, default 5; aligns with search_web's max when passed from the same turn.
-    """
-    lim0 = 5 if result_limit is None else int(result_limit)
-    lim = max(1, min(20, lim0))
-    for variant in _wikipedia_opensearch_variants(query):
-        try:
-            r = requests.get(
-                "https://en.wikipedia.org/w/api.php",
-                params={
-                    "action": "opensearch",
-                    "search": variant,
-                    "limit": lim,
-                    "namespace": 0,
-                    "format": "json",
-                },
-                timeout=15,
-                headers={
-                    "User-Agent": "agent.py/0.1 (local script; https://github.com/)",
-                    "Accept": "application/json",
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-            if len(data) < 4 or not data[1]:
-                continue
-            lines = []
-            for title, desc, url in zip(data[1], data[2], data[3]):
-                d = (desc or "").strip()
-                lines.append(f"- {title}\n  {d}\n  {url}")
-            return "\n".join(lines)
-        except Exception:
-            continue
-    return ""
-
-
-def _first_url_in_text(s: str) -> str:
-    if not s:
-        return ""
-    m = re.search(r"https?://\S+", s)
-    return m.group(0).rstrip(").,]") if m else ""
-
-
-def _wikipedia_top_page_extract(query: str) -> str:
-    """
-    Get a small extract from the top Wikipedia result.
-    Useful when general web search is blocked/thin or instant answers are stale.
-    """
-    listing = _wikipedia_opensearch(query)
-    url = _first_url_in_text(listing)
-    if not url:
-        return ""
-    page = fetch_page(url)
-    if not page or page.startswith("Fetch error:"):
-        return ""
-    # Keep it short; fetch_page already strips tags and truncates to 5000 chars.
-    return f"Top result URL: {url}\nExtract: {page[:1200]}"
 
 def search_web(query, params: Optional[dict] = None) -> str:
     from agentlib.tools.builtins import search_web as _impl
@@ -2596,237 +1441,6 @@ def call_python(code, globals=None):
     return _impl(code, globals=globals)
 
 
-def clean_json_response(resp_text):
-    if resp_text is None:
-        return ""
-    try:
-        start = resp_text.index("{")
-        return resp_text[start:]
-    except Exception:
-        return resp_text
-
-
-_AGENT_TOP_LEVEL_PARAM_KEYS = frozenset(
-    {
-        "query",
-        "url",
-        "command",
-        "path",
-        "content",
-        "lines",
-        "pattern",
-        "replacement",
-        "replace_all",
-        "code",
-        "globals",
-        "op",
-        "operation",
-        "worktree",
-        "message",
-        "remote",
-        "branch",
-        "staged",
-        "paths",
-        "m",
-        "n",
-        "max_results",
-        "max",
-        "num_results",
-        "limit",
-    }
-)
-
-
-def _is_tool_call_intent(out: dict) -> bool:
-    a = out.get("action")
-    if a == "tool_call":
-        return True
-    if a in _all_known_tools():
-        return True
-    if out.get("tool") in _all_known_tools():
-        return True
-    return False
-
-
-def _normalize_agent_dict(d: dict) -> dict:
-    """
-    Coerce common alternate shapes into what main() expects:
-    - tool name as action, args at top level, tool_name vs tool, etc.
-    """
-    if not isinstance(d, dict):
-        return {"action": "answer", "answer": str(d)}
-    out = dict(d)
-    action = out.get("action")
-    if isinstance(action, str):
-        action = action.strip()
-        out["action"] = action
-    elif action is None or action is False:
-        out.pop("action", None)
-        action = None
-    else:
-        # Models sometimes emit JSON null / numbers for action; treat as missing.
-        out.pop("action", None)
-        action = None
-
-    # answer synonyms (avoid "content" — it is also a tool parameter name)
-    if out.get("answer") is None:
-        for k in ("response", "message", "text"):
-            if k in out and out[k] is not None and isinstance(out[k], str):
-                out["answer"] = out[k]
-                break
-        # Some models use {"content": "..."} as the final answer without action.
-        if out.get("answer") is None and isinstance(out.get("content"), str) and out["content"].strip():
-            out["answer"] = out["content"]
-
-    # tool name aliases
-    if out.get("tool") is None:
-        for alias in ("tool_name", "toolName", "function_name", "function"):
-            v = out.get(alias)
-            if isinstance(v, str) and v in _all_known_tools():
-                out["tool"] = v
-                break
-        if out.get("tool") is None and isinstance(out.get("name"), str) and out["name"] in _all_known_tools():
-            out["tool"] = out["name"]
-
-    # Infer missing action after aliases / answer fields are filled in.
-    if not action or (isinstance(action, str) and action.lower() in ("null", "none", "")):
-        if out.get("tool") in _all_known_tools():
-            out["action"] = "tool_call"
-            action = "tool_call"
-        elif out.get("answer") is not None and isinstance(out.get("answer"), str) and out["answer"].strip():
-            out["action"] = "answer"
-            action = "answer"
-            # If we promoted content -> answer, drop content to avoid ambiguity with write_file's content param.
-            if "content" in out and out.get("answer") == out.get("content"):
-                out.pop("content", None)
-
-    # {"action": "run_command", "command": "..."}  (action is the tool id)
-    if action in _all_known_tools() and out.get("tool") is None:
-        out["tool"] = action
-        out["action"] = "tool_call"
-
-    tool_intent = _is_tool_call_intent(out)
-    params = out.get("parameters") if tool_intent else {}
-    if not isinstance(params, dict):
-        params = {}
-    if tool_intent:
-        for alias in ("args", "arguments", "params"):
-            alt = out.get(alias)
-            if isinstance(alt, dict):
-                params = {**alt, **params}
-                out.pop(alias, None)
-
-        for k in list(out.keys()):
-            if k in _AGENT_TOP_LEVEL_PARAM_KEYS:
-                params.setdefault(k, out[k])
-
-        tool_name = out.get("tool")
-        if tool_name == "search_web":
-            for alt in ("q", "search", "keywords", "keyword"):
-                if alt in out and out[alt] is not None:
-                    params.setdefault("query", out[alt])
-        elif tool_name == "fetch_page":
-            for alt in ("href", "link", "uri"):
-                if alt in out and out[alt] is not None:
-                    params.setdefault("url", out[alt])
-        elif tool_name == "run_command":
-            for alt in ("cmd", "shell", "line"):
-                if alt in out and out[alt] is not None:
-                    params.setdefault("command", out[alt])
-        elif tool_name == "use_git":
-            for alt in ("operation", "git_op", "subcommand", "sub_cmd"):
-                if alt in out and out[alt] is not None:
-                    params.setdefault("op", out[alt])
-            for alt in ("cwd", "repo", "work_tree"):
-                if alt in out and out[alt] is not None:
-                    params.setdefault("worktree", out[alt])
-            for alt in ("files", "file", "file_paths"):
-                if alt in out and out[alt] is not None and "paths" not in params:
-                    params.setdefault("paths", out[alt])
-
-        params = _merge_tool_param_aliases(tool_name, params)
-
-        out["parameters"] = params
-
-        _extra_top = frozenset(
-            {
-                "q",
-                "search",
-                "keywords",
-                "keyword",
-                "href",
-                "link",
-                "uri",
-                "cmd",
-                "shell",
-                "line",
-                "operation",
-                "git_op",
-                "subcommand",
-                "sub_cmd",
-                "cwd",
-                "repo",
-                "work_tree",
-                "files",
-                "file",
-                "file_paths",
-            }
-        )
-        for k in list(out.keys()):
-            if k in _AGENT_TOP_LEVEL_PARAM_KEYS or k in _extra_top:
-                if k != "parameters":
-                    del out[k]
-    else:
-        out["parameters"] = {}
-
-    return out
-
-
-def parse_agent_json(resp_text):
-    """Parse model output into a dict. Handles markdown fences, partial JSON, and plain text."""
-    if resp_text is None or (isinstance(resp_text, str) and not resp_text.strip()):
-        return {"action": "answer", "answer": "No response from model."}
-    text = resp_text.strip()
-    # Strip ```json ... ``` fences if present
-    fence = re.match(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", text, re.DOTALL | re.IGNORECASE)
-    if fence:
-        text = fence.group(1).strip()
-
-    candidates = []
-    if text:
-        candidates.append(text)
-        tail = clean_json_response(text)
-        if tail and tail != text:
-            candidates.append(tail)
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        parsed = _try_json_loads_object(candidate)
-        if isinstance(parsed, dict):
-            return _normalize_agent_dict(parsed)
-
-    # Balanced `{...}` spans (avoids broken first-{ to last-} when multiple objects exist)
-    best = _best_agent_dict_from_text(text)
-    if best:
-        return _normalize_agent_dict(best)
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            start = candidate.index("{")
-            end = candidate.rindex("}") + 1
-            parsed = _try_json_loads_object(candidate[start:end])
-            if isinstance(parsed, dict):
-                return _normalize_agent_dict(parsed)
-        except ValueError:
-            continue
-
-    # Last resort: treat as a direct answer (general Q&A without valid JSON)
-    return _normalize_agent_dict({"action": "answer", "answer": text})
-
-
 # System instructions exposing all tool actions
 from agentlib.prompts import SYSTEM_INSTRUCTIONS
 
@@ -2873,29 +1487,28 @@ def _effective_system_instruction_text(override: Optional[str]) -> str:
     return effective_system_instruction_text(override)
 
 
-ROUTER_INSTRUCTIONS = (
-    "You are a routing assistant for a tool-using agent.\n"
-    "Decide whether the user's request requires a web search BEFORE answering.\n"
-    "Respond ONLY with JSON. No prose, no Markdown.\n"
-    'Output exactly one of:\n'
-    '1) {"action":"web_search","query":"..."}  (query must be a non-empty string)\n'
-    '2) {"action":"no_web"}\n'
-    "\n"
-    "Bias rule (IMPORTANT): WHEN IN DOUBT, CHOOSE web_search.\n"
-    "\n"
-    "You MUST choose web_search for requests that involve:\n"
-    "- Anything that changes over time: current events, news, prices, rankings, outages, elections, sports.\n"
-    "- Real-world entities/roles: who holds an office/title (CEO, president, etc.), leadership, staffing, ownership.\n"
-    "- Software/library/tooling facts that drift: latest versions, APIs, documentation, best practices, defaults, "
-    "security guidance, deprecations, release dates.\n"
-    "- Comparisons/recommendations likely to be time-dependent: \"best\", \"top\", \"recommended\", \"popular\", "
-    "\"vs\" for products/tools.\n"
-    "\n"
-    "Choose no_web ONLY for clearly timeless content:\n"
-    "- Definitions and explanations of stable concepts (math, basic CS concepts).\n"
-    "- Pure transformations on user-provided text/data.\n"
-    "- Established historical facts explicitly anchored to the past by the user.\n"
-)
+ROUTER_INSTRUCTIONS = _routing.ROUTER_INSTRUCTIONS
+
+
+def _router_transcript_slice(transcript_messages: Optional[list]) -> list:
+    return _routing.router_transcript_slice(
+        transcript_messages,
+        router_transcript_max_messages=_settings_get_int(
+            ("agent", "router_transcript_max_messages"), 80
+        ),
+    )
+
+
+def _router_llm_messages(transcript_slice: list, tail_user_content: str) -> list:
+    return _routing.router_llm_messages(transcript_slice, tail_user_content)
+
+
+def _router_prompt(
+    user_query: str, today_str: str, *, has_prior_transcript: bool = False
+) -> str:
+    return _routing.router_prompt(
+        user_query, today_str, has_prior_transcript=has_prior_transcript
+    )
 
 
 def _tool_need_review_followup(user_query: str, proposed_answer: str) -> str:
@@ -2965,77 +1578,6 @@ def _self_capability_followup(user_query: str, proposed_answer: str) -> str:
     )
 
 
-def _deliverable_first_answer_followup(user_query: str, proposed_answer: str) -> str:
-    """
-    When the user asked for a letter/document but the model answered with no tools, the generic
-    web-vs-memory self-check invites meta-rationalizations instead of the requested prose.
-    """
-    uq = (user_query or "").strip()
-    ans = (proposed_answer or "").strip()
-    return (
-        "You just responded with action=answer without using any tools, but the user asked for a "
-        "written deliverable (letter, memo, email, document, etc.).\n\n"
-        "User request:\n"
-        f"{uq}\n\n"
-        "Your last answer (not acceptable as the final reply):\n"
-        f"{ans}\n\n"
-        "You must satisfy the request itself: put the **full text** they asked for in the answer "
-        "(salutation through closing/signature for a letter), as if they could send or publish it. "
-        "Do **not** reply with commentary about whether web search is needed, timeliness, or "
-        "\"timeless\" policy questions—produce the artifact.\n\n"
-        "Alternatively you may use write_file with the complete text, then read_file that path, "
-        "then action answer with the same full text.\n\n"
-        "Respond with JSON only: "
-        '{"action":"answer","answer":"..."} with the complete writing, or '
-        '{"action":"tool_call","tool":"write_file",...} as appropriate.'
-    )
-
-
-def _router_transcript_slice(transcript_messages: Optional[list]) -> list:
-    """Last N user/assistant/system messages for routing (bounded for prompt size)."""
-    if not transcript_messages:
-        return []
-    lim = max(1, _settings_get_int(("agent", "router_transcript_max_messages"), 80))
-    slice_ = (
-        transcript_messages[-lim:]
-        if len(transcript_messages) > lim
-        else transcript_messages
-    )
-    out: list = []
-    for m in slice_:
-        if not isinstance(m, dict):
-            continue
-        role = (m.get("role") or "").strip().lower()
-        if role in ("user", "assistant", "system"):
-            out.append(dict(m))
-    return out
-
-
-def _router_llm_messages(transcript_slice: list, tail_user_content: str) -> list:
-    if not transcript_slice:
-        return [{"role": "user", "content": tail_user_content}]
-    return transcript_slice + [{"role": "user", "content": tail_user_content}]
-
-
-def _router_prompt(
-    user_query: str, today_str: str, *, has_prior_transcript: bool = False
-) -> str:
-    uq = (user_query or "").strip()
-    hint = ""
-    if has_prior_transcript:
-        hint = (
-            "\nEarlier messages in this chat are relevant. If the latest user message is a short "
-            "follow-up (pronouns like they / the game / yesterday), resolve it using that transcript "
-            "unless that is impossible.\n"
-        )
-    return (
-        f"{ROUTER_INSTRUCTIONS}\n\n"
-        f"Today's date (system clock): {today_str}\n\n"
-        f"User request: {uq}\n"
-        f"{hint}"
-    )
-
-
 def _route_requires_websearch(
     user_query: str,
     today_str: str,
@@ -3043,27 +1585,20 @@ def _route_requires_websearch(
     enabled_tools: Optional[AbstractSet[str]] = None,
     transcript_messages: Optional[list] = None,
 ) -> Optional[str]:
-    """
-    Ask the model whether to do web search first.
-    Returns a query string if web search is needed, else None.
-    """
-    if "search_web" not in _coerce_enabled_tools(enabled_tools):
-        return None
-    slice_ = _router_transcript_slice(transcript_messages)
-    tail = _router_prompt(
-        user_query, today_str, has_prior_transcript=bool(slice_)
+    return _routing.route_requires_websearch(
+        user_query,
+        today_str,
+        primary_profile,
+        enabled_tools,
+        transcript_messages,
+        coerce_enabled_tools=_coerce_enabled_tools,
+        call_ollama_chat=call_ollama_chat,
+        parse_agent_json=parse_agent_json,
+        scalar_to_str=_scalar_to_str,
+        router_transcript_max_messages=_settings_get_int(
+            ("agent", "router_transcript_max_messages"), 80
+        ),
     )
-    msgs = _router_llm_messages(slice_, tail)
-    try:
-        raw = call_ollama_chat(msgs, primary_profile, enabled_tools)
-        d = parse_agent_json(raw)
-        a = (d.get("action") or "").strip()
-        if a == "web_search":
-            q = _scalar_to_str(d.get("query"), "").strip()
-            return q if q else (user_query or "").strip()
-        return None
-    except Exception:
-        return None
 
 
 def _route_requires_websearch_after_answer(
@@ -3074,102 +1609,21 @@ def _route_requires_websearch_after_answer(
     enabled_tools: Optional[AbstractSet[str]] = None,
     transcript_messages: Optional[list] = None,
 ) -> Optional[str]:
-    """
-    Backup router pass when the model answered tool-free.
-    This prompt is intentionally conservative: if verifying would be helpful, search.
-    """
-    if "search_web" not in _coerce_enabled_tools(enabled_tools):
-        return None
-    uq = (user_query or "").strip()
-    ans = (proposed_answer or "").strip()
-    slice_ = _router_transcript_slice(transcript_messages)
-    prior = ""
-    if slice_:
-        prior = (
-            "\nSession context: earlier messages may define what the user meant; align verification "
-            "searches with that topic when the latest request is a follow-up.\n"
-        )
-    prompt = (
-        f"{ROUTER_INSTRUCTIONS}\n\n"
-        "Extra guidance: You are reviewing an already-drafted answer. "
-        "If the answer includes any real-world factual claim that could be outdated or wrong, choose web_search.\n\n"
-        f"Today's date (system clock): {today_str}\n\n"
-        f"User request: {uq}\n\n"
-        f"Proposed answer: {ans}\n"
-        f"{prior}"
+    return _routing.route_requires_websearch_after_answer(
+        user_query,
+        today_str,
+        proposed_answer,
+        primary_profile,
+        enabled_tools,
+        transcript_messages,
+        coerce_enabled_tools=_coerce_enabled_tools,
+        call_ollama_chat=call_ollama_chat,
+        parse_agent_json=parse_agent_json,
+        scalar_to_str=_scalar_to_str,
+        router_transcript_max_messages=_settings_get_int(
+            ("agent", "router_transcript_max_messages"), 80
+        ),
     )
-    msgs = _router_llm_messages(slice_, prompt)
-    try:
-        raw = call_ollama_chat(msgs, primary_profile, enabled_tools)
-        d = parse_agent_json(raw)
-        a = (d.get("action") or "").strip()
-        if a == "web_search":
-            q = _scalar_to_str(d.get("query"), "").strip()
-            return q if q else uq
-        return None
-    except Exception:
-        return None
-
-
-def _user_wants_written_deliverable(user_query: str) -> bool:
-    """Heuristic: user asked for a substantive written artifact (not just Q&A)."""
-    q = (user_query or "").strip().lower()
-    if not q:
-        return False
-    if re.search(r"\b(write|draft|compose)\b", q) and re.search(
-        r"\b(letter|memo|e-?mail)\b", q
-    ):
-        return True
-    if re.search(r"\b(document|essay|report|manuscript|white\s*paper|writeup|write-up)\b", q):
-        return True
-    if re.search(r"\b(page|pages)\b", q) and re.search(
-        r"\b(write|draft|produce|author|compose|deliver)\b", q
-    ):
-        return True
-    if re.search(r"\bwrite\s+the\s+document\b", q) or re.search(r"\bdon't\s+just\s+do\s+the\s+outline\b", q):
-        return True
-    return False
-
-
-def _deliverable_skip_mandatory_web(user_query: str) -> bool:
-    """
-    Do not inject router-mandated search_web for written deliverables unless the user asked for
-    research, citations, or web-grounded facts. Otherwise models often mirror the whole prompt as
-    a search query and loop on identical searches (extra JSON keys also used to bypass dedupe).
-    """
-    if not _user_wants_written_deliverable(user_query):
-        return False
-    q = (user_query or "").strip().lower()
-    if re.search(
-        r"\b(sources|citations?|references?|bibliograph(y|ies)|research)\b|"
-        r"\blook\s*up\b|\bverify\s+online\b|from\s+(the\s+)?web\b|"
-        r"\bfrom\s+news\b|\bwikipedia\b|\binclude\s+urls?\b|"
-        r"\bcurrent\s+events\b|\blatest\s+news\b|\baccording\s+to\s+the\b",
-        q,
-    ):
-        return False
-    return True
-
-
-def _deliverable_followup_block(path: str) -> str:
-    p = _scalar_to_str(path, "").strip()
-    return (
-        "Deliverable reminder: The user asked for a written document, not a short summary. "
-        "If you already used write_file, you must finish the task by reading that file back with read_file "
-        f'and then responding with {{"action":"answer","answer":"..."}} that includes the FULL document text '
-        f'(or clearly states the file path and pastes the full contents). Do not stop after fetch_page with only a synopsis. '
-        f'Next step: call read_file with parameters.path == "{p}".'
-    )
-
-
-def _answer_missing_written_body(answer: str, file_chars: int) -> bool:
-    """True if final answer omits most of the written file content."""
-    a = (answer or "").strip()
-    if file_chars <= 0:
-        return False
-    if len(a) < int(file_chars * 0.85):
-        return True
-    return False
 
 
 def _parse_context_messages_data(raw) -> list:

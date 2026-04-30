@@ -3,7 +3,7 @@ import os
 import tempfile
 from typing import Optional
 
-from .settings import AgentSettings
+from ..settings import AgentSettings
 
 
 AGENT_PREFS_VERSION = 4
@@ -62,4 +62,3 @@ def write_agent_prefs_file(payload: dict) -> None:
         except OSError:
             pass
         raise
-
