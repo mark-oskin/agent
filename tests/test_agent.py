@@ -488,6 +488,28 @@ def test_web_weak_search_triggers_retry_then_answer(monkeypatch):
     assert out == "ok"
 
 
+def test_web_required_allows_answer_after_fetch_page_even_if_search_was_weak(monkeypatch):
+    """
+    When web verification is required, a successful fetch_page should count as verification too.
+    This avoids step-limit loops when search_web is thin/blocked but fetch_page succeeds.
+    """
+    responses = [
+        json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q"}}),
+        json.dumps({"action": "tool_call", "tool": "fetch_page", "parameters": {"url": "https://u.test"}}),
+        json.dumps({"action": "answer", "answer": "ok"}),
+    ]
+    out = run_main(
+        monkeypatch,
+        ["q"],
+        responses,
+        route_web="q",
+        route_after_answer=None,
+        stub_search_web=lambda q: "[Web results]\nno urls here",
+        stub_fetch_page=lambda url: f"Fetched URL: {url}\nFinal URL: {url}\n\nbody",
+    )
+    assert out == "ok"
+
+
 def test_malformed_action_recovered(monkeypatch):
     out = run_main(
         monkeypatch,

@@ -417,13 +417,24 @@ def run_agent_conversation_turn(
                 if rp == deliverable_path and (not str(result).startswith("Read error:")):
                     deliverable_read_ok = True
                     deliverable_file_chars = len(str(result))
-            if (
-                tool == "search_web"
-                and not skipped_duplicate
-                and not policy_blocked
-                and not deps.is_tool_result_weak_for_dedup(result)
-            ):
-                saw_strong_web_result = True
+            if not skipped_duplicate and not policy_blocked:
+                # "Verified web" can come from either:
+                # - search_web returning at least one URL-backed result, OR
+                # - fetch_page successfully retrieving a page (the output includes a URL and is not an error).
+                #
+                # Previously, only search_web could satisfy this latch. In practice, fetch_page is
+                # often the actual verification step (search yields thin/blocked results, then fetch
+                # provides the authoritative content). Count that as "strong" too.
+                if tool == "search_web" and not deps.is_tool_result_weak_for_dedup(result):
+                    saw_strong_web_result = True
+                elif tool == "fetch_page":
+                    rtxt = str(result or "")
+                    if (
+                        rtxt
+                        and not rtxt.startswith("Fetch error:")
+                        and re.search(r"https?://", rtxt)
+                    ):
+                        saw_strong_web_result = True
             if dedupe_ok and not skipped_duplicate and not policy_blocked:
                 if orig_fp not in seen_tool_fingerprints:
                     seen_tool_fingerprints.add(orig_fp)
