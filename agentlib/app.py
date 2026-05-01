@@ -50,7 +50,11 @@ from agentlib.llm.calls import (
     call_ollama_chat as call_ollama_chat_impl,
     call_ollama_plaintext as call_ollama_plaintext_impl,
 )
-from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
+from agentlib.llm.profile import (
+    LlmProfile,
+    default_primary_llm_profile,
+    effective_ollama_model_from_profile,
+)
 from agentlib.llm.second_opinion import (
     second_opinion_result_user_message,
     second_opinion_reviewer_messages,
@@ -277,13 +281,14 @@ class AgentApp:
         self, messages: list, primary_profile=None, enabled_tools=None, *, verbose: int = 0
     ) -> str:
         prof = primary_profile or default_primary_llm_profile()
+        om = effective_ollama_model_from_profile(prof, self.ollama_model())
         return call_ollama_chat_impl(
             messages,
             primary_profile=prof,
             enabled_tools=enabled_tools,
             verbose=verbose,
             ollama_base_url=self.ollama_base_url(),
-            ollama_model=self.ollama_model(),
+            ollama_model=om,
             ollama_think_value=self.ollama_request_think_value(),
             ollama_debug=bool(self.settings_get_bool(("ollama", "debug"), False)),
             merge_stream_message_chunks=self.merge_stream_message_chunks,
@@ -800,7 +805,8 @@ class AgentApp:
         def format_session_primary_llm_line(p: LlmProfile) -> str:
             if p.backend == "hosted":
                 return describe_llm_profile_short(p)
-            return f"ollama ({self.ollama_model()!r})"
+            om = effective_ollama_model_from_profile(p, self.ollama_model())
+            return f"ollama ({om!r})"
 
         def format_session_reviewer_line(hosted: Optional[LlmProfile], ollama_model: Optional[str]) -> str:
             if hosted is not None and hosted.backend == "hosted":
@@ -831,7 +837,9 @@ class AgentApp:
                 enabled_tools=enabled_tools,
                 system_instruction_override=system_instruction_override,
                 skill_suffix=skill_suffix,
-                ollama_model=self.ollama_model(),
+                ollama_model=effective_ollama_model_from_profile(
+                    primary_profile or default_primary_llm_profile(), self.ollama_model()
+                ),
                 hosted_review_ready=hosted_review_ready,
                 tool_policy_runner_text=self.registry.tool_policy_runner_text,
             )
@@ -845,7 +853,7 @@ class AgentApp:
                 default_primary_llm_profile=default_primary_llm_profile,
                 call_hosted_chat_plain=self.call_hosted_chat_plain,
                 call_ollama_plaintext=self.call_ollama_plaintext,
-                ollama_model=self.ollama_model(),
+                ollama_model=effective_ollama_model_from_profile(primary_profile, self.ollama_model()),
                 scalar_to_str_fn=scalar_to_str,
             )
 

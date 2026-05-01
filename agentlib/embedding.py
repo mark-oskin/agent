@@ -1,9 +1,48 @@
 from __future__ import annotations
 
-from typing import Optional
+import copy
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from agentlib.session import AgentSession
 
 
-def build_embedded_session(*, verbose: int = 0):
+def fork_embedded_session(parent_session: "AgentSession", *, app):
+    """
+    Clone ``parent_session`` message history and session-local settings into a new
+    ``AgentSession`` that shares ``app`` (registry, prefs-backed wiring).
+
+    The child's ``session_save_path`` is cleared so forks do not overwrite the parent's
+    context save file.
+    """
+    _, session = build_embedded_session(
+        verbose=int(parent_session.verbose),
+        primary_profile=parent_session.primary_profile,
+        app=app,
+    )
+    session.messages = copy.deepcopy(parent_session.messages)
+    session.enabled_tools = set(parent_session.enabled_tools)
+    session.enabled_toolsets = set(parent_session.enabled_toolsets)
+    session.second_opinion_on = bool(parent_session.second_opinion_on)
+    session.cloud_ai_enabled = bool(parent_session.cloud_ai_enabled)
+    session.session_save_path = None
+    session.session_system_prompt = parent_session.session_system_prompt
+    session.session_system_prompt_path = parent_session.session_system_prompt_path
+    session.session_prompt_template = parent_session.session_prompt_template
+    ctx = parent_session.context_cfg
+    session.context_cfg = copy.deepcopy(ctx) if isinstance(ctx, dict) else {}
+    session.template_default = parent_session.template_default
+    pt = parent_session.prompt_templates
+    session.prompt_templates = copy.deepcopy(pt) if isinstance(pt, dict) else {}
+    session.reviewer_hosted_profile = parent_session.reviewer_hosted_profile
+    session.reviewer_ollama_model = parent_session.reviewer_ollama_model
+    sm = parent_session.skills_map
+    session.skills_map = copy.deepcopy(sm) if isinstance(sm, dict) else sm
+    session.last_reuse_skill_id = parent_session.last_reuse_skill_id
+    return session
+
+
+def build_embedded_session(*, verbose: int = 0, primary_profile=None, app=None):
     """
     Create an `AgentSession` suitable for embedding in other Python programs.
 
@@ -14,6 +53,14 @@ def build_embedded_session(*, verbose: int = 0):
       session.execute_line("...", emit=emit)   # typed events stream as they occur
 
     `/` commands (e.g. `/settings ...`) work the same way in embedded mode.
+
+    Parameters
+    ----------
+    primary_profile:
+        Override the prefs primary LLM profile for this session only. For local Ollama,
+        use ``LlmProfile(backend=\"ollama\", model=\"name:tag\")`` to pin a model.
+    app:
+        Reuse an existing ``AgentApp`` (same registry/settings); omit on first session.
     """
     import requests
 
@@ -21,7 +68,11 @@ def build_embedded_session(*, verbose: int = 0):
     from agentlib.context.io import load_context_messages, save_context_bundle
     from agentlib.llm.discovery import fetch_ollama_local_model_names as fetch_ollama_local_model_names_impl
     from agentlib.deliverables import deliverable_skip_mandatory_web, user_wants_written_deliverable
-    from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
+    from agentlib.llm.profile import (
+        LlmProfile,
+        default_primary_llm_profile,
+        effective_ollama_model_from_profile,
+    )
     from agentlib.prefs import bootstrap as prefs_bootstrap
     from agentlib import prefs as prefs_mod
     from agentlib.repl.while_cmd import call_while_condition_judge, parse_while_repl_tokens
@@ -29,20 +80,25 @@ def build_embedded_session(*, verbose: int = 0):
     from agentlib.skills.loader import load_skills_from_dir
     from agentlib.skills.selection import match_skill_detail
 
-    app = default_app()
+    reuse_app = app is not None
+    if not reuse_app:
+        app = default_app()
     raw_prefs = app.load_prefs()
     st = app.session_defaults_from_prefs(raw_prefs)
 
     # Reload plugin toolsets after prefs are applied so tools_dir override works.
-    try:
-        app.registry.load_plugin_toolsets(app.resolved_tools_dir(raw_prefs))
-        app.registry.register_aliases()
-    except Exception:
-        pass
+    if not reuse_app:
+        try:
+            app.registry.load_plugin_toolsets(app.resolved_tools_dir(raw_prefs))
+            app.registry.register_aliases()
+        except Exception:
+            pass
 
     enabled_tools = set(st.get("enabled_tools") or set(app.registry.core_tools))
     enabled_toolsets = set(st.get("enabled_toolsets") or set())
-    primary_profile = st.get("primary_profile") or default_primary_llm_profile()
+    primary_profile = primary_profile if primary_profile is not None else (
+        st.get("primary_profile") or default_primary_llm_profile()
+    )
 
     def describe_llm_profile_short(p: LlmProfile) -> str:
         if p.backend != "hosted":
@@ -53,7 +109,8 @@ def build_embedded_session(*, verbose: int = 0):
     def format_session_primary_llm_line(p: LlmProfile) -> str:
         if p.backend == "hosted":
             return describe_llm_profile_short(p)
-        return f"ollama ({app.ollama_model()!r})"
+        om = effective_ollama_model_from_profile(p, app.ollama_model())
+        return f"ollama ({om!r})"
 
     def format_session_reviewer_line(hosted: Optional[LlmProfile], ollama_model: Optional[str]) -> str:
         if hosted is not None and hosted.backend == "hosted":
@@ -97,7 +154,9 @@ def build_embedded_session(*, verbose: int = 0):
             enabled_tools=enabled_tools,
             system_instruction_override=system_instruction_override,
             skill_suffix=skill_suffix,
-            ollama_model=app.ollama_model(),
+            ollama_model=effective_ollama_model_from_profile(
+                primary_profile or default_primary_llm_profile(), app.ollama_model()
+            ),
             hosted_review_ready=hosted_review_ready,
             tool_policy_runner_text=app.registry.tool_policy_runner_text,
         )
@@ -111,7 +170,7 @@ def build_embedded_session(*, verbose: int = 0):
             default_primary_llm_profile=default_primary_llm_profile,
             call_hosted_chat_plain=app.call_hosted_chat_plain,
             call_ollama_plaintext=app.call_ollama_plaintext,
-            ollama_model=app.ollama_model(),
+            ollama_model=effective_ollama_model_from_profile(primary_profile, app.ollama_model()),
         )
 
     skills_map = st.get("skills")

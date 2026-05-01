@@ -7,7 +7,13 @@ configuration parsing so agent.py can focus on the runtime agent behavior.
 
 from .settings import AgentSettings
 from .session import AgentSession, SessionLineResult
-from .embedding import build_embedded_session
+from .embedding import build_embedded_session, fork_embedded_session
 
-__all__ = ["AgentSettings", "AgentSession", "SessionLineResult", "build_embedded_session"]
+__all__ = [
+    "AgentSettings",
+    "AgentSession",
+    "SessionLineResult",
+    "build_embedded_session",
+    "fork_embedded_session",
+]
 

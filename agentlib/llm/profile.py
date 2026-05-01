@@ -22,6 +22,16 @@ def default_primary_llm_profile() -> LlmProfile:
     return LlmProfile(backend="ollama")
 
 
+def effective_ollama_model_from_profile(primary_profile: Optional[LlmProfile], default_model: str) -> str:
+    """Use ``profile.model`` for local Ollama when set; otherwise ``default_model`` (e.g. from prefs)."""
+    p = primary_profile
+    if p is not None and getattr(p, "backend", "") == "ollama":
+        m = (getattr(p, "model", "") or "").strip()
+        if m:
+            return m
+    return (default_model or "").strip()
+
+
 def llm_profile_to_pref(profile: LlmProfile) -> dict:
     if profile.backend != "hosted":
         return {"backend": "ollama"}

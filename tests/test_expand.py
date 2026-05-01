@@ -26,6 +26,14 @@ from agentlib.settings import AgentSettings
 WEB = "[Web results]\nLink: https://a.example/x\nTitle: t\nSnippet: s\n"
 
 
+def test_effective_ollama_model_from_profile():
+    from agentlib.llm.profile import LlmProfile, effective_ollama_model_from_profile
+
+    assert effective_ollama_model_from_profile(None, "m") == "m"
+    assert effective_ollama_model_from_profile(LlmProfile(backend="ollama", model="a:b"), "fb") == "a:b"
+    assert effective_ollama_model_from_profile(LlmProfile(backend="ollama"), "fb") == "fb"
+
+
 def _deps() -> AgentJsonDeps:
     project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     reg = ToolRegistry(default_tools_dir=os.path.join(project_dir, "tools"))
