@@ -41,6 +41,10 @@ def fork_embedded_session(parent_session: "AgentSession", *, app):
     session.last_reuse_skill_id = parent_session.last_reuse_skill_id
     session.python_fork_agent = getattr(parent_session, "python_fork_agent", None)
     session.python_delegate_line = getattr(parent_session, "python_delegate_line", None)
+    session.python_enqueue_line = getattr(parent_session, "python_enqueue_line", None)
+    session.python_host_command = getattr(parent_session, "python_host_command", None)
+    session.repl_last_user_query = None
+    session.repl_last_assistant_answer = None
     return session
 
 
@@ -51,6 +55,8 @@ def build_embedded_session(
     app=None,
     python_fork_agent=None,
     python_delegate_line=None,
+    python_host_command=None,
+    python_enqueue_line=None,
 ):
     """
     Create an `AgentSession` suitable for embedding in other Python programs.
@@ -63,8 +69,9 @@ def build_embedded_session(
 
     `/` commands (e.g. `/settings ...`) work the same way in embedded mode.
 
-    Optional ``python_fork_agent`` / ``python_delegate_line`` hooks enable ``/call_python``
-    helpers ``fork_agent()`` and ``ai(..., agent_name)`` in multi-agent hosts.
+    Optional ``python_fork_agent`` / ``python_delegate_line`` / ``python_host_command`` hooks
+    enable ``/call_python`` helpers (``fork_agent``, ``ai(..., agent_name)``, ``list_agents``, etc.)
+    in multi-agent hosts.
 
     Parameters
     ----------
@@ -270,6 +277,8 @@ def build_embedded_session(
         call_while_condition_judge=call_while_judge,
         python_fork_agent=python_fork_agent,
         python_delegate_line=python_delegate_line,
+        python_host_command=python_host_command,
+        python_enqueue_line=python_enqueue_line,
     )
     return app, session
 

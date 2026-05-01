@@ -32,6 +32,19 @@ At least one agent must remain.
 Run Python in-process (same helpers as CLI): ``/call_python help`` — ``ai()`` targets this lane;
 ``ai(cmd, name)`` and ``fork_agent()`` target other lanes when using multi-agent hooks.
 
+Inspect or jump lanes without running the model::
+
+    /list
+    /switch Planner
+    /send Coder /help                    # runs on Coder without blocking this lane
+    /send Planner What is the capital of France?
+    /last_answer
+    /last_answer Coder
+    /last_question Coder
+
+``list_agents()``, ``switch_agent(...)``, ``send(...)``, ``last_answer(...)``, ``last_question(...)`` inside ``/call_python``
+mirror those behaviors for Telegram bridges and scripts.
+
 Prompt history is **per lane**: focus the bottom input and press **↑** / **↓** to recall prior lines for that agent.
 """
 
@@ -42,6 +55,8 @@ import sys
 import threading
 import traceback
 from typing import Callable, Dict, List, Optional, Set, Tuple
+
+from agentlib.session import parse_send_command
 
 from fork_parse import (
     format_fork_command_line,
@@ -195,6 +210,7 @@ class AgentTuiApp(App[None]):
             self._specs = [("Agent 1", "")]
         self._n = len(self._specs)
         self._busy_lanes: Set[int] = set()
+        self._lane_turn_queues: Dict[int, List[str]] = {}
         self._active_lane = 0
         self._sessions: List = []
         self._embed_app = None
@@ -246,7 +262,7 @@ class AgentTuiApp(App[None]):
                 yield OptionList(*opts, id="agent_list")
         yield Input(
             id="prompt",
-            placeholder="Message (↑↓ history per agent) · /fork · /kill · /call_python …",
+            placeholder="Message (↑↓ history per agent) · /list · /switch · /send · /fork · /kill · /call_python …",
         )
         yield Footer()
 
@@ -261,6 +277,8 @@ class AgentTuiApp(App[None]):
         py_kw = dict(
             python_fork_agent=self._python_fork_bridge,
             python_delegate_line=self._python_delegate_bridge,
+            python_enqueue_line=self._python_enqueue_bridge,
+            python_host_command=self._python_host_bridge,
         )
         for i, (label, model_part) in enumerate(self._specs):
             prof = LlmProfile(backend="ollama", model=model_part) if model_part.strip() else None
@@ -515,6 +533,140 @@ class AgentTuiApp(App[None]):
         with emit_sink_scope(emit_fn):
             return sess.execute_line((cmd or "").strip())
 
+    def _python_enqueue_bridge(self, agent_name: str, cmd: str) -> dict:
+        """Schedule ``execute_line`` on another lane (main thread); same semantics as ``/send``."""
+        box: List[dict] = []
+
+        def ui() -> None:
+            try:
+                box.append(self._enqueue_turn_for_lane(agent_name.strip(), cmd.strip()))
+            except Exception as e:
+                box.append({"ok": False, "error": str(e)})
+
+        self.call_from_thread(ui)
+        return box[0] if box else {"ok": False, "error": "no result"}
+
+    def _enqueue_turn_for_lane(self, agent_name: str, cmd: str) -> dict:
+        """Must run on the Textual UI thread. Starts ``cmd`` on ``lane`` or appends to its queue."""
+        matches = self._lanes_matching_name(agent_name)
+        if not matches:
+            return {"ok": False, "error": f"No agent named {agent_name!r}"}
+        if len(matches) > 1:
+            lanes_s = ", ".join(str(i + 1) for i in matches)
+            return {"ok": False, "error": f"Ambiguous name {agent_name!r} (lanes {lanes_s})"}
+        lane_idx = matches[0]
+        label = self._lane_labels[lane_idx]
+        if lane_idx in self._busy_lanes:
+            self._lane_turn_queues.setdefault(lane_idx, []).append(cmd)
+            return {"ok": True, "queued": True, "lane": lane_idx, "label": label}
+        self._run_line(lane_idx, cmd)
+        return {"ok": True, "queued": False, "lane": lane_idx, "label": label}
+
+    def _drain_lane_queue(self, lane: int) -> None:
+        q = self._lane_turn_queues.get(lane)
+        if not q:
+            return
+        nxt = q.pop(0)
+        if not q:
+            self._lane_turn_queues.pop(lane, None)
+        self._run_line(lane, nxt)
+
+    def _handle_send(self, line: str) -> None:
+        act = self._activity_logs[self._active_lane]
+        parsed = parse_send_command(line)
+        if parsed is None:
+            act.write(Text.from_markup("[yellow]Usage:[/yellow] /send AGENT COMMAND..."))
+            return
+        agent_name, cmd = parsed
+        r = self._enqueue_turn_for_lane(agent_name, cmd)
+        if not r.get("ok"):
+            act.write(Text.from_markup(f"[yellow]{escape(str(r.get('error', '/send failed')))}[/yellow]"))
+            return
+        lab = escape(str(r.get("label", agent_name)))
+        preview = cmd if len(cmd) <= 200 else cmd[:197] + "…"
+        preview_esc = escape(preview)
+        if r.get("queued"):
+            act.write(Text.from_markup(f"[dim]Queued for[/dim] [bold]{lab}[/bold]: [dim]{preview_esc}[/dim]"))
+        else:
+            act.write(Text.from_markup(f"[dim]Started on[/dim] [bold]{lab}[/bold]: [dim]{preview_esc}[/dim]"))
+
+    def _python_host_bridge(self, payload: dict) -> dict:
+        """Host hook for ``session.host_ctl(...)`` inside ``/call_python`` (main thread)."""
+        box: List[dict] = []
+
+        def ui() -> None:
+            try:
+                box.append(self._host_ctl_dispatch(payload))
+            except Exception as e:
+                box.append({"ok": False, "error": str(e)})
+
+        self.call_from_thread(ui)
+        return box[0] if box else {"ok": False, "error": "no result"}
+
+    def _host_ctl_dispatch(self, payload: dict) -> dict:
+        op = str(payload.get("op") or "")
+        raw_arg = payload.get("arg")
+        arg_s = str(raw_arg).strip() if raw_arg is not None and str(raw_arg).strip() else ""
+        sess = payload.get("session")
+
+        if op == "list_agents":
+            lines: List[str] = []
+            for i, lab in enumerate(self._lane_labels):
+                star = "*" if i == self._active_lane else " "
+                lines.append(f"{star} {i + 1}. {lab}")
+            return {"ok": True, "text": "\n".join(lines) if lines else "(no agents)"}
+
+        if op == "switch":
+            if not arg_s:
+                return {"ok": False, "error": "missing agent name"}
+            matches = self._lanes_matching_name(arg_s)
+            if not matches:
+                return {"ok": False, "error": f"No agent named {arg_s!r}"}
+            if len(matches) > 1:
+                lanes_s = ", ".join(str(i + 1) for i in matches)
+                return {"ok": False, "error": f"Ambiguous name {arg_s!r} (lanes {lanes_s})"}
+            lane = matches[0]
+            ol = self.query_one("#agent_list", OptionList)
+            self._active_lane = lane
+            self._show_lane(lane)
+            ol.highlighted = lane
+            self._sync_prompt_enabled()
+            return {"ok": True, "text": f"Switched to {self._lane_labels[lane]!r}."}
+
+        if op == "last_answer":
+            return self._host_ctl_snapshot(sess, arg_s if arg_s else None, kind="answer")
+        if op == "last_question":
+            return self._host_ctl_snapshot(sess, arg_s if arg_s else None, kind="question")
+
+        return {"ok": False, "error": f"unknown op {op!r}"}
+
+    def _host_ctl_snapshot(self, source_session, name: Optional[str], *, kind: str) -> dict:
+        lane_idx: Optional[int] = None
+        if name:
+            matches = self._lanes_matching_name(name)
+            if not matches:
+                return {"ok": False, "error": f"No agent named {name!r}"}
+            if len(matches) > 1:
+                lanes_s = ", ".join(str(i + 1) for i in matches)
+                return {"ok": False, "error": f"Ambiguous name {name!r} (lanes {lanes_s})"}
+            lane_idx = matches[0]
+        else:
+            for i, s in enumerate(self._sessions):
+                if s is source_session:
+                    lane_idx = i
+                    break
+            if lane_idx is None:
+                return {"ok": False, "error": "Session is not attached to a TUI lane"}
+        ts = self._sessions[lane_idx]
+        if kind == "answer":
+            v = ts.repl_last_assistant_answer
+            hint = "(no last assistant answer yet)"
+        else:
+            v = ts.repl_last_user_query
+            hint = "(no last user question yet)"
+        text = v.strip() if isinstance(v, str) and v.strip() else hint
+        return {"ok": True, "text": text}
+
     def _sync_lane_visual_from(self, src: int, dst: int) -> None:
         """Copy transcript/UI state from lane ``src`` onto widgets at lane ``dst``."""
         schat = self._chat_logs[src]
@@ -589,6 +741,8 @@ class AgentTuiApp(App[None]):
         self._chat_logs.pop()
 
         ol.remove_option_at_index(last)
+        self._lane_turn_queues.pop(k, None)
+        self._lane_turn_queues.pop(last, None)
         self._n -= 1
 
         if prev_active == last:
@@ -770,6 +924,9 @@ class AgentTuiApp(App[None]):
         if self._active_lane in self._busy_lanes:
             return
         self._record_prompt_submission(lane, line)
+        if line.startswith("/send"):
+            self._handle_send(line)
+            return
         if line.startswith("/kill"):
             self._handle_kill(line)
             return
@@ -845,6 +1002,7 @@ class AgentTuiApp(App[None]):
             self._thinking_widgets[lane].update("")
             if finalize_busy:
                 self._set_lane_busy(lane, False)
+                self._drain_lane_queue(lane)
 
 
 def main(argv: Optional[list[str]] = None) -> int:

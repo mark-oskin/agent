@@ -200,6 +200,8 @@ def build_test_session(
         call_while_condition_judge=call_while_judge,
         python_fork_agent=None,
         python_delegate_line=None,
+        python_host_command=None,
+        python_enqueue_line=None,
     )
     return app, session
 

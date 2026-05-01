@@ -24,6 +24,17 @@ class SessionLineResult:
     quit: bool = False
 
 
+def parse_send_command(line: str) -> Optional[tuple[str, str]]:
+    """Parse ``/send AGENT COMMAND...`` → ``(agent_name, command_line)``. Returns ``None`` if invalid."""
+    try:
+        toks = shlex.split((line or "").strip())
+    except ValueError:
+        return None
+    if len(toks) < 3 or toks[0].lower() != "/send":
+        return None
+    return toks[1], shlex.join(toks[2:])
+
+
 class AgentSession:
     """Owns interactive session state; parses and executes REPL lines."""
 
@@ -95,6 +106,8 @@ class AgentSession:
         call_while_condition_judge: Callable[..., int],
         python_fork_agent: Optional[Callable[..., dict]] = None,
         python_delegate_line: Optional[Callable[..., dict]] = None,
+        python_host_command: Optional[Callable[[dict], dict]] = None,
+        python_enqueue_line: Optional[Callable[[str, str], dict]] = None,
     ):
         self.settings = settings
         self.verbose = int(verbose)
@@ -119,6 +132,9 @@ class AgentSession:
 
         self.messages: list = []
         self.last_reuse_skill_id: Optional[str] = None
+        # Last normal (non-slash) user line and last structured model answer for /last_* .
+        self.repl_last_user_query: Optional[str] = None
+        self.repl_last_assistant_answer: Optional[str] = None
 
         # injected helpers / callbacks
         self._agent_progress = agent_progress
@@ -166,6 +182,102 @@ class AgentSession:
 
         self.python_fork_agent = python_fork_agent
         self.python_delegate_line = python_delegate_line
+        self.python_host_command = python_host_command
+        self.python_enqueue_line = python_enqueue_line
+
+    def host_ctl(self, op: str, arg: Optional[str] = None) -> dict:
+        """
+        Multi-agent host RPC (optional). Used by ``/list``, ``/switch``, ``/last_answer``,
+        ``/last_question``, and ``/call_python`` helpers when a host (e.g. ``agent_tui``) wires
+        ``python_host_command``.
+        """
+        h = self.python_host_command
+        want_local_last = (
+            h is None
+            and op in ("last_answer", "last_question")
+            and (arg is None or not str(arg).strip())
+        )
+        if want_local_last:
+            if op == "last_answer":
+                v = self.repl_last_assistant_answer
+                hint = "(no last assistant answer yet)"
+            else:
+                v = self.repl_last_user_query
+                hint = "(no last user question yet)"
+            text = v.strip() if isinstance(v, str) and v.strip() else hint
+            return {"ok": True, "text": text}
+        if h is None:
+            return {
+                "ok": False,
+                "error": "Multi-agent host not available (e.g. run agent_tui.py for /list and /switch).",
+            }
+        try:
+            return h({"op": op, "arg": arg, "session": self})
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _sink_host_ctl_result(self, r: dict) -> SessionLineResult:
+        if r.get("ok"):
+            sink_print_compat(r.get("text") or "")
+        else:
+            sink_print_compat(r.get("error") or "failed")
+        return SessionLineResult()
+
+    def _cmd_send_to_agent(self, s: str) -> SessionLineResult:
+        """Forward one line to another agent (async enqueue when ``python_enqueue_line`` is set)."""
+        parsed = parse_send_command(s)
+        if parsed is None:
+            sink_print_compat('Usage: /send AGENT COMMAND...')
+            return SessionLineResult()
+        agent_name, cmd = parsed
+        eq = self.python_enqueue_line
+        if eq is not None:
+            try:
+                r = eq(agent_name, cmd)
+            except BaseException as e:
+                sink_print_compat(f"/send: {type(e).__name__}: {e}")
+                return SessionLineResult()
+            if isinstance(r, dict) and r.get("ok"):
+                lab = str(r.get("label") or agent_name)
+                if r.get("queued"):
+                    sink_print_compat(f"[queued → {lab}] {cmd}")
+                else:
+                    sink_print_compat(f"[started → {lab}] {cmd}")
+            elif isinstance(r, dict):
+                sink_print_compat(str(r.get("error") or "/send failed"))
+            else:
+                sink_print_compat("[send] scheduled.")
+            return SessionLineResult()
+        dl = self.python_delegate_line
+        if dl is None:
+            sink_print_compat(
+                "/send requires a multi-agent host (e.g. agent_tui.py); enqueue/delegate hook not configured."
+            )
+            return SessionLineResult()
+        try:
+            res = dl(agent_name, cmd)
+        except BaseException as e:
+            sink_print_compat(f"/send: {type(e).__name__}: {e}")
+            return SessionLineResult()
+        if isinstance(res, dict):
+            if res.get("type") == "command":
+                out = res.get("output") or ""
+                if isinstance(out, str) and out.strip():
+                    sink_print_compat(out.strip())
+                else:
+                    sink_print_compat(f"[sent → {agent_name}] command finished.")
+            elif res.get("type") == "turn":
+                if res.get("answered"):
+                    ans = res.get("answer")
+                    n = len(ans) if isinstance(ans, str) else 0
+                    sink_print_compat(f"[sent → {agent_name}] turn answered ({n} chars).")
+                else:
+                    sink_print_compat(f"[sent → {agent_name}] turn finished.")
+            else:
+                sink_print_compat(f"[sent → {agent_name}] done.")
+        else:
+            sink_print_compat(f"[sent → {agent_name}] done.")
+        return SessionLineResult()
 
     def execute_line(self, line: str, *, emit: Optional[Callable[[dict], None]] = None) -> dict:
         """
@@ -185,6 +297,12 @@ class AgentSession:
                 res = self._execute_command_line(s)
                 return {"type": "command", "quit": bool(res.quit), "output": res.output}
             answered, final_answer = self._execute_user_request(s)
+            self.repl_last_user_query = s
+            self.repl_last_assistant_answer = (
+                final_answer.strip()
+                if isinstance(final_answer, str) and final_answer.strip()
+                else None
+            )
             return {
                 "type": "turn",
                 "quit": False,
@@ -198,6 +316,12 @@ class AgentSession:
                 payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
             else:
                 answered, final_answer = self._execute_user_request(s)
+                self.repl_last_user_query = s
+                self.repl_last_assistant_answer = (
+                    final_answer.strip()
+                    if isinstance(final_answer, str) and final_answer.strip()
+                    else None
+                )
                 payload = {
                     "type": "turn",
                     "quit": False,
@@ -509,6 +633,8 @@ class AgentSession:
         if low == "/clear":
             self.messages.clear()
             self.last_reuse_skill_id = None
+            self.repl_last_user_query = None
+            self.repl_last_assistant_answer = None
             sink_print_compat("Context cleared (including stored skill for /skill reuse).")
             return SessionLineResult()
         if low == "/models":
@@ -537,12 +663,64 @@ class AgentSession:
             return self._cmd_save_context(s)
         if low.startswith("/call_python"):
             return self._cmd_call_python(s)
+        if low == "/list":
+            return self._sink_host_ctl_result(self.host_ctl("list_agents"))
+        if low.startswith("/switch"):
+            try:
+                parts = shlex.split(s)
+            except ValueError as e:
+                sink_print_compat(f"/switch: {e}")
+                return SessionLineResult()
+            if len(parts) < 2:
+                sink_print_compat("Usage: /switch AGENT_LABEL")
+                return SessionLineResult()
+            return self._sink_host_ctl_result(self.host_ctl("switch", parts[1]))
+        if low.startswith("/last_answer"):
+            try:
+                parts = shlex.split(s)
+            except ValueError as e:
+                sink_print_compat(f"/last_answer: {e}")
+                return SessionLineResult()
+            arg = parts[1] if len(parts) > 1 else None
+            return self._sink_host_ctl_result(self.host_ctl("last_answer", arg))
+        if low.startswith("/last_question"):
+            try:
+                parts = shlex.split(s)
+            except ValueError as e:
+                sink_print_compat(f"/last_question: {e}")
+                return SessionLineResult()
+            arg = parts[1] if len(parts) > 1 else None
+            return self._sink_host_ctl_result(self.host_ctl("last_question", arg))
+        if s.startswith("/send"):
+            return self._cmd_send_to_agent(s)
         if low in ("/help", "/?"):
             ma = ""
             if self.python_fork_agent is not None:
                 ma = (
                     "  /fork NAME [\"cmd1,cmd2\"]           Fork lane from history; switch to new lane\n"
                     "  /fork_background NAME [\"cmd1,cmd2\"]   Fork lane without switching sidebar focus\n"
+                )
+            tui_kill = ""
+            if (
+                self.python_fork_agent is not None
+                or self.python_host_command is not None
+                or self.python_enqueue_line is not None
+            ):
+                tui_kill = "  /kill NAME                 Close an agent lane by label\n"
+            host_extras = ""
+            if self.python_host_command is not None:
+                host_extras = (
+                    "  /list                       Active agents (* = focused)\n"
+                    "  /switch NAME                Focus agent by label\n"
+                )
+            snap_extras = (
+                "  /last_answer [NAME]         Last model answer (this agent or NAME)\n"
+                "  /last_question [NAME]       Last user question sent to the model\n"
+            )
+            delegate_extras = ""
+            if self.python_enqueue_line is not None or self.python_delegate_line is not None:
+                delegate_extras = (
+                    "  /send NAME CMD...           Run CMD on another agent without blocking this one\n"
                 )
             sink_print_compat(
                 "Commands:\n"
@@ -559,6 +737,10 @@ class AgentSession:
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
                 "  /call_python ...         Run Python in-process (try /call_python help)\n"
                 + ma
+                + tui_kill
+                + host_extras
+                + snap_extras
+                + delegate_extras
             )
             return SessionLineResult()
         sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
@@ -590,13 +772,20 @@ class AgentSession:
         """
         Execute Python in this interpreter (full ``__builtins__`` — trusted users only).
 
-        Injected globals: ``ai``, ``fork_agent``, ``session`` (this AgentSession),
+        Injected globals: ``ai``, ``fork_agent``, ``list_agents``, ``switch_agent``, ``last_answer``,
+        ``last_question``, ``session`` (this AgentSession),
         ``print`` (routes through emit/sink like other REPL output).
 
         ``ai(line)`` runs ``execute_line(line)`` on this session (LLM turns and ``/`` commands).
         ``ai(line, agent_name)`` forwards to ``python_delegate_line`` when configured (multi-agent UIs).
 
         ``fork_agent(name[, commands])`` calls ``python_fork_agent`` when configured.
+
+        ``send(agent_name, cmd)`` forwards ``cmd`` to another lane asynchronously when
+        ``python_enqueue_line`` is wired; otherwise falls back to synchronous ``python_delegate_line``.
+
+        ``list_agents()``, ``switch_agent(name)``, ``last_answer(name=None)``, ``last_question(name=None)``
+        call ``session.host_ctl(...)`` when ``python_host_command`` is wired (e.g. ``agent_tui``).
         """
         kind, payload = self._split_call_python_rest(s)
         if kind == "help":
@@ -610,6 +799,12 @@ class AgentSession:
                 "  ai(cmd)                       Same as typing ``cmd`` here (LLM or ``/command``).\n"
                 "  ai(cmd, agent_name)           Target another agent when multi-agent hooks exist.\n"
                 "  fork_agent(name [, cmds])     Fork a lane when ``python_fork_agent`` is wired.\n"
+                "  send(name, cmd)               Forward cmd to another agent (async when host supports it).\n"
+                "  list_agents()                 Snapshots lanes when ``python_host_command`` is wired.\n"
+                "  switch_agent(name)            Focus lane by label (host).\n"
+                "  last_answer([name])           Last model answer for this lane or NAME.\n"
+                "  last_question([name])         Last user question for this lane or NAME.\n"
+                "  session.host_ctl(op, arg)     Low-level host RPC (same ops as slash commands).\n"
                 "  session                       This AgentSession.\n"
                 "  print(...)                    Routed like REPL output (emit when streaming).\n"
             )
@@ -649,11 +844,53 @@ class AgentSession:
                 return {"type": "fork", "ok": False, "error": "fork unavailable"}
             return hook(str(name).strip(), cmds)
 
+        def list_agents() -> dict:
+            return session.host_ctl("list_agents")
+
+        def switch_agent(name: str) -> dict:
+            return session.host_ctl("switch", str(name).strip())
+
+        def last_answer(agent_name: Optional[str] = None) -> dict:
+            a = (agent_name or "").strip()
+            return session.host_ctl("last_answer", a if a else None)
+
+        def last_question(agent_name: Optional[str] = None) -> dict:
+            a = (agent_name or "").strip()
+            return session.host_ctl("last_question", a if a else None)
+
+        def send(agent_name: str, cmd: str) -> dict:
+            nm = str(agent_name or "").strip()
+            line = (cmd or "").strip()
+            if not nm:
+                sink_print_compat("send() requires a non-empty agent name.")
+                return {"type": "command", "quit": False, "output": "bad send"}
+            if not line:
+                sink_print_compat("send() requires a non-empty command.")
+                return {"type": "command", "quit": False, "output": "bad send"}
+            eq = session.python_enqueue_line
+            if eq is not None:
+                try:
+                    return eq(nm, line)
+                except BaseException as e:
+                    return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            dl = session.python_delegate_line
+            if dl is None:
+                sink_print_compat(
+                    "send() requires a multi-agent host (e.g. agent_tui.py); enqueue/delegate not configured."
+                )
+                return {"type": "command", "quit": False, "output": "delegate unavailable"}
+            return dl(nm, line)
+
         g = {
             "__builtins__": __builtins__,
             "__name__": "__call_python__",
             "ai": ai,
             "fork_agent": fork_agent,
+            "send": send,
+            "list_agents": list_agents,
+            "switch_agent": switch_agent,
+            "last_answer": last_answer,
+            "last_question": last_question,
             "session": session,
             "print": sink_print_compat,
         }
