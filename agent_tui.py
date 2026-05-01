@@ -45,6 +45,8 @@ Inspect or jump lanes without running the model::
 ``list_agents()``, ``switch_agent(...)``, ``send(...)``, ``last_answer(...)``, ``last_question(...)`` inside ``/call_python``
 mirror those behaviors for Telegram bridges and scripts.
 
+Run a shell command locally like the agent ``run_command`` tool: ``/run_command help`` or ``! ls``.
+
 Prompt history is **per lane**: focus the bottom input and press **↑** / **↓** to recall prior lines for that agent.
 """
 
@@ -262,7 +264,7 @@ class AgentTuiApp(App[None]):
                 yield OptionList(*opts, id="agent_list")
         yield Input(
             id="prompt",
-            placeholder="Message (↑↓ history per agent) · /list · /switch · /send · /fork · /kill · /call_python …",
+            placeholder="Message (↑↓ history per agent) · /list · /switch · /send · /fork · /kill · /call_python · ! …",
         )
         yield Footer()
 

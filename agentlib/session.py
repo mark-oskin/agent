@@ -296,6 +296,9 @@ class AgentSession:
             if s.startswith("/"):
                 res = self._execute_command_line(s)
                 return {"type": "command", "quit": bool(res.quit), "output": res.output}
+            if s.startswith("!"):
+                res = self._cmd_run_shell_bang(s)
+                return {"type": "command", "quit": bool(res.quit), "output": res.output}
             answered, final_answer = self._execute_user_request(s)
             self.repl_last_user_query = s
             self.repl_last_assistant_answer = (
@@ -313,6 +316,9 @@ class AgentSession:
         with emit_sink_scope(emit):
             if s.startswith("/"):
                 res = self._execute_command_line(s)
+                payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
+            elif s.startswith("!"):
+                res = self._cmd_run_shell_bang(s)
                 payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
             else:
                 answered, final_answer = self._execute_user_request(s)
@@ -661,6 +667,8 @@ class AgentSession:
             return self._cmd_load_context(s)
         if low.startswith("/save_context"):
             return self._cmd_save_context(s)
+        if low.startswith("/run_command"):
+            return self._cmd_run_command(s)
         if low.startswith("/call_python"):
             return self._cmd_call_python(s)
         if low == "/list":
@@ -736,6 +744,7 @@ class AgentSession:
                 "  /load_context <file>     Replace session messages from JSON\n"
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
                 "  /call_python ...         Run Python in-process (try /call_python help)\n"
+                "  /run_command ...        Run shell command (try /run_command help); shorthand: ! CMD\n"
                 + ma
                 + tui_kill
                 + host_extras
@@ -745,6 +754,53 @@ class AgentSession:
             return SessionLineResult()
         sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
         return SessionLineResult()
+
+    def _repl_shell_run(self, cmd: str) -> SessionLineResult:
+        cmd = (cmd or "").strip()
+        if not cmd:
+            sink_print_compat("/run_command: missing command.")
+            return SessionLineResult()
+        from agentlib.tools import builtins as tool_builtins
+
+        sink_print_compat(tool_builtins.run_command(cmd))
+        return SessionLineResult()
+
+    def _cmd_run_shell_bang(self, s: str) -> SessionLineResult:
+        """``! COMMAND`` → same shell execution as ``/run_command COMMAND``."""
+        t = (s or "").strip()
+        if not t.startswith("!"):
+            sink_print_compat("Internal error: expected line starting with '!'.")
+            return SessionLineResult()
+        cmd = t[1:].lstrip()
+        if not cmd:
+            sink_print_compat(
+                "Usage: ! <shell command>\n"
+                "(same as /run_command). Try /run_command help."
+            )
+            return SessionLineResult()
+        return self._repl_shell_run(cmd)
+
+    def _cmd_run_command(self, s: str) -> SessionLineResult:
+        """Run a local shell command (``run_command`` tool backend; shell=True)."""
+        t = (s or "").strip()
+        low = t.lower()
+        prefix = "/run_command"
+        if not low.startswith(prefix):
+            sink_print_compat("/run_command: invalid invocation.")
+            return SessionLineResult()
+        rest = t[len(prefix) :].lstrip()
+        if not rest or rest.lower() in ("help", "-h", "--help", "-?"):
+            sink_print_compat(
+                "/run_command — run a shell command on this machine (subprocess, shell=True)\n\n"
+                "Usage:\n"
+                "  /run_command help\n"
+                "  /run_command COMMAND       Everything after the command name is passed to your shell\n\n"
+                "Shorthand:\n"
+                "  ! COMMAND                  Same as /run_command COMMAND\n\n"
+                "Uses the same backend as the agent run_command tool; local/trusted use only."
+            )
+            return SessionLineResult()
+        return self._repl_shell_run(rest)
 
     def _split_call_python_rest(self, s: str) -> tuple[str, Optional[str]]:
         """Return (kind, payload): help | error | code | file."""
