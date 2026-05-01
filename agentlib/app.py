@@ -489,8 +489,12 @@ class AgentApp:
 
     # --- ConversationTurnDeps ---
 
-    def conversation_turn_deps(self) -> ConversationTurnDeps:
-        if self._cached_turn_deps is not None:
+    def conversation_turn_deps(
+        self,
+        *,
+        agent_progress: Optional[Callable[[str], None]] = None,
+    ) -> ConversationTurnDeps:
+        if agent_progress is None and self._cached_turn_deps is not None:
             return self._cached_turn_deps
 
         def _maybe_compact(messages: list, *, user_query: str, primary_profile, verbose: int, context_cfg=None) -> list:
@@ -600,7 +604,7 @@ class AgentApp:
                 interactive_tool_recovery=bool(interactive_tool_recovery),
                 stdin_isatty=sys.stdin.isatty(),
             ),
-            agent_progress=self.agent_progress,
+            agent_progress=(agent_progress or self.agent_progress),
             tool_progress_message=lambda tool, params: tool_progress_message_with_settings(
                 tool, params, settings=self.settings
             ),
@@ -613,7 +617,8 @@ class AgentApp:
                 tool_output_max=self.settings_get_int(("ollama", "tool_output_max"), 14000),
             ),
         )
-        self._cached_turn_deps = deps
+        if agent_progress is None:
+            self._cached_turn_deps = deps
         return deps
 
     # --- CLI helpers ---

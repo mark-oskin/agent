@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import datetime
+import contextlib
 import json
 import os
 import shlex
 from dataclasses import dataclass
+from io import StringIO
 from typing import AbstractSet, Callable, Optional
 
 from agentlib.tools.registry import ToolRegistry
@@ -158,19 +160,69 @@ class AgentSession:
         self._parse_while_repl_tokens = parse_while_repl_tokens
         self._call_while_condition_judge = call_while_condition_judge
 
-    def execute_line(self, line: str) -> SessionLineResult:
+    def execute_line(self, line: str, *, emit: Optional[Callable[[dict], None]] = None) -> dict:
+        """
+        Execute one REPL line.
+
+        - When `emit` is provided, all stdout/stderr output produced during handling is captured and
+          forwarded as typed emit events.
+        - Returns a structured dict for embedding callers (CLI can ignore most fields).
+        """
         s = (line or "").strip()
         if not s:
-            return SessionLineResult()
-        if s.startswith("/"):
-            return self._execute_command_line(s)
-        self._execute_user_request(s)
-        return SessionLineResult()
+            return {"type": "noop", "quit": False}
+
+        if emit is None:
+            # Preserve legacy behavior (prints inside handlers).
+            if s.startswith("/"):
+                res = self._execute_command_line(s)
+                return {"type": "command", "quit": bool(res.quit), "output": res.output}
+            answered, final_answer = self._execute_user_request(s)
+            return {
+                "type": "turn",
+                "quit": False,
+                "answered": bool(answered),
+                "answer": final_answer,
+            }
+
+        def _emit_captured(kind: str, text: str) -> None:
+            if not text:
+                return
+            for raw_line in text.splitlines():
+                ln = raw_line.rstrip("\n")
+                if not ln.strip():
+                    continue
+                et = kind
+                if ln.startswith("→ "):
+                    et = "progress"
+                elif ln.startswith("[Thinking]") or ln.startswith("[Done thinking]"):
+                    et = "thinking"
+                elif ln.startswith("Warning:"):
+                    et = "warning"
+                emit({"type": et, "text": ln})
+
+        out_buf = StringIO()
+        err_buf = StringIO()
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            if s.startswith("/"):
+                res = self._execute_command_line(s)
+                payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
+            else:
+                answered, final_answer = self._execute_user_request(s)
+                payload = {
+                    "type": "turn",
+                    "quit": False,
+                    "answered": bool(answered),
+                    "answer": final_answer,
+                }
+        _emit_captured("output", out_buf.getvalue())
+        _emit_captured("stderr", err_buf.getvalue())
+        return payload
 
     def _today_str(self) -> str:
         return datetime.date.today().strftime("%Y-%m-%d (%A)")
 
-    def _execute_user_request(self, user_query: str) -> None:
+    def _execute_user_request(self, user_query: str) -> tuple[bool, Optional[str]]:
         """One normal REPL turn: append messages and run the agent loop."""
         today_str = self._today_str()
         deliverable_wanted = self._user_wants_written_deliverable(user_query)
@@ -248,6 +300,7 @@ class AgentSession:
             enabled_tools=et_turn,
             interactive_tool_recovery=True,
             context_cfg=self.context_cfg,
+            print_answer=False,
         )
         if self.session_save_path:
             try:
@@ -260,6 +313,7 @@ class AgentSession:
                 )
             except OSError as e:
                 print(f"Warning: could not save context: {e}")
+        return bool(answered), final_answer
 
     def _run_with_selected_skill(
         self, req: str, sid: str, *, source: str, selection_rationale: str

@@ -209,9 +209,10 @@ def run_session_lines(session, lines: list[str]) -> None:
     """
     for line in lines:
         res = session.execute_line(line)
-        if res.output:
-            print(res.output)
-        if res.quit:
+        out = res.get("output") or ""
+        if out:
+            print(out)
+        if res.get("quit"):
             break
 
 

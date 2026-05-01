@@ -36,9 +36,14 @@ def run_interactive_repl_loop(
             agent_progress("Cancelled current request (Ctrl-C).")
             print("\n[Cancelled]\n")
             continue
-        if res.quit:
+        if res.get("quit"):
             break
-        if res.output:
-            print(res.output)
+        out = res.get("output") or ""
+        if out:
+            print(out)
+        # For normal turns, `execute_line` returns the answer in the payload.
+        ans = res.get("answer")
+        if isinstance(ans, str) and ans.strip():
+            print(ans)
 
     flush_repl_history()
