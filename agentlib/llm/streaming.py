@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Callable, Optional, Tuple
 
+from agentlib.sink import sink_emit
+
 
 def merge_tool_arguments_delta(old_a, new_a):
     """Combine streamed `arguments` chunks without duplicating full JSON objects."""
@@ -108,10 +110,10 @@ def merge_stream_message_chunks(
         if msg.get("content"):
             chunk = msg["content"]
             if show_thinking and thinking_started and not done_thinking_banner_printed:
-                print("\n\n[Done thinking]\n", end="", flush=True)
+                sink_emit({"type": "thinking", "text": "\n\n[Done thinking]\n", "end": "", "partial": True})
                 done_thinking_banner_printed = True
             if stream_chunks:
-                print(chunk, end="", flush=True)
+                sink_emit({"type": "output", "text": chunk, "end": "", "partial": True})
                 streamed_content = True
             acc["content"] += chunk
         if msg.get("thinking"):
@@ -119,9 +121,9 @@ def merge_stream_message_chunks(
             acc["thinking"] += tchunk
             if show_thinking:
                 if not thinking_started:
-                    print("\n[Thinking]\n", end="", flush=True)
+                    sink_emit({"type": "thinking", "text": "\n[Thinking]\n", "end": "", "partial": True})
                     thinking_started = True
-                print(tchunk, end="", flush=True)
+                sink_emit({"type": "thinking", "text": tchunk, "end": "", "partial": True})
         if msg.get("tool_calls"):
             tool_calls = merge_partial_tool_calls(tool_calls, msg["tool_calls"])
         if data.get("done"):

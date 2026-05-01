@@ -455,19 +455,174 @@ def test_no_web_skips_fetch_page_requirement(monkeypatch):
 
 
 def test_web_required_allows_answer_after_strong_search(monkeypatch):
-    """Web gate requires URL-backed search; fetch_page is not mandatory (avoids step-limit deadlocks)."""
+    """Web gate requires a successful fetch_page before finalizing."""
     out = run_main(
         monkeypatch,
         ["q"],
         [
             json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q"}}),
+            json.dumps({"action": "tool_call", "tool": "fetch_page", "parameters": {"url": "https://u.test"}}),
             json.dumps({"action": "answer", "answer": "done"}),
         ],
         route_web="q",
         route_after_answer=None,
         stub_search_web=lambda q: "[Web results]\nLink: https://u.test\nTitle: t\nSnippet: s\n",
+        stub_fetch_page=lambda url: f"Fetched URL: {url}\nFinal URL: {url}\n\nbody",
     )
     assert out == "done"
+
+
+def test_web_required_blocks_non_answer_that_requests_more_search(monkeypatch):
+    """
+    If web verification is required and we already have URL-backed results, the model must not
+    'answer' with a non-answer that just says it needs to search again.
+    """
+    out = run_main(
+        monkeypatch,
+        ["q"],
+        [
+            json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q"}}),
+            json.dumps(
+                {
+                    "action": "answer",
+                    "answer": (
+                        "The search results do not state the answer. "
+                        "I need to perform a more specific search to confirm."
+                    ),
+                }
+            ),
+            json.dumps({"action": "tool_call", "tool": "fetch_page", "parameters": {"url": "https://u.test"}}),
+            json.dumps({"action": "answer", "answer": "ok"}),
+        ],
+        route_web="q",
+        route_after_answer=None,
+        stub_search_web=lambda q: "[Web results]\nLink: https://u.test\nTitle: t\nSnippet: s\n",
+        stub_fetch_page=lambda url: f"Fetched URL: {url}\nFinal URL: {url}\n\nbody",
+    )
+    assert out == "ok"
+
+
+def test_web_required_blocks_deflection_answer_and_forces_fetch(monkeypatch):
+    """
+    If web verification is required and we already have URL-backed results, the model must not
+    'answer' by punting to 'visit a website'. It should fetch_page and verify.
+    """
+    out = run_main(
+        monkeypatch,
+        ["q"],
+        [
+            json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q"}}),
+            json.dumps(
+                {
+                    "action": "answer",
+                    "answer": (
+                        "I am unable to provide a definitive answer based solely on the provided search snippets. "
+                        "For the most accurate and up-to-date information, please visit the official White House website."
+                    ),
+                }
+            ),
+            json.dumps({"action": "tool_call", "tool": "fetch_page", "parameters": {"url": "https://whitehouse.gov/"}}),
+            json.dumps({"action": "answer", "answer": "ok"}),
+        ],
+        route_web="q",
+        route_after_answer=None,
+        stub_search_web=lambda q: "[Web results]\nLink: https://whitehouse.gov/\nTitle: The White House\nSnippet: s\n",
+        stub_fetch_page=lambda url: f"Fetched URL: {url}\nFinal URL: {url}\n\nbody",
+    )
+    assert out == "ok"
+
+
+def test_web_required_blocks_markup_not_informative_answer(monkeypatch):
+    """
+    If web is required, a fetch_page that returns mostly markup is not a reason to stop with an 'answer'
+    that just says the page didn't contain the fact.
+    """
+    out = run_main(
+        monkeypatch,
+        ["q"],
+        [
+            json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q"}}),
+            json.dumps({"action": "tool_call", "tool": "fetch_page", "parameters": {"url": "https://whitehouse.gov/live/"}}),
+            json.dumps(
+                {
+                    "action": "answer",
+                    "answer": (
+                        "The fetched content is primarily code and schema markup and does not contain the current name."
+                    ),
+                }
+            ),
+            json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q2"}}),
+            json.dumps({"action": "tool_call", "tool": "fetch_page", "parameters": {"url": "https://u.test"}}),
+            json.dumps({"action": "answer", "answer": "ok"}),
+        ],
+        route_web="q",
+        route_after_answer=None,
+        stub_search_web=lambda q: "[Web results]\nLink: https://whitehouse.gov/live/\nTitle: t\nSnippet: s\n",
+        stub_fetch_page=lambda url: f"Fetched URL: {url}\nFinal URL: {url}\n\n<body>...</body>",
+    )
+    assert out == "ok"
+
+
+def test_web_required_allows_clarifying_question_without_fetch(monkeypatch):
+    """
+    Under web_required, the agent may still answer with a clarifying question when the user request is ambiguous.
+    """
+    out = run_main(
+        monkeypatch,
+        ["q"],
+        [
+            json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q"}}),
+            json.dumps({"action": "answer", "answer": "Which country do you mean?"}),
+        ],
+        route_web="q",
+        route_after_answer=None,
+        stub_search_web=lambda q: "[Web results]\nLink: https://u.test\nTitle: t\nSnippet: s\n",
+    )
+    assert out.strip() == "Which country do you mean?"
+
+
+def test_web_required_blocks_answer_saying_fetch_was_unhelpful(monkeypatch):
+    """
+    If web is required, an 'answer' that only reports fetch_page returned CSS/markup and no facts
+    should be rejected and the agent should keep searching/fetching.
+    """
+    out = run_main(
+        monkeypatch,
+        ["q"],
+        [
+            json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q"}}),
+            json.dumps({"action": "tool_call", "tool": "fetch_page", "parameters": {"url": "https://u.bad"}}),
+            json.dumps(
+                {
+                    "action": "answer",
+                    "answer": "The content fetched is mostly CSS styling information and contains no factual text.",
+                }
+            ),
+            json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q2"}}),
+            json.dumps({"action": "tool_call", "tool": "fetch_page", "parameters": {"url": "https://u.test"}}),
+            json.dumps({"action": "answer", "answer": "ok"}),
+        ],
+        route_web="q",
+        route_after_answer=None,
+        stub_search_web=lambda q: "[Web results]\nLink: https://u.bad\nTitle: t\nSnippet: s\n",
+        stub_fetch_page=lambda url: f"Fetched URL: {url}\nFinal URL: {url}\n\n<body>...</body>",
+    )
+    assert out == "ok"
+
+
+def test_search_web_fetch_top_tool_call_runs(monkeypatch):
+    out = run_main(
+        monkeypatch,
+        ["q"],
+        [
+            json.dumps({"action": "tool_call", "tool": "search_web_fetch_top", "parameters": {"query": "q"}}),
+            json.dumps({"action": "answer", "answer": "ok"}),
+        ],
+        route_web="q",
+        route_after_answer=None,
+        stub_search_web_fetch_top=lambda q: "[Web results]\n- t\n  https://u.test\n\n[Fetched excerpts]\n1. t\n   https://u.test\n   Excerpt: hi",
+    )
+    assert out == "ok"
 
 
 def test_web_required_blocks_curl_run_command(monkeypatch):

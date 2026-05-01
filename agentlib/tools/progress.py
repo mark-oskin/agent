@@ -19,6 +19,11 @@ def tool_progress_message(tool: str, params: dict, *, search_backend_banner: str
         banner = search_backend_banner.strip()
         banner_bit = f"{banner} " if banner else ""
         return f"Tool: search_web {banner_bit}query={_clip(p.get('query'))!r}"
+    if t == "search_web_fetch_top":
+        banner = search_backend_banner.strip()
+        banner_bit = f"{banner} " if banner else ""
+        n = p.get("fetch_top_n") if p.get("fetch_top_n") is not None else 10
+        return f"Tool: search_web_fetch_top {banner_bit}query={_clip(p.get('query'))!r} fetch_top_n={_clip(n)!r}"
     if t == "fetch_page":
         return f"Tool: fetch_page url={_clip(p.get('url'))!r}"
     if t == "read_file":

@@ -179,5 +179,7 @@ def call_while_condition_judge(
         preview = (raw or "").replace("\n", " ").strip()
         if len(preview) > 200:
             preview = preview[:199] + "…"
-        print(f"[/while judge] model={prof.backend!r} raw={preview!r} -> {bit}")
+        from agentlib.sink import sink_emit
+
+        sink_emit({"type": "output", "text": f"[/while judge] model={prof.backend!r} raw={preview!r} -> {bit}"})
     return bit

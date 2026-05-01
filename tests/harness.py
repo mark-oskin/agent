@@ -236,6 +236,7 @@ def run_main(
     route_web: Optional[str] = None,
     route_after_answer: Optional[str] = None,
     stub_search_web: Optional[Callable[..., str]] = None,
+    stub_search_web_fetch_top: Optional[Callable[..., str]] = None,
     stub_fetch_page: Optional[Callable[..., str]] = None,
     stub_write_file: Optional[Callable[..., str]] = None,
     stub_read_file: Optional[Callable[..., str]] = None,
@@ -289,6 +290,12 @@ def run_main(
             tool_builtins,
             "search_web",
             lambda query, params=None, settings=None: stub_search_web(query),
+        )
+    if stub_search_web_fetch_top is not None:
+        monkeypatch.setattr(
+            tool_builtins,
+            "search_web_fetch_top",
+            lambda query, params=None, settings=None: stub_search_web_fetch_top(query),
         )
     if stub_fetch_page is not None:
         monkeypatch.setattr(tool_builtins, "fetch_page", lambda url: stub_fetch_page(url))

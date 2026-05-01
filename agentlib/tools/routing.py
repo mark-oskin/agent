@@ -14,8 +14,25 @@ from .plugins import (
 )
 
 
+_WEB_SEARCH_TOOLS_PRIORITY: tuple[str, ...] = ("search_web", "search_web_fetch_top")
+
+
+def preferred_web_search_tool(enabled_tools: Optional[AbstractSet[str]]) -> Optional[str]:
+    """Prefer ``search_web`` when enabled; otherwise ``search_web_fetch_top`` if enabled."""
+    et = set(enabled_tools or ())
+    for name in _WEB_SEARCH_TOOLS_PRIORITY:
+        if name in et:
+            return name
+    return None
+
+
 CORE_TOOL_ENTRIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("search_web", "Web search", ("web", "search", "web search", "internet search")),
+    (
+        "search_web_fetch_top",
+        "Web search + fetch top results",
+        ("search+fetch", "search fetch", "web verify", "web verify search"),
+    ),
     ("fetch_page", "Fetch a web page", ("fetch", "download page", "get url")),
     ("run_command", "Run a shell command", ("shell", "bash", "run", "exec")),
     ("use_git", "Run a git operation", ("git", "git status", "git diff")),
@@ -211,6 +228,7 @@ def describe_tool_call_contract(tool_id: str) -> str:
 
     core = {
         "search_web": "parameters.query (string); optional max_results (1–30). Returns: formatted web results string.",
+        "search_web_fetch_top": "parameters.query (string); optional max_results (1–30), fetch_top_n (1–10). Returns: web results plus fetched excerpts (string).",
         "fetch_page": "parameters.url (http/https URL). Returns: fetched page text (string).",
         "run_command": "parameters.command (shell command). Returns: STDOUT/STDERR string.",
         "use_git": "parameters.op plus additional fields (status|log|diff|add|commit|push|pull|branch). Returns: git output string.",

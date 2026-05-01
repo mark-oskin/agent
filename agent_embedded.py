@@ -22,27 +22,29 @@ def make_demo_emitter() -> Callable[[dict], None]:
         text = ev.get("text") or ""
         if not isinstance(text, str):
             text = str(text)
-        if not text.strip():
+        end = ev.get("end", "\n")
+        flush = bool(ev.get("flush", True))
+        if not text and end == "\n":
             return
         nonlocal in_thinking
         if t == "thinking":
             # Markers come through as separate lines; treat following lines as thinking
             # until we see [Done thinking].
-            if text.startswith("[Thinking]"):
+            if "[Thinking]" in text:
                 in_thinking = True
-            elif text.startswith("[Done thinking]"):
+            if "[Done thinking]" in text:
                 in_thinking = False
-            print(text, file=sys.stderr, flush=True)
+            print(text, file=sys.stderr, end=end, flush=flush)
             return
 
         if t in ("progress", "warning"):
-            print(text, file=sys.stderr, flush=True)
+            print(text, file=sys.stderr, end=end, flush=flush)
         elif t == "stderr":
-            print(text, file=sys.stderr, flush=True)
+            print(text, file=sys.stderr, end=end, flush=flush)
         elif in_thinking:
-            print(text, file=sys.stderr, flush=True)
+            print(text, file=sys.stderr, end=end, flush=flush)
         else:
-            print(text, flush=True)
+            print(text, end=end, flush=flush)
 
     return emit
 

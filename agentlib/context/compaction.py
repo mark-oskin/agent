@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from typing import Callable, Optional, cast
 
 from agentlib.llm.profile import LlmProfile
@@ -154,8 +153,15 @@ def maybe_compact_context_window(
     if approx2 > int(limit * target_frac) and len(tail) > 6:
         new_messages = [*head, summary_msg, *tail[-6:]]
     if verbose >= 3:
-        print(
-            f"[DEBUG] context manager compacted messages: ~{approx} -> ~{approx_message_tokens(new_messages)} tokens",
-            file=sys.stderr,
+        from agentlib.sink import sink_emit
+
+        sink_emit(
+            {
+                "type": "debug",
+                "text": (
+                    f"[DEBUG] context manager compacted messages: ~{approx} -> "
+                    f"~{approx_message_tokens(new_messages)} tokens"
+                ),
+            }
         )
     return new_messages

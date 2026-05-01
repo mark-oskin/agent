@@ -493,7 +493,7 @@ def normalize_agent_dict(d: dict, deps: AgentJsonDeps) -> dict:
                 params.setdefault(k, out[k])
 
         tool_name = out.get("tool")
-        if tool_name == "search_web":
+        if tool_name in ("search_web", "search_web_fetch_top"):
             for alt in ("q", "search", "keywords", "keyword"):
                 if alt in out and out[alt] is not None:
                     params.setdefault("query", out[alt])

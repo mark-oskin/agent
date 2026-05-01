@@ -336,3 +336,14 @@ def search_web(query, params: Optional[dict] = None, *, settings=None) -> str:
         fetch_page=fetch_page,
     )
 
+
+def search_web_fetch_top(query, params: Optional[dict] = None, *, settings=None) -> str:
+    from . import websearch
+
+    return websearch.search_web_fetch_top(
+        str(query or ""),
+        params=params,
+        settings=settings,
+        fetch_page=fetch_page,
+    )
+

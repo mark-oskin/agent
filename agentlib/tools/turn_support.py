@@ -10,14 +10,16 @@ from agentlib.agent_json import try_json_loads_object
 from agentlib.coercion import scalar_to_str
 
 
-TOOL_RECOVERY_TOOLS = frozenset({"run_command", "call_python", "search_web", "fetch_page"})
+TOOL_RECOVERY_TOOLS = frozenset(
+    {"run_command", "call_python", "search_web", "search_web_fetch_top", "fetch_page"}
+)
 
 
 def merge_tool_param_aliases(tool: str, params: dict, *, scalar_to_str_fn=scalar_to_str) -> dict:
     """Map alternate parameter names models use into the keys our tools expect."""
     p = dict(params) if isinstance(params, dict) else {}
     st = scalar_to_str_fn
-    if tool == "search_web":
+    if tool in ("search_web", "search_web_fetch_top"):
         if not st(p.get("query"), "").strip():
             for alt in ("q", "search", "keywords", "keyword", "text"):
                 t = st(p.get(alt), "").strip()
@@ -85,7 +87,7 @@ def ensure_tool_defaults(tool: str, params: dict, user_query: str, *, scalar_to_
     p = dict(params) if isinstance(params, dict) else {}
     st = scalar_to_str_fn
     uq = (user_query or "").strip()
-    if tool == "search_web":
+    if tool in ("search_web", "search_web_fetch_top"):
         if not st(p.get("query"), "").strip():
             p["query"] = uq if uq else "web search"
     return p
@@ -101,11 +103,19 @@ def tool_params_fingerprint(
     """Stable key for deduplicating identical tool calls."""
     if not isinstance(params, dict):
         params = {}
-    if tool == "search_web":
+    if tool in ("search_web", "search_web_fetch_top"):
         q = scalar_to_str_fn(params.get("query"), "").strip()
         qn = re.sub(r"\s+", " ", q).lower().strip(" \t.?!")
         mrx = search_web_effective_max_results(params)
-        return f"{tool}\0{json.dumps({'query': qn, 'max_results': mrx}, sort_keys=True, ensure_ascii=False)}"
+        d: dict = {"query": qn, "max_results": mrx}
+        if tool == "search_web_fetch_top":
+            ftp = params.get("fetch_top_n")
+            if ftp is not None:
+                try:
+                    d["fetch_top_n"] = int(ftp)
+                except (TypeError, ValueError):
+                    d["fetch_top_n"] = scalar_to_str_fn(ftp, "")
+        return f"{tool}\0{json.dumps(d, sort_keys=True, ensure_ascii=False)}"
     return f"{tool}\0{json.dumps(params, sort_keys=True, ensure_ascii=False)}"
 
 
@@ -122,7 +132,7 @@ def web_tool_result_followup_hint(tool: str, result: str) -> str:
         if "Fetch error:" in r[:400] or r.startswith("Fetch error:"):
             return (
                 "The page fetch did not return usable content. If HTTP 4xx/5xx: try another "
-                "URL (official docs, archive, or a different path). Use search_web to find a "
+                "URL (official docs, archive, or a different path). Use your enabled web search tool to find a "
                 "credible page if you do not have a working link. Do not use run_command with curl/wget."
             )
     if t == "search_web":
@@ -136,6 +146,8 @@ def web_tool_result_followup_hint(tool: str, result: str) -> str:
                 "DuckDuckGo may be rate-limiting. Rely on Wikipedia/inline results if present, "
                 "or use fetch_page on a URL from the user or a known-credible source."
             )
+    if t == "search_web_fetch_top":
+        return web_tool_result_followup_hint("search_web", r)
     return ""
 
 
@@ -190,7 +202,7 @@ def tool_result_user_message(
         "IMPORTANT: Treat tool output as authoritative. If the tool output conflicts with your prior knowledge "
         "or training data, trust the tool output. "
         "If the tool output does not contain any concrete sources/URLs, treat it as insufficient for factual claims "
-        "that could be outdated, and call search_web again with a better query or call fetch_page on a credible URL. "
+        "that could be outdated, and call your enabled web search tool again with a better query or call fetch_page on a credible URL. "
         "If snippets are not enough to verify or resolve ambiguity, use fetch_page on a credible URL "
         "(do NOT use run_command with curl/wget to scrape web pages). "
         "If the user’s question is now answered, respond with "
@@ -214,6 +226,8 @@ def tool_result_indicates_retryable_failure(tool: str, result) -> bool:
     if tool == "fetch_page":
         return r.startswith("Fetch error:") or "Fetch error:" in r[:200]
     if tool == "search_web":
+        return "No results found" in r
+    if tool == "search_web_fetch_top":
         return "No results found" in r
     return False
 
@@ -261,7 +275,7 @@ def suggest_tool_recovery_params(
     rec_extra = (
         "For run_command, parameters.command must be the full shell command string. "
         "For call_python, parameters.code must be syntactically valid Python (string). "
-        "For search_web, parameters.query must be a different, non-empty search string than before "
+        "For search_web and search_web_fetch_top, parameters.query must be a different, non-empty search string than before "
         "(e.g. shorter, alternate keywords, add a year, or a site/product name). "
         "For fetch_page, parameters.url must be a different full http(s) URL (not the same as before): "
         "e.g. official site, different path, or a URL from search results."
@@ -284,7 +298,9 @@ def suggest_tool_recovery_params(
     parsed = parse_tool_recovery_payload(raw)
     if not parsed:
         if verbose >= 1:
-            print("[*] Tool recovery: no retry proposal (recovery≠retry or invalid JSON).")
+            from agentlib.sink import sink_emit
+
+            sink_emit({"type": "output", "text": "[*] Tool recovery: no retry proposal (recovery≠retry or invalid JSON)."})
         return None
     new_params, rationale = parsed
     new_params = merge_aliases(tool, new_params)
@@ -303,9 +319,11 @@ def confirm_tool_recovery_retry(
 ) -> bool:
     """Log model-proposed recovery; always proceed with one automatic retry (no y/N prompt)."""
     if interactive_tool_recovery and stdin_isatty:
-        print("\n--- Tool failed; model proposed a corrected retry ---")
-        print(f"Tool: {tool}")
-        print(f"Rationale: {rationale}")
-        print(f"Was: {json.dumps(old_params, ensure_ascii=False)}")
-        print(f"Now: {json.dumps(new_params, ensure_ascii=False)}")
+        from agentlib.sink import sink_emit
+
+        sink_emit({"type": "output", "text": "\n--- Tool failed; model proposed a corrected retry ---"})
+        sink_emit({"type": "output", "text": f"Tool: {tool}"})
+        sink_emit({"type": "output", "text": f"Rationale: {rationale}"})
+        sink_emit({"type": "output", "text": f"Was: {json.dumps(old_params, ensure_ascii=False)}"})
+        sink_emit({"type": "output", "text": f"Now: {json.dumps(new_params, ensure_ascii=False)}"})
     return True

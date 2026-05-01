@@ -4,11 +4,157 @@ import datetime
 import html as html_module
 import json
 import re
-import sys
 from typing import Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
+
+def _unique_in_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for it in items:
+        s = (it or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def urls_from_search_output(search_output: str, *, max_urls: int = 10) -> list[str]:
+    """
+    Extract URLs from `search_web` formatted output, preserving order.
+
+    This is intentionally simple: it looks for http(s):// links and strips trailing punctuation.
+    """
+    s = str(search_output or "")
+    urls = []
+    for m in re.finditer(r"https?://\\S+", s):
+        u = (m.group(0) or "").rstrip(").,]>}\"'")
+        if u:
+            urls.append(u)
+        if len(urls) >= max_urls * 3:
+            break
+    return _unique_in_order(urls)[: max(1, min(30, int(max_urls)))]
+
+
+def _fetch_html(url: str) -> tuple[str, int, str]:
+    """
+    Fetch raw HTML for readability extraction.
+    Returns (final_url, http_status, html_text_or_error).
+    """
+    u = (url or "").strip()
+    if not u:
+        return ("", 0, "Fetch error: empty url string.")
+    if not re.match(r"^https?://", u, re.IGNORECASE):
+        return ("", 0, f"Fetch error: URL must start with http:// or https:// (got {u!r}).")
+    headers = {"User-Agent": "agentlib/1.0 (readability)"}
+    try:
+        r = requests.get(u, headers=headers, timeout=22, allow_redirects=True)
+        st = int(r.status_code)
+        if st >= 400:
+            return (r.url or u, st, f"Fetch error: HTTP {st}")
+        return (r.url or u, st, r.text or "")
+    except Exception as ex:
+        return ("", 0, f"Fetch error: {type(ex).__name__}: {ex}")
+
+
+def _readability_excerpt_from_html(html_text: str, *, url: str, max_chars: int = 2600) -> tuple[str, str]:
+    """
+    Return (title, excerpt_text) using readability-lxml.
+    Falls back to regex tag stripping if readability fails.
+    """
+    body = str(html_text or "")
+    if not body.strip():
+        return ("", "")
+    title = ""
+    text = ""
+    try:
+        from readability import Document  # type: ignore[import-not-found]
+
+        doc = Document(body)
+        title = (doc.short_title() or "").strip()
+        summary_html = doc.summary(html_partial=True) or ""
+        try:
+            import lxml.html  # type: ignore[import-not-found]
+
+            root = lxml.html.fromstring(summary_html)
+            text = root.text_content()
+        except Exception:
+            text = re.sub(r"<[^>]*>", " ", summary_html)
+    except Exception:
+        text = re.sub(r"<[^>]*>", " ", body)
+
+    text = re.sub(r"\\s+", " ", text).strip()
+    if len(text) > max_chars:
+        text = text[: max_chars - 1] + "…"
+    return (title, text)
+
+
+def search_web_fetch_top(
+    query: str,
+    params: Optional[dict] = None,
+    *,
+    settings=None,
+    fetch_page: callable,
+) -> str:
+    """
+    Combined tool: run `search_web`, then fetch and excerpt the top N URLs (default 10).
+
+    Output is a single string containing the original search results plus per-URL excerpts.
+    """
+    p = params if isinstance(params, dict) else {}
+    mr = search_web_effective_max_results(p, settings=settings)
+    n = p.get("fetch_top_n")
+    try:
+        fetch_top_n = int(float(n)) if n is not None else 10
+    except Exception:
+        fetch_top_n = 10
+    fetch_top_n = max(1, min(10, int(fetch_top_n)))
+
+    listing = search_web(query, params={**p, "max_results": mr}, settings=settings, fetch_page=fetch_page)
+    urls = urls_from_search_output(listing, max_urls=fetch_top_n)
+    if not urls:
+        return listing + "\\n\\n[Fetched excerpts]\\n(no urls extracted from search results)"
+
+    # Fetch in parallel (IO-bound)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    recs = []
+    with ThreadPoolExecutor(max_workers=min(10, max(4, len(urls)))) as ex:
+        futs = {ex.submit(_fetch_html, u): u for u in urls}
+        for fut in as_completed(futs):
+            u0 = futs[fut]
+            try:
+                final_url, status, body = fut.result()
+            except Exception as ex2:
+                final_url, status, body = ("", 0, f"Fetch error: {type(ex2).__name__}: {ex2}")
+            if isinstance(body, str) and body.startswith("Fetch error:"):
+                recs.append((u0, final_url, status, "", body))
+                continue
+            title, excerpt = _readability_excerpt_from_html(body, url=u0)
+            recs.append((u0, final_url, status, title, excerpt))
+
+    # Preserve original URL order in output.
+    by_url = {r[0]: r for r in recs}
+    lines = ["[Fetched excerpts]"]
+    for i, u in enumerate(urls, start=1):
+        u0, final_url, status, title, excerpt = by_url.get(u, (u, "", 0, "", ""))
+        t = title.strip() if isinstance(title, str) else ""
+        if t:
+            lines.append(f"{i}. {t}\n   {u0}")
+        else:
+            lines.append(f"{i}. {u0}")
+        if final_url and final_url != u0:
+            lines.append(f"   Final URL: {final_url}")
+        if status:
+            lines.append(f"   HTTP: {status}")
+        if excerpt:
+            lines.append(f"   Excerpt: {excerpt}")
+        else:
+            lines.append("   Excerpt: (empty)")
+        lines.append("")
+    return listing + "\n\n" + "\n".join(lines).rstrip()
 
 
 def _settings_get_bool(settings, group: str, key: str, default: bool) -> bool:
@@ -43,7 +189,9 @@ def _debug_search_web_log(settings) -> Optional[Callable[[str], None]]:
         return None
 
     def log(msg: str) -> None:
-        print(f"[debug_search_web] {msg}", file=sys.stderr, flush=True)
+        from agentlib.sink import sink_emit
+
+        sink_emit({"type": "stderr", "text": f"[debug_search_web] {msg}"})
 
     return log
 

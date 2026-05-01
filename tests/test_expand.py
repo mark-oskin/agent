@@ -188,7 +188,7 @@ def test_tool_result_indicates_retryable_failure():
 
 def test_web_tool_result_followup_hint():
     h = turn_support.web_tool_result_followup_hint("fetch_page", "Fetch error: timeout")
-    assert "search_web" in h and "URL" in h
+    assert "web search" in h.lower() and "URL" in h
     h2 = turn_support.web_tool_result_followup_hint("search_web", "No results found for this search")
     assert "rephrase" in h2.lower() or "query" in h2.lower()
 
@@ -576,6 +576,43 @@ def test_router_prompt_includes_user_query_snippet():
 def test_router_prompt_hint_when_transcript_expected():
     p = router_prompt("yesterday?", "2099-01-01", has_prior_transcript=True)
     assert "Earlier messages" in p
+
+
+def test_system_prompt_omits_disabled_search_web():
+    from agentlib import prompts as agent_prompts
+
+    # Only fetch-top is enabled; `search_web` must not be advertised in the tool list/docs.
+    si = agent_prompts.effective_system_instruction_text_for_tools(
+        None, {"search_web_fetch_top", "fetch_page"}
+    )
+    assert "search_web," not in si  # not in allowed tools list
+    assert "\n1. search_web —" not in si
+    assert "search_web_fetch_top" in si
+
+
+def test_route_requires_websearch_runs_when_only_fetch_top_enabled(monkeypatch):
+    from agentlib import routing
+
+    called = []
+
+    def cap(msgs, primary_profile=None, enabled_tools=None, verbose=0, **kwargs):
+        called.append(enabled_tools)
+        return json.dumps({"action": "web_search", "query": "verify q"})
+
+    q = routing.route_requires_websearch(
+        "today's headline?",
+        "2099-01-02",
+        primary_profile=None,
+        enabled_tools={"search_web_fetch_top", "fetch_page"},
+        transcript_messages=None,
+        coerce_enabled_tools=lambda x: set(x or set()),
+        call_ollama_chat=cap,
+        parse_agent_json=json.loads,
+        scalar_to_str=lambda x, default="": str(x) if x is not None else default,
+        router_transcript_max_messages=80,
+    )
+    assert q == "verify q"
+    assert called and "search_web_fetch_top" in called[0]
 
 
 def test_route_requires_websearch_passes_transcript_to_llm(monkeypatch):

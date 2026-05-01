@@ -5,6 +5,8 @@ from typing import AbstractSet, Callable, Optional, Tuple
 
 import requests
 
+from agentlib.sink import sink_emit
+
 
 def call_ollama_plaintext(
     *,
@@ -112,7 +114,7 @@ def call_llm_json_content(
             msg = choice0.get("message") or {}
             text = (msg.get("content") or "").strip()
             if verbose >= 2 and text:
-                print(text, flush=True)
+                sink_emit({"type": "output", "text": text})
             return text or ""
         except Exception as e:
             return json.dumps({"_call_error": f"Hosted JSON call error: {e}"})
@@ -151,7 +153,7 @@ def call_llm_json_content(
         if usage:
             set_last_ollama_usage(usage)
         if verbose >= 2 and text:
-            print(flush=True)
+            sink_emit({"type": "output", "text": "", "end": "\n"})
         return text
     except Exception as e:
         return json.dumps({"_call_error": f"Ollama JSON call error: {e}"})
@@ -191,11 +193,11 @@ def call_hosted_agent_chat(
         if not text:
             return json.dumps({"action": "answer", "answer": "No response from model."})
         if verbose >= 2:
-            print(text, flush=True)
+            sink_emit({"type": "output", "text": text})
             verbose_emit_final_agent_readable(text)
         return text
     except Exception as e:
-        print(f"[DEBUG] Hosted chat error: {e}")
+        sink_emit({"type": "debug", "text": f"[DEBUG] Hosted chat error: {e}"})
         return json.dumps({"action": "error", "error": str(e)})
 
 
@@ -250,19 +252,19 @@ def call_ollama_chat(
                     r.iter_lines(decode_unicode=True), stream_chunks=stream_llm
                 )
             if ollama_debug:
-                print("[DEBUG] Ollama merged message:", msg)
+                sink_emit({"type": "debug", "text": f"[DEBUG] Ollama merged message: {msg!r}"})
             text = message_to_agent_json_text(msg, enabled_tools)
             return text, usage, streamed
         r = requests.post(url, json=body, timeout=600)
         r.raise_for_status()
         data = r.json()
         if ollama_debug:
-            print("[DEBUG] Ollama API response:", data)
+            sink_emit({"type": "debug", "text": f"[DEBUG] Ollama API response: {data!r}"})
         msg = data.get("message") or {}
         text = message_to_agent_json_text(msg, enabled_tools)
         usage = ollama_usage_from_chat_response(data)
         if stream_llm and text.strip():
-            print(text, flush=True)
+            sink_emit({"type": "output", "text": text})
             return text, usage, True
         return text, usage, False
 
@@ -279,15 +281,15 @@ def call_ollama_chat(
             set_last_ollama_usage(usage)
         if stream_llm:
             if streamed:
-                print(flush=True)
+                sink_emit({"type": "output", "text": "", "end": "\n"})
             if text:
                 verbose_emit_final_agent_readable(text)
         if stream_llm and usage:
-            print(format_ollama_usage_line(usage))
+            sink_emit({"type": "output", "text": format_ollama_usage_line(usage)})
         if not text:
             return json.dumps({"action": "answer", "answer": "No response from model."})
         return text
     except Exception as e:
-        print(f"[DEBUG] Request error: {e}")
+        sink_emit({"type": "debug", "text": f"[DEBUG] Request error: {e}"})
         return json.dumps({"action": "error", "error": str(e)})
 

@@ -11,7 +11,7 @@ def build_embedded_session(*, verbose: int = 0):
     stdin loop. Callers can drive the session via:
 
       session.execute_line("...")              # normal
-      session.execute_line("...", emit=emit)   # capture typed events
+      session.execute_line("...", emit=emit)   # typed events stream as they occur
 
     `/` commands (e.g. `/settings ...`) work the same way in embedded mode.
     """

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import datetime
-import contextlib
 import json
 import os
 import shlex
 from dataclasses import dataclass
-from io import StringIO
 from typing import AbstractSet, Callable, Optional
 
+from agentlib.sink import emit_sink_scope, sink_emit, sink_print_compat
 from agentlib.tools.registry import ToolRegistry
+from agentlib.tools.routing import preferred_web_search_tool
 from agentlib import prompts as agent_prompts
 
 from .runtime import ConversationTurnDeps, run_agent_conversation_turn
@@ -164,8 +164,8 @@ class AgentSession:
         """
         Execute one REPL line.
 
-        - When `emit` is provided, all stdout/stderr output produced during handling is captured and
-          forwarded as typed emit events.
+        - When `emit` is provided, an emit sink is installed for this line so thinking, progress,
+          tool output, and REPL command text stream incrementally via typed emit events (same schema as before).
         - Returns a structured dict for embedding callers (CLI can ignore most fields).
         """
         s = (line or "").strip()
@@ -185,25 +185,7 @@ class AgentSession:
                 "answer": final_answer,
             }
 
-        def _emit_captured(kind: str, text: str) -> None:
-            if not text:
-                return
-            for raw_line in text.splitlines():
-                ln = raw_line.rstrip("\n")
-                if not ln.strip():
-                    continue
-                et = kind
-                if ln.startswith("→ "):
-                    et = "progress"
-                elif ln.startswith("[Thinking]") or ln.startswith("[Done thinking]"):
-                    et = "thinking"
-                elif ln.startswith("Warning:"):
-                    et = "warning"
-                emit({"type": et, "text": ln})
-
-        out_buf = StringIO()
-        err_buf = StringIO()
-        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+        with emit_sink_scope(emit):
             if s.startswith("/"):
                 res = self._execute_command_line(s)
                 payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
@@ -215,9 +197,7 @@ class AgentSession:
                     "answered": bool(answered),
                     "answer": final_answer,
                 }
-        _emit_captured("output", out_buf.getvalue())
-        _emit_captured("stderr", err_buf.getvalue())
-        return payload
+            return payload
 
     def _today_str(self) -> str:
         return datetime.date.today().strftime("%Y-%m-%d (%A)")
@@ -273,12 +253,13 @@ class AgentSession:
             skill_suffix=sprompt0,
         )
         self.messages.append({"role": "user", "content": turn_msg})
-        if router_query and "search_web" in et_turn:
+        _mw = preferred_web_search_tool(et_turn)
+        if router_query and _mw:
             self.messages.append(
                 {
                     "role": "user",
                     "content": (
-                        "Before answering, you MUST call the tool search_web.\n"
+                        f"Before answering, you MUST call the tool {_mw}.\n"
                         "Respond with JSON only in tool_call form.\n"
                         f'Suggested query: "{router_query}"'
                     ),
@@ -312,7 +293,7 @@ class AgentSession:
                     answered,
                 )
             except OSError as e:
-                print(f"Warning: could not save context: {e}")
+                sink_emit({"type": "warning", "text": f"Warning: could not save context: {e}"})
         return bool(answered), final_answer
 
     def _run_with_selected_skill(
@@ -337,14 +318,14 @@ class AgentSession:
         rec = self.skills_map.get(sid) or {}
         skill_prompt = (rec.get("prompt") or "").strip() if isinstance(rec, dict) else ""
         if src == "reuse":
-            print(
+            sink_print_compat(
                 f"/skill reuse: using skill {sid!r} (model skill selection skipped). "
                 f"{selection_rationale}".strip()
             )
         elif src == "explicit":
-            print(f"/skill: using skill {sid!r}. {selection_rationale}".strip())
+            sink_print_compat(f"/skill: using skill {sid!r}. {selection_rationale}".strip())
         else:
-            print(f"/skill auto selected {sid!r}. {selection_rationale}".strip())
+            sink_print_compat(f"/skill auto selected {sid!r}. {selection_rationale}".strip())
         if self.verbose >= 1:
             self._print_skill_usage_verbose(
                 self.verbose,
@@ -387,13 +368,13 @@ class AgentSession:
         if steps:
             wf = ((rec.get("workflow") or {}) if isinstance(rec, dict) else {}) or {}
             step_prompt = (wf.get("step_prompt") or "").strip()
-            print(f"Skill workflow: executing {len(steps)} step(s).", flush=True)
+            sink_print_compat(f"Skill workflow: executing {len(steps)} step(s).", flush=True)
             self._agent_progress(f"Running {len(steps)}-step skill workflow…")
             if self.verbose >= 1:
                 rp = raw_plan or ""
                 cap = 1200
                 preview = rp if len(rp) <= cap else rp[:cap] + "…"
-                print(f"[*] [skills:planner] raw ({len(rp)} chars): {preview}")
+                sink_print_compat(f"[*] [skills:planner] raw ({len(rp)} chars): {preview}")
             step_answers: list[str] = []
             for i, st in enumerate(steps, start=1):
                 title = st.get("title") or f"step {i}"
@@ -427,12 +408,13 @@ class AgentSession:
                     skill_suffix=sprompt0,
                 )
                 self.messages.append({"role": "user", "content": turn_msg})
-                if router_query and "search_web" in et_step and i == 1:
+                _mw_step = preferred_web_search_tool(et_step)
+                if router_query and _mw_step and i == 1:
                     self.messages.append(
                         {
                             "role": "user",
                             "content": (
-                                "Before answering, you MUST call the tool search_web.\n"
+                                f"Before answering, you MUST call the tool {_mw_step}.\n"
                                 "Respond with JSON only in tool_call form.\n"
                                 f'Suggested query: "{router_query}"'
                             ),
@@ -466,7 +448,7 @@ class AgentSession:
                         }
                     )
             if step_answers:
-                print(step_answers[-1])
+                sink_print_compat(step_answers[-1])
             return
 
         self._agent_progress("Running a single agent turn with the selected skill…")
@@ -483,12 +465,13 @@ class AgentSession:
             skill_suffix=skill_prompt,
         )
         self.messages.append({"role": "user", "content": turn_msg})
-        if router_query and "search_web" in et_turn:
+        _mw2 = preferred_web_search_tool(et_turn)
+        if router_query and _mw2:
             self.messages.append(
                 {
                     "role": "user",
                     "content": (
-                        "Before answering, you MUST call the tool search_web.\n"
+                        f"Before answering, you MUST call the tool {_mw2}.\n"
                         "Respond with JSON only in tool_call form.\n"
                         f'Suggested query: "{router_query}"'
                     ),
@@ -519,17 +502,17 @@ class AgentSession:
         if low == "/clear":
             self.messages.clear()
             self.last_reuse_skill_id = None
-            print("Context cleared (including stored skill for /skill reuse).")
+            sink_print_compat("Context cleared (including stored skill for /skill reuse).")
             return SessionLineResult()
         if low == "/models":
             try:
                 names = self._fetch_ollama_local_model_names()
-                print("\n".join(names) if names else "(no models returned)")
+                sink_print_compat("\n".join(names) if names else "(no models returned)")
             except Exception as e:
-                print(f"/models error: {e}")
+                sink_print_compat(f"/models error: {e}")
             return SessionLineResult()
         if low in ("/usage", "/tokens"):
-            print(self._format_last_ollama_usage_for_repl())
+            sink_print_compat(self._format_last_ollama_usage_for_repl())
             return SessionLineResult()
         if s.startswith("/show"):
             return self._cmd_show(s)
@@ -546,7 +529,7 @@ class AgentSession:
         if low.startswith("/save_context"):
             return self._cmd_save_context(s)
         if low in ("/help", "/?"):
-            print(
+            sink_print_compat(
                 "Commands:\n"
                 "  /quit                    Exit\n"
                 "  /clear                   Clear in-memory conversation\n"
@@ -561,17 +544,17 @@ class AgentSession:
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
             )
             return SessionLineResult()
-        print(f"Unknown command {s.split()[0]!r}. Try /help.")
+        sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
         return SessionLineResult()
 
     def _cmd_show(self, s: str) -> SessionLineResult:
         try:
             toks = shlex.split(s)
         except ValueError as e:
-            print(f"/show: {e}")
+            sink_print_compat(f"/show: {e}")
             return SessionLineResult()
         if len(toks) < 2 or toks[1].lower() in ("help", "-h", "--help"):
-            print(
+            sink_print_compat(
                 "Usage:\n"
                 "  /show model      Primary LLM in use (Ollama or hosted)\n"
                 "  /show reviewer   Second-opinion reviewer model\n"
@@ -583,25 +566,25 @@ class AgentSession:
             return SessionLineResult()
         sub = toks[1].lower().replace("-", "_")
         if sub in ("model", "primary", "llm"):
-            print(f"Primary LLM: {self._format_session_primary_llm_line(self.primary_profile)}")
+            sink_print_compat(f"Primary LLM: {self._format_session_primary_llm_line(self.primary_profile)}")
             return SessionLineResult()
         if sub in ("reviewer", "second_opinion", "2nd"):
-            print(
+            sink_print_compat(
                 "Second-opinion reviewer: "
                 + self._format_session_reviewer_line(self.reviewer_hosted_profile, self.reviewer_ollama_model)
             )
             return SessionLineResult()
-        print("Unknown /show topic. Try: /show model   or   /show reviewer")
+        sink_print_compat("Unknown /show topic. Try: /show model   or   /show reviewer")
         return SessionLineResult()
 
     def _cmd_while(self, s: str) -> SessionLineResult:
         try:
             wtoks = shlex.split(s)
         except ValueError as e:
-            print(f"/while: {e}")
+            sink_print_compat(f"/while: {e}")
             return SessionLineResult()
         if len(wtoks) == 1 or (len(wtoks) == 2 and wtoks[1].lower() in ("help", "-h", "--help")):
-            print(
+            sink_print_compat(
                 "Usage:\n"
                 "  /while [--max N] <condition> do <action>\n"
                 "  <condition> and <action> are shlex-quoted; use double or single quotes (use the other kind for quotes inside).\n"
@@ -621,7 +604,7 @@ class AgentSession:
         try:
             max_while, while_cond, body_prompts = self._parse_while_repl_tokens(wtoks)
         except ValueError as e:
-            print(f"/while: {e}")
+            sink_print_compat(f"/while: {e}")
             return SessionLineResult()
         try:
             abort_while = False
@@ -635,10 +618,10 @@ class AgentSession:
                     )
                 except KeyboardInterrupt:
                     self._agent_progress("Cancelled /while (condition check).")
-                    print("\n[Cancelled]\n")
+                    sink_print_compat("\n[Cancelled]\n")
                     break
                 if bit == 0:
-                    print(
+                    sink_print_compat(
                         f"/while: condition false (judge returned 0). Exiting after check {wit}/{max_while}."
                     )
                     break
@@ -650,25 +633,25 @@ class AgentSession:
                         self._execute_user_request(uq)
                     except KeyboardInterrupt:
                         self._agent_progress("Cancelled /while (body).")
-                        print("\n[Cancelled]\n")
+                        sink_print_compat("\n[Cancelled]\n")
                         abort_while = True
                         break
                 if abort_while:
                     break
             else:
-                print(f"/while: reached --max {max_while} without judge returning 0 (exit).")
+                sink_print_compat(f"/while: reached --max {max_while} without judge returning 0 (exit).")
         except Exception as e:
-            print(f"/while error: {e}")
+            sink_print_compat(f"/while error: {e}")
         return SessionLineResult()
 
     def _cmd_skill(self, s: str) -> SessionLineResult:
         try:
             toks = shlex.split(s)
         except ValueError as e:
-            print(f"/skill: {e}")
+            sink_print_compat(f"/skill: {e}")
             return SessionLineResult()
         if len(toks) < 2 or toks[1].lower() in ("help", "-h", "--help"):
-            print(
+            sink_print_compat(
                 "Usage:\n"
                 "  /skill list\n"
                 "  /skill auto <request>\n"
@@ -679,38 +662,38 @@ class AgentSession:
         sub = toks[1].strip()
         if sub.lower() in ("list", "ls"):
             if not self.skills_map:
-                print("(no skills loaded)")
+                sink_print_compat("(no skills loaded)")
             else:
-                print("Skills:")
+                sink_print_compat("Skills:")
                 for sid in sorted(self.skills_map.keys()):
                     rec = self.skills_map.get(sid) or {}
                     desc = (rec.get("description") or "").strip() if isinstance(rec, dict) else ""
-                    print(f"- {sid}" + (f": {desc}" if desc else ""))
+                    sink_print_compat(f"- {sid}" + (f": {desc}" if desc else ""))
             return SessionLineResult()
         if sub.lower() == "auto":
             req = " ".join(toks[2:]).strip()
             if not req:
-                print("Usage: /skill auto <request>")
+                sink_print_compat("Usage: /skill auto <request>")
                 return SessionLineResult()
             sid, why = self._ml_select_skill_id(
                 req, self.skills_map, primary_profile=self.primary_profile, verbose=self.verbose
             )
             if not sid:
-                print(f"/skill auto: no skill selected. {why}".strip())
+                sink_print_compat(f"/skill auto: no skill selected. {why}".strip())
                 return SessionLineResult()
             self._run_with_selected_skill(req, sid, source="auto", selection_rationale=why)
             return SessionLineResult()
         if sub.lower() == "reuse":
             req = " ".join(toks[2:]).strip()
             if not req:
-                print("Usage: /skill reuse <request>")
+                sink_print_compat("Usage: /skill reuse <request>")
                 return SessionLineResult()
             if not self.last_reuse_skill_id:
-                print("/skill reuse: no stored skill. Run /skill auto <request> or /skill <id> <request> first.")
+                sink_print_compat("/skill reuse: no stored skill. Run /skill auto <request> or /skill <id> <request> first.")
                 return SessionLineResult()
             sid2 = self.last_reuse_skill_id
             if sid2 not in self.skills_map:
-                print(
+                sink_print_compat(
                     f"/skill reuse: stored skill {sid2!r} is not in the current skill set. "
                     "Run /skill auto again (check skills_dir / /settings save)."
                 )
@@ -727,10 +710,10 @@ class AgentSession:
         sid = sub
         req = " ".join(toks[2:]).strip()
         if not sid or not req:
-            print("Usage: /skill <skill> <request>")
+            sink_print_compat("Usage: /skill <skill> <request>")
             return SessionLineResult()
         if sid not in self.skills_map:
-            print(
+            sink_print_compat(
                 f"/skill: unknown skill {sid!r}. "
                 "Run /settings save if you changed skills_dir, or check your skills directory."
             )
@@ -744,20 +727,20 @@ class AgentSession:
             try:
                 toks = shlex.split(s)
             except ValueError as e:
-                print(f"/use-skills: {e}")
+                sink_print_compat(f"/use-skills: {e}")
                 return SessionLineResult()
             if len(toks) < 2:
-                print("Usage: /use-skills <user request>")
+                sink_print_compat("Usage: /use-skills <user request>")
                 return SessionLineResult()
             req = " ".join(toks[1:]).strip()
             if not req:
-                print("Usage: /use-skills <user request>")
+                sink_print_compat("Usage: /use-skills <user request>")
                 return SessionLineResult()
             sid, why = self._ml_select_skill_id(
                 req, self.skills_map, primary_profile=self.primary_profile, verbose=self.verbose
             )
             if not sid:
-                print(f"/use-skills: no skill selected. {why}".strip())
+                sink_print_compat(f"/use-skills: no skill selected. {why}".strip())
                 return SessionLineResult()
             self._run_with_selected_skill(req, sid, source="auto", selection_rationale=why)
             return SessionLineResult()
@@ -765,18 +748,18 @@ class AgentSession:
             try:
                 toks = shlex.split(s)
             except ValueError as e:
-                print(f"/use-skill: {e}")
+                sink_print_compat(f"/use-skill: {e}")
                 return SessionLineResult()
             if len(toks) < 3:
-                print("Usage: /use-skill <skill> <user request>")
+                sink_print_compat("Usage: /use-skill <skill> <user request>")
                 return SessionLineResult()
             sid = toks[1].strip()
             req = " ".join(toks[2:]).strip()
             if not sid or not req:
-                print("Usage: /use-skill <skill> <user request>")
+                sink_print_compat("Usage: /use-skill <skill> <user request>")
                 return SessionLineResult()
             if sid not in self.skills_map:
-                print(
+                sink_print_compat(
                     f"/use-skill: unknown skill {sid!r}. "
                     "Run /settings save if you changed skills_dir, or check your skills directory."
                 )
@@ -787,24 +770,24 @@ class AgentSession:
             try:
                 toks = shlex.split(s)
             except ValueError as e:
-                print(f"/reuse-skill: {e}")
+                sink_print_compat(f"/reuse-skill: {e}")
                 return SessionLineResult()
             if len(toks) < 2:
-                print("Usage: /reuse-skill <follow-up request (same skill as last /use-skills or /reuse-skill)>")
+                sink_print_compat("Usage: /reuse-skill <follow-up request (same skill as last /use-skills or /reuse-skill)>")
                 return SessionLineResult()
             req = " ".join(toks[1:]).strip()
             if not req:
-                print("Usage: /reuse-skill <follow-up request>")
+                sink_print_compat("Usage: /reuse-skill <follow-up request>")
                 return SessionLineResult()
             if not self.last_reuse_skill_id:
-                print(
+                sink_print_compat(
                     "/reuse-skill: no stored skill. Run /use-skills <request> first, "
                     "or use a normal line for trigger-based skills."
                 )
                 return SessionLineResult()
             sid2 = self.last_reuse_skill_id
             if sid2 not in self.skills_map:
-                print(
+                sink_print_compat(
                     f"/reuse-skill: stored skill {sid2!r} is not in the current skill set. "
                     "Run /use-skills again (check skills_dir / /settings save)."
                 )
@@ -812,57 +795,57 @@ class AgentSession:
                 return SessionLineResult()
             self._run_with_selected_skill(req, sid2, source="reuse", selection_rationale="Follow-up; model skill selector skipped; same id as last skill run.")
             return SessionLineResult()
-        print(f"Unknown command {s.split()[0]!r}. Try /help.")
+        sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
         return SessionLineResult()
 
     def _cmd_load_context(self, s: str) -> SessionLineResult:
         rest = s.split(None, 1)
         if len(rest) < 2:
-            print("Usage: /load_context <file>")
+            sink_print_compat("Usage: /load_context <file>")
             return SessionLineResult()
         path = rest[1].strip()
         if not path:
-            print("Usage: /load_context <file>")
+            sink_print_compat("Usage: /load_context <file>")
             return SessionLineResult()
         try:
             loaded = self._load_context_messages(path)
         except (OSError, ValueError, json.JSONDecodeError) as e:
-            print(f"/load_context error: {e}")
+            sink_print_compat(f"/load_context error: {e}")
             return SessionLineResult()
         self.messages[:] = loaded
-        print(f"Loaded {len(loaded)} message(s) from {path!r}.")
+        sink_print_compat(f"Loaded {len(loaded)} message(s) from {path!r}.")
         return SessionLineResult()
 
     def _cmd_save_context(self, s: str) -> SessionLineResult:
         rest = s.split(None, 1)
         if len(rest) < 2:
-            print("Usage: /save_context <file>")
+            sink_print_compat("Usage: /save_context <file>")
             return SessionLineResult()
         path = rest[1].strip()
         if not path:
-            print("Usage: /save_context <file>")
+            sink_print_compat("Usage: /save_context <file>")
             return SessionLineResult()
         try:
             self._save_context_bundle(path, self.messages, "", None, False)
         except OSError as e:
-            print(f"/save_context error: {e}")
+            sink_print_compat(f"/save_context error: {e}")
             return SessionLineResult()
         self.session_save_path = path
-        print(f"Wrote current session to {path!r}; further turns auto-save there.")
+        sink_print_compat(f"Wrote current session to {path!r}; further turns auto-save there.")
         return SessionLineResult()
 
     def _cmd_settings(self, s: str) -> SessionLineResult:
         try:
             toks = shlex.split(s)
         except ValueError as e:
-            print(f"/settings: {e}")
+            sink_print_compat(f"/settings: {e}")
             return SessionLineResult()
         if len(toks) < 2:
-            print("Usage: /settings <topic> ...   (try: /settings help)")
+            sink_print_compat("Usage: /settings <topic> ...   (try: /settings help)")
             return SessionLineResult()
         key = toks[1].lower().replace("-", "_")
         if key in ("help", "-h", "--help"):
-            print(
+            sink_print_compat(
                 "Usage:\n"
                 "  /settings save\n"
                 "  /settings model <ollama-model>\n"
@@ -879,55 +862,55 @@ class AgentSession:
         # group-backed settings
         if key in ("ollama", "openai", "agent"):
             if len(toks) < 3:
-                print(
+                sink_print_compat(
                     f"Usage: /settings {key} show | keys | set <name> <value> | unset <name>\n"
                     "  Keys are lowercase (e.g. host, model, api_key). After changing, use /settings save."
                 )
-                print(self._settings_group_keys_lines(key))
+                sink_print_compat(self._settings_group_keys_lines(key))
                 return SessionLineResult()
             sub = toks[2].lower()
             if sub in ("show", "list"):
                 try:
-                    print(self._settings_group_show(key))
+                    sink_print_compat(self._settings_group_show(key))
                 except (ValueError, OSError) as e:
-                    print(f"/settings {key} show: {e}")
+                    sink_print_compat(f"/settings {key} show: {e}")
                 return SessionLineResult()
             if sub in ("keys", "key", "help"):
                 try:
-                    print(self._settings_group_keys_lines(key))
+                    sink_print_compat(self._settings_group_keys_lines(key))
                 except (ValueError, OSError) as e:
-                    print(f"/settings {key} keys: {e}")
+                    sink_print_compat(f"/settings {key} keys: {e}")
                 return SessionLineResult()
             if sub == "set":
                 if len(toks) < 4:
-                    print(f"Usage: /settings {key} set <name> <value (optional, quote spaces with shlex)>")
+                    sink_print_compat(f"Usage: /settings {key} set <name> <value (optional, quote spaces with shlex)>")
                     return SessionLineResult()
                 raw_k = toks[3]
                 value = " ".join(toks[4:]) if len(toks) > 4 else ""
                 try:
                     msg = self._settings_group_set(key, raw_k, value)
                 except ValueError as e:
-                    print(f"/settings {key} set: {e}")
+                    sink_print_compat(f"/settings {key} set: {e}")
                     return SessionLineResult()
-                print(msg)
+                sink_print_compat(msg)
                 return SessionLineResult()
             if sub in ("unset", "delete", "clear"):
                 if len(toks) < 4:
-                    print(f"Usage: /settings {key} unset <name>")
+                    sink_print_compat(f"Usage: /settings {key} unset <name>")
                     return SessionLineResult()
                 try:
                     msg = self._settings_group_unset(key, toks[3])
                 except ValueError as e:
-                    print(f"/settings {key} unset: {e}")
+                    sink_print_compat(f"/settings {key} unset: {e}")
                     return SessionLineResult()
-                print(msg)
+                sink_print_compat(msg)
                 return SessionLineResult()
-            print(f"Unknown /settings {key} subcommand. Try: /settings {key} show | set | unset | keys")
+            sink_print_compat(f"Unknown /settings {key} subcommand. Try: /settings {key} show | set | unset | keys")
             return SessionLineResult()
 
         if key == "verbose":
             if len(toks) != 3:
-                print("Usage: /settings verbose 0|1|2|on|off")
+                sink_print_compat("Usage: /settings verbose 0|1|2|on|off")
                 return SessionLineResult()
             tok = toks[2].strip().lower()
             if tok == "on":
@@ -937,14 +920,14 @@ class AgentSession:
             elif tok in ("0", "1", "2"):
                 self.verbose = int(tok)
             else:
-                print("Usage: /settings verbose 0|1|2|on|off")
+                sink_print_compat("Usage: /settings verbose 0|1|2|on|off")
                 return SessionLineResult()
-            print(self._verbose_ack_message(self.verbose))
+            sink_print_compat(self._verbose_ack_message(self.verbose))
             return SessionLineResult()
 
         if key == "tools":
             if len(toks) == 2 or (len(toks) >= 3 and toks[2].lower() in ("list", "ls", "show")):
-                print(self._registry.format_settings_tools_list(self.enabled_tools))
+                sink_print_compat(self._registry.format_settings_tools_list(self.enabled_tools))
                 plugin_toolsets = self._registry.plugin_toolsets
                 if plugin_toolsets:
                     lines = ["\nToolsets (plugins):"]
@@ -965,7 +948,7 @@ class AgentSession:
                     lines.append("Disable a toolset: /settings tools disable <toolset>")
                     lines.append("Reload plugins:    /settings tools reload")
                     lines.append("Describe a tool:   /settings tools describe <tool-id>")
-                    print("\n".join(lines))
+                    sink_print_compat("\n".join(lines))
                 return SessionLineResult()
             if len(toks) >= 4 and toks[2].lower() in ("enable", "on"):
                 nm = toks[3].strip().lower()
@@ -974,11 +957,11 @@ class AgentSession:
                     self.enabled_toolsets.add(nm)
                     for tid in self._registry.plugin_tools_for_toolset(nm):
                         self.enabled_tools.add(tid)
-                    print(
+                    sink_print_compat(
                         f"Toolset enabled: {nm!r} (tools may be routed per request). Use /settings save to persist."
                     )
                 else:
-                    print(f"Unknown toolset {nm!r}. Try: /settings tools")
+                    sink_print_compat(f"Unknown toolset {nm!r}. Try: /settings tools")
                 return SessionLineResult()
             if len(toks) >= 4 and toks[2].lower() in ("disable", "off"):
                 nm = toks[3].strip().lower()
@@ -987,38 +970,38 @@ class AgentSession:
                     self.enabled_toolsets.discard(nm)
                     for tid in self._registry.plugin_tools_for_toolset(nm):
                         self.enabled_tools.discard(tid)
-                    print(f"Toolset disabled: {nm!r}. Use /settings save to persist.")
+                    sink_print_compat(f"Toolset disabled: {nm!r}. Use /settings save to persist.")
                 else:
-                    print(f"Unknown toolset {nm!r}. Try: /settings tools")
+                    sink_print_compat(f"Unknown toolset {nm!r}. Try: /settings tools")
                 return SessionLineResult()
             if len(toks) >= 3 and toks[2].lower() in ("reload", "refresh"):
                 self._registry.load_plugin_toolsets(self.tools_dir)
                 self._registry.register_aliases()
-                print(f"Reloaded plugin toolsets from {self.tools_dir!r}.")
+                sink_print_compat(f"Reloaded plugin toolsets from {self.tools_dir!r}.")
                 return SessionLineResult()
             if len(toks) >= 4 and toks[2].lower() in ("describe", "desc", "help"):
                 tid = toks[3].strip()
                 if not tid:
-                    print("Usage: /settings tools describe <tool-id>")
+                    sink_print_compat("Usage: /settings tools describe <tool-id>")
                     return SessionLineResult()
                 nm = tid.strip().lower()
                 plugin_toolsets = self._registry.plugin_toolsets
                 if nm in plugin_toolsets:
                     rec = plugin_toolsets.get(nm) or {}
                     desc = str(rec.get("description") or "").strip()
-                    print(f"Toolset: {nm}\nDescription: {desc if desc else '(none)'}")
-                    print("Tools:")
+                    sink_print_compat(f"Toolset: {nm}\nDescription: {desc if desc else '(none)'}")
+                    sink_print_compat("Tools:")
                     for one in sorted(self._registry.plugin_tools_for_toolset(nm)):
-                        print("  - " + one)
+                        sink_print_compat("  - " + one)
                     return SessionLineResult()
-                print(self._registry.describe_tool_call_contract(tid))
+                sink_print_compat(self._registry.describe_tool_call_contract(tid))
                 return SessionLineResult()
-            print("Usage: /settings tools [list] | enable <toolset> | disable <toolset>")
+            sink_print_compat("Usage: /settings tools [list] | enable <toolset> | disable <toolset>")
             return SessionLineResult()
 
         if key == "system_prompt":
             if len(toks) < 3:
-                print(
+                sink_print_compat(
                     "Usage:\n"
                     "  /settings system_prompt show\n"
                     "  /settings system_prompt reset\n"
@@ -1029,47 +1012,51 @@ class AgentSession:
                 return SessionLineResult()
             sub = toks[2].lower()
             if sub == "show":
-                body = agent_prompts.effective_system_instruction_text(self.session_system_prompt)
-                print(f"Effective system prompt ({len(body)} chars):\n{body}")
+                body = agent_prompts.effective_system_instruction_text_for_tools(
+                    self.session_system_prompt, frozenset(self.enabled_tools)
+                )
+                sink_print_compat(f"Effective system prompt ({len(body)} chars):\n{body}")
                 if self.session_system_prompt_path:
-                    print(f"(File-backed: {self.session_system_prompt_path!r})")
+                    sink_print_compat(f"(File-backed: {self.session_system_prompt_path!r})")
                 elif self.session_system_prompt is not None:
-                    print("(Session inline override.)")
+                    sink_print_compat("(Session inline override.)")
                 else:
-                    print("(Built-in default.)")
+                    sink_print_compat("(Built-in default.)")
                 return SessionLineResult()
             if sub in ("reset", "default"):
                 self.session_system_prompt = None
                 self.session_system_prompt_path = None
-                print("System prompt reset to built-in default for this session.")
+                sink_print_compat("System prompt reset to built-in default for this session.")
                 return SessionLineResult()
             if sub == "file":
                 if len(toks) < 4:
-                    print("Usage: /settings system_prompt file <path>")
+                    sink_print_compat("Usage: /settings system_prompt file <path>")
                     return SessionLineResult()
                 path = os.path.expanduser(" ".join(toks[3:]).strip())
                 try:
                     with open(path, "r", encoding="utf-8") as f:
                         body = f.read()
                 except OSError as e:
-                    print(f"/settings system_prompt file: {e}")
+                    sink_print_compat(f"/settings system_prompt file: {e}")
                     return SessionLineResult()
                 if not body.strip():
-                    print("File is empty.")
+                    sink_print_compat("File is empty.")
                     return SessionLineResult()
                 self.session_system_prompt = body
                 self.session_system_prompt_path = os.path.abspath(path)
-                print(
+                sink_print_compat(
                     f"System prompt loaded from {path!r} ({len(body)} chars). "
                     "/settings save will store this path in ~/.agent.json."
                 )
                 return SessionLineResult()
             if sub == "save":
                 if len(toks) < 4:
-                    print("Usage: /settings system_prompt save <path>")
+                    sink_print_compat("Usage: /settings system_prompt save <path>")
                     return SessionLineResult()
                 path = os.path.expanduser(" ".join(toks[3:]).strip())
-                body = agent_prompts.effective_system_instruction_text(self.session_system_prompt)
+                body = agent_prompts.effective_system_instruction_text_for_tools(
+                    self.session_system_prompt, frozenset(self.enabled_tools)
+                )
                 try:
                     parent = os.path.dirname(path)
                     if parent and not os.path.isdir(parent):
@@ -1077,17 +1064,17 @@ class AgentSession:
                     with open(path, "w", encoding="utf-8") as f:
                         f.write(body)
                 except OSError as e:
-                    print(f"/settings system_prompt save: {e}")
+                    sink_print_compat(f"/settings system_prompt save: {e}")
                     return SessionLineResult()
-                print(f"Wrote system prompt ({len(body)} chars) to {path!r}.")
+                sink_print_compat(f"Wrote system prompt ({len(body)} chars) to {path!r}.")
                 return SessionLineResult()
             phrase = " ".join(toks[2:])
             if not phrase.strip():
-                print("Usage: /settings system_prompt <non-empty one-line text>")
+                sink_print_compat("Usage: /settings system_prompt <non-empty one-line text>")
                 return SessionLineResult()
             self.session_system_prompt = phrase
             self.session_system_prompt_path = None
-            print(
+            sink_print_compat(
                 f"System prompt set inline ({len(phrase)} chars). "
                 "/settings save will store the text in ~/.agent.json."
             )
@@ -1095,7 +1082,7 @@ class AgentSession:
 
         if key in ("prompt_template", "prompt_templates", "prompt"):
             if len(toks) < 3:
-                print(
+                sink_print_compat(
                     "Usage:\n"
                     "  /settings prompt_template list\n"
                     "  /settings prompt_template show\n"
@@ -1107,12 +1094,12 @@ class AgentSession:
                 return SessionLineResult()
             sub = toks[2].lower()
             if sub in ("help", "-h", "--help", "explain"):
-                print("Try: /settings prompt_template list")
+                sink_print_compat("Try: /settings prompt_template list")
                 return SessionLineResult()
             if sub == "list":
                 names = sorted(self.prompt_templates.keys())
                 if not names:
-                    print("(no prompt templates)")
+                    sink_print_compat("(no prompt templates)")
                     return SessionLineResult()
                 for nm in names:
                     obj = self.prompt_templates.get(nm) or {}
@@ -1125,85 +1112,85 @@ class AgentSession:
                     line = f"- {nm}{mark}"
                     if desc:
                         line += f": {desc}"
-                    print(line)
+                    sink_print_compat(line)
                 return SessionLineResult()
             if sub == "show":
                 active = self.session_prompt_template or self.template_default
                 body = agent_prompts.resolve_prompt_template_text(active, self.prompt_templates) or ""
-                print(f"Active template: {active!r}\nPrompt ({len(body)} chars):\n{body}")
+                sink_print_compat(f"Active template: {active!r}\nPrompt ({len(body)} chars):\n{body}")
                 return SessionLineResult()
             if sub in ("use", "select"):
                 if len(toks) < 4:
-                    print("Usage: /settings prompt_template use <name>")
+                    sink_print_compat("Usage: /settings prompt_template use <name>")
                     return SessionLineResult()
                 nm = toks[3].strip()
                 if nm not in self.prompt_templates:
-                    print(f"Unknown template {nm!r}. Try: /settings prompt_template list")
+                    sink_print_compat(f"Unknown template {nm!r}. Try: /settings prompt_template list")
                     return SessionLineResult()
                 resolved = agent_prompts.resolve_prompt_template_text(nm, self.prompt_templates)
                 if not resolved:
-                    print(f"Template {nm!r} has no usable text/path.")
+                    sink_print_compat(f"Template {nm!r} has no usable text/path.")
                     return SessionLineResult()
                 self.session_system_prompt = resolved
                 self.session_system_prompt_path = None
                 self.session_prompt_template = nm
-                print(f"Using prompt template {nm!r} for this session.")
+                sink_print_compat(f"Using prompt template {nm!r} for this session.")
                 return SessionLineResult()
             if sub == "default":
                 if len(toks) < 4:
-                    print("Usage: /settings prompt_template default <name>")
+                    sink_print_compat("Usage: /settings prompt_template default <name>")
                     return SessionLineResult()
                 nm = toks[3].strip()
                 if nm not in self.prompt_templates:
-                    print(f"Unknown template {nm!r}. Try: /settings prompt_template list")
+                    sink_print_compat(f"Unknown template {nm!r}. Try: /settings prompt_template list")
                     return SessionLineResult()
                 self.template_default = nm
-                print(f"Default prompt template set to {nm!r} (use /settings save to persist).")
+                sink_print_compat(f"Default prompt template set to {nm!r} (use /settings save to persist).")
                 return SessionLineResult()
             if sub == "set":
                 if len(toks) < 5:
-                    print("Usage: /settings prompt_template set <name> <text>")
+                    sink_print_compat("Usage: /settings prompt_template set <name> <text>")
                     return SessionLineResult()
                 nm = toks[3].strip()
                 text = " ".join(toks[4:]).strip()
                 if not nm:
-                    print("Template name must be non-empty.")
+                    sink_print_compat("Template name must be non-empty.")
                     return SessionLineResult()
                 if not text:
-                    print("Template text must be non-empty.")
+                    sink_print_compat("Template text must be non-empty.")
                     return SessionLineResult()
                 cur = self.prompt_templates.get(nm) or {}
                 desc = str(cur.get("description") or "") if isinstance(cur, dict) else ""
                 self.prompt_templates[nm] = {"kind": "overlay", "description": desc, "text": text}
-                print(f"Template {nm!r} set/updated (overlay). Use /settings save to persist.")
+                sink_print_compat(f"Template {nm!r} set/updated (overlay). Use /settings save to persist.")
                 return SessionLineResult()
             if sub in ("delete", "del", "rm", "remove"):
                 if len(toks) < 4:
-                    print("Usage: /settings prompt_template delete <name>")
+                    sink_print_compat("Usage: /settings prompt_template delete <name>")
                     return SessionLineResult()
                 nm = toks[3].strip()
                 on_disk = os.path.join(self.prompt_templates_dir, f"{nm}.json")
                 if os.path.isfile(on_disk):
-                    print(
+                    sink_print_compat(
                         "Refusing to delete a template that exists as a file on disk in "
                         f"the configured prompt_templates_dir ({self.prompt_templates_dir!r}). "
                         "You can override it in ~/.agent.json with a same-named entry."
                     )
                     return SessionLineResult()
                 if nm not in self.prompt_templates:
-                    print(f"Unknown template {nm!r}.")
+                    sink_print_compat(f"Unknown template {nm!r}.")
                     return SessionLineResult()
                 self.prompt_templates.pop(nm, None)
                 if self.session_prompt_template == nm:
                     self.session_prompt_template = None
-                print(f"Deleted template {nm!r}. Use /settings save to persist.")
+                sink_print_compat(f"Deleted template {nm!r}. Use /settings save to persist.")
                 return SessionLineResult()
-            print("Unknown subcommand. Try: /settings prompt_template list")
+            sink_print_compat("Unknown subcommand. Try: /settings prompt_template list")
             return SessionLineResult()
 
         if key in ("context", "context_manager", "context_window"):
             if len(toks) < 3:
-                print(
+                sink_print_compat(
                     "Usage:\n"
                     "  /settings context show\n"
                     "  /settings context on|off\n"
@@ -1215,7 +1202,7 @@ class AgentSession:
                 return SessionLineResult()
             sub = toks[2].lower()
             if sub == "show":
-                print(
+                sink_print_compat(
                     "Context manager (prefs; env vars may override):\n"
                     f"  enabled: {bool(self.context_cfg.get('enabled', True))}\n"
                     f"  tokens: {self.context_cfg.get('tokens', 0)}  (0 = auto per backend)\n"
@@ -1226,71 +1213,71 @@ class AgentSession:
                 return SessionLineResult()
             if sub in ("on", "enable", "enabled", "true"):
                 self.context_cfg["enabled"] = True
-                print("Context manager enabled for this session. Use /settings save to persist.")
+                sink_print_compat("Context manager enabled for this session. Use /settings save to persist.")
                 return SessionLineResult()
             if sub in ("off", "disable", "disabled", "false"):
                 self.context_cfg["enabled"] = False
-                print("Context manager disabled for this session. Use /settings save to persist.")
+                sink_print_compat("Context manager disabled for this session. Use /settings save to persist.")
                 return SessionLineResult()
             if sub == "tokens":
                 if len(toks) < 4:
-                    print("Usage: /settings context tokens <n>")
+                    sink_print_compat("Usage: /settings context tokens <n>")
                     return SessionLineResult()
                 try:
                     n = int(toks[3], 10)
                 except ValueError:
-                    print("tokens must be an integer.")
+                    sink_print_compat("tokens must be an integer.")
                     return SessionLineResult()
                 if n < 0:
                     n = 0
                 self.context_cfg["tokens"] = n
-                print(f"context tokens set to {n} (0 = auto). Use /settings save to persist.")
+                sink_print_compat(f"context tokens set to {n} (0 = auto). Use /settings save to persist.")
                 return SessionLineResult()
             if sub == "trigger":
                 if len(toks) < 4:
-                    print("Usage: /settings context trigger <0..1>")
+                    sink_print_compat("Usage: /settings context trigger <0..1>")
                     return SessionLineResult()
                 try:
                     x = float(toks[3])
                 except ValueError:
-                    print("trigger must be a number.")
+                    sink_print_compat("trigger must be a number.")
                     return SessionLineResult()
                 self.context_cfg["trigger_frac"] = max(0.05, min(0.95, x))
-                print(f"trigger_frac set to {self.context_cfg['trigger_frac']}. Use /settings save to persist.")
+                sink_print_compat(f"trigger_frac set to {self.context_cfg['trigger_frac']}. Use /settings save to persist.")
                 return SessionLineResult()
             if sub == "target":
                 if len(toks) < 4:
-                    print("Usage: /settings context target <0..1>")
+                    sink_print_compat("Usage: /settings context target <0..1>")
                     return SessionLineResult()
                 try:
                     x = float(toks[3])
                 except ValueError:
-                    print("target must be a number.")
+                    sink_print_compat("target must be a number.")
                     return SessionLineResult()
                 cur_tr = float(self.context_cfg.get("trigger_frac", 0.75))
                 self.context_cfg["target_frac"] = max(0.05, min(cur_tr, x))
-                print(f"target_frac set to {self.context_cfg['target_frac']}. Use /settings save to persist.")
+                sink_print_compat(f"target_frac set to {self.context_cfg['target_frac']}. Use /settings save to persist.")
                 return SessionLineResult()
             if sub in ("keep_tail", "keep", "tail"):
                 if len(toks) < 4:
-                    print("Usage: /settings context keep_tail <n>")
+                    sink_print_compat("Usage: /settings context keep_tail <n>")
                     return SessionLineResult()
                 try:
                     n = int(toks[3], 10)
                 except ValueError:
-                    print("keep_tail must be an integer.")
+                    sink_print_compat("keep_tail must be an integer.")
                     return SessionLineResult()
                 self.context_cfg["keep_tail_messages"] = max(4, n)
-                print(
+                sink_print_compat(
                     f"keep_tail_messages set to {self.context_cfg['keep_tail_messages']}. Use /settings save to persist."
                 )
                 return SessionLineResult()
-            print("Unknown subcommand. Try: /settings context show")
+            sink_print_compat("Unknown subcommand. Try: /settings context show")
             return SessionLineResult()
 
         if key == "save":
             if len(toks) != 2:
-                print("Usage: /settings save")
+                sink_print_compat("Usage: /settings save")
                 return SessionLineResult()
             try:
                 payload = self._build_agent_prefs_payload(
@@ -1314,26 +1301,26 @@ class AgentSession:
                 )
                 self._write_agent_prefs_file(payload)
             except OSError as e:
-                print(f"/settings save error: {e}")
+                sink_print_compat(f"/settings save error: {e}")
                 return SessionLineResult()
-            print(f"Saved settings to {self._agent_prefs_path()!r}.")
+            sink_print_compat(f"Saved settings to {self._agent_prefs_path()!r}.")
             return SessionLineResult()
 
         if key == "model":
             if len(toks) < 3:
-                print("Usage: /settings model <ollama-model-name>")
+                sink_print_compat("Usage: /settings model <ollama-model-name>")
                 return SessionLineResult()
             name = toks[2].strip()
             if not name:
-                print("Usage: /settings model <ollama-model-name>")
+                sink_print_compat("Usage: /settings model <ollama-model-name>")
                 return SessionLineResult()
             self._settings_set(("ollama", "model"), name)
-            print(f"ollama.model set to {name!r}. Use /settings save to persist.")
+            sink_print_compat(f"ollama.model set to {name!r}. Use /settings save to persist.")
             return SessionLineResult()
 
         if key == "enable":
             if len(toks) < 3:
-                print(
+                sink_print_compat(
                     "Usage: /settings enable second_opinion|<tool or phrase>\n"
                     "  Examples: /settings enable web search   /settings enable shell   /settings enable stream_thinking\n"
                     "  See: /settings tools"
@@ -1343,29 +1330,29 @@ class AgentSession:
             feat = self._registry.canonicalize_user_tool_phrase(phrase)
             if feat == "second_opinion":
                 self.second_opinion_on = True
-                print("second_opinion enabled for this session.")
+                sink_print_compat("second_opinion enabled for this session.")
                 return SessionLineResult()
             if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
                 self._settings_set(("agent", "stream_thinking"), True)
-                print(
+                sink_print_compat(
                     "stream_thinking enabled for this session (streams model thinking when available). Use /settings save to persist."
                 )
                 return SessionLineResult()
             if feat == "verbose":
                 self.verbose = 2
-                print(self._verbose_ack_message(self.verbose))
+                sink_print_compat(self._verbose_ack_message(self.verbose))
                 return SessionLineResult()
             tn = self._registry.normalize_tool_name(phrase)
             if tn:
                 self.enabled_tools.add(tn)
-                print(f"Tool enabled: {tn}")
+                sink_print_compat(f"Tool enabled: {tn}")
                 return SessionLineResult()
-            print(self._registry.format_unknown_tool_hint(phrase))
+            sink_print_compat(self._registry.format_unknown_tool_hint(phrase))
             return SessionLineResult()
 
         if key == "disable":
             if len(toks) < 3:
-                print(
+                sink_print_compat(
                     "Usage: /settings disable second_opinion|<tool or phrase>\n"
                     "  Examples: /settings disable web search   /settings disable shell   /settings disable stream_thinking\n"
                     "  See: /settings tools"
@@ -1375,27 +1362,27 @@ class AgentSession:
             feat = self._registry.canonicalize_user_tool_phrase(phrase)
             if feat == "second_opinion":
                 self.second_opinion_on = False
-                print("second_opinion disabled for this session.")
+                sink_print_compat("second_opinion disabled for this session.")
                 return SessionLineResult()
             if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
                 self._settings_set(("agent", "stream_thinking"), False)
-                print("stream_thinking disabled for this session. Use /settings save to persist.")
+                sink_print_compat("stream_thinking disabled for this session. Use /settings save to persist.")
                 return SessionLineResult()
             if feat == "verbose":
                 self.verbose = 0
-                print(self._verbose_ack_message(self.verbose))
+                sink_print_compat(self._verbose_ack_message(self.verbose))
                 return SessionLineResult()
             tn = self._registry.normalize_tool_name(phrase)
             if tn:
                 self.enabled_tools.discard(tn)
-                print(f"Tool disabled: {tn}")
+                sink_print_compat(f"Tool disabled: {tn}")
                 return SessionLineResult()
-            print(self._registry.format_unknown_tool_hint(phrase))
+            sink_print_compat(self._registry.format_unknown_tool_hint(phrase))
             return SessionLineResult()
 
         if key == "thinking":
             if len(toks) < 3:
-                print(
+                sink_print_compat(
                     "Usage:\n"
                     "  /settings thinking show\n"
                     "  /settings thinking on|off\n"
@@ -1413,14 +1400,14 @@ class AgentSession:
                 lvl = self._agent_thinking_level()
                 on = self._agent_thinking_enabled_default_false()
                 st = "on" if on else "off"
-                print(
+                sink_print_compat(
                     f"thinking: {st}; level: {lvl or '(none)'}; ollama think value: {think_v!r}; stream_thinking: {self._agent_stream_thinking_enabled()}"
                 )
                 return SessionLineResult()
             if sub in ("on", "enable", "enabled", "true"):
                 self._settings_set(("agent", "thinking"), True)
                 self._settings_set(("agent", "stream_thinking"), True)
-                print(
+                sink_print_compat(
                     "thinking enabled for this session (and stream_thinking enabled). Use /settings save to persist."
                 )
                 return SessionLineResult()
@@ -1428,40 +1415,40 @@ class AgentSession:
                 self._settings_set(("agent", "thinking"), False)
                 self._settings_set(("agent", "thinking_level"), "")
                 self._settings_set(("agent", "stream_thinking"), False)
-                print(
+                sink_print_compat(
                     "thinking disabled for this session (and stream_thinking disabled). Use /settings save to persist."
                 )
                 return SessionLineResult()
             if sub == "level":
                 if len(toks) < 4:
-                    print("Usage: /settings thinking level low|medium|high")
+                    sink_print_compat("Usage: /settings thinking level low|medium|high")
                     return SessionLineResult()
                 lvl = toks[3].strip().lower()
                 if lvl not in ("low", "medium", "high"):
-                    print("thinking level must be one of: low, medium, high")
+                    sink_print_compat("thinking level must be one of: low, medium, high")
                     return SessionLineResult()
                 self._settings_set(("agent", "thinking_level"), lvl)
                 self._settings_set(("agent", "thinking"), True)
                 self._settings_set(("agent", "stream_thinking"), True)
-                print(
+                sink_print_compat(
                     f"thinking level set to {lvl!r} for this session (and stream_thinking enabled). Use /settings save to persist."
                 )
                 return SessionLineResult()
-            print("Unknown /settings thinking subcommand. Try: /settings thinking show | on | off | level …")
+            sink_print_compat("Unknown /settings thinking subcommand. Try: /settings thinking show | on | off | level …")
             return SessionLineResult()
 
         if key == "primary" and len(toks) >= 4 and toks[2].lower() == "llm":
             sub = toks[3].lower()
             if sub == "ollama":
                 self.primary_profile = self._default_primary_llm_profile()
-                print("Primary LLM: local Ollama.")
+                sink_print_compat("Primary LLM: local Ollama.")
             elif sub == "hosted":
                 if len(toks) < 6:
-                    print("Usage: /settings primary llm hosted <base_url> <model> [api_key]")
+                    sink_print_compat("Usage: /settings primary llm hosted <base_url> <model> [api_key]")
                     return SessionLineResult()
                 bu, mod = toks[4], toks[5]
                 if not bu.startswith(("http://", "https://")):
-                    print("base_url must start with http:// or https://")
+                    sink_print_compat("base_url must start with http:// or https://")
                     return SessionLineResult()
                 keyval = toks[6] if len(toks) > 6 else ""
                 self.primary_profile = self._LlmProfile(
@@ -1471,13 +1458,13 @@ class AgentSession:
                     api_key=keyval,
                 )
                 if not (keyval or "").strip():
-                    print("Note: api_key is not set; hosted primary calls will fail until it is.")
-                print(
+                    sink_print_compat("Note: api_key is not set; hosted primary calls will fail until it is.")
+                sink_print_compat(
                     "Primary LLM: hosted OpenAI-compatible API "
                     f"({self._describe_llm_profile_short(self.primary_profile)})."
                 )
             else:
-                print("Usage: /settings primary llm ollama|hosted …")
+                sink_print_compat("Usage: /settings primary llm ollama|hosted …")
             return SessionLineResult()
 
         if toks[1].replace("-", "_").lower() == "second_opinion" and len(toks) >= 4 and toks[2].lower() == "llm":
@@ -1486,14 +1473,14 @@ class AgentSession:
                 self.reviewer_hosted_profile = None
                 self.reviewer_ollama_model = toks[4] if len(toks) > 4 else None
                 om = self.reviewer_ollama_model or self._ollama_second_opinion_model()
-                print(f"Second-opinion reviewer: local Ollama, model {om!r}.")
+                sink_print_compat(f"Second-opinion reviewer: local Ollama, model {om!r}.")
             elif sub == "hosted":
                 if len(toks) < 6:
-                    print("Usage: /settings second_opinion llm hosted <base_url> <model> [api_key]")
+                    sink_print_compat("Usage: /settings second_opinion llm hosted <base_url> <model> [api_key]")
                     return SessionLineResult()
                 bu, mod = toks[4], toks[5]
                 if not bu.startswith(("http://", "https://")):
-                    print("base_url must start with http:// or https://")
+                    sink_print_compat("base_url must start with http:// or https://")
                     return SessionLineResult()
                 keyval = toks[6] if len(toks) > 6 else ""
                 self.reviewer_hosted_profile = self._LlmProfile(
@@ -1504,15 +1491,15 @@ class AgentSession:
                 )
                 self.reviewer_ollama_model = None
                 if not (keyval or "").strip():
-                    print("Note: api_key is not set; hosted second opinion will fail until it is.")
-                print(
+                    sink_print_compat("Note: api_key is not set; hosted second opinion will fail until it is.")
+                sink_print_compat(
                     "Second-opinion reviewer: hosted "
                     f"({self._describe_llm_profile_short(self.reviewer_hosted_profile)})."
                 )
             else:
-                print("Usage: /settings second_opinion llm ollama|hosted …")
+                sink_print_compat("Usage: /settings second_opinion llm ollama|hosted …")
             return SessionLineResult()
 
-        print("Unknown /settings subcommand. Try /help.")
+        sink_print_compat("Unknown /settings subcommand. Try /help.")
         return SessionLineResult()
 

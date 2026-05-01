@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import AbstractSet, Callable, Optional
 
+from agentlib.tools.routing import preferred_web_search_tool
+
 
 ROUTER_INSTRUCTIONS = (
     "You are a routing assistant for a tool-using agent.\n"
@@ -90,7 +92,8 @@ def route_requires_websearch(
     Ask the model whether to do web search first.
     Returns a query string if web search is needed, else None.
     """
-    if "search_web" not in coerce_enabled_tools(enabled_tools):
+    et = coerce_enabled_tools(enabled_tools)
+    if preferred_web_search_tool(et) is None:
         return None
     slice_ = router_transcript_slice(
         transcript_messages, router_transcript_max_messages=router_transcript_max_messages
@@ -98,7 +101,7 @@ def route_requires_websearch(
     tail = router_prompt(user_query, today_str, has_prior_transcript=bool(slice_))
     msgs = router_llm_messages(slice_, tail)
     try:
-        raw = call_ollama_chat(msgs, primary_profile, enabled_tools)
+        raw = call_ollama_chat(msgs, primary_profile, et)
         d = parse_agent_json(raw)
         a = (d.get("action") or "").strip()
         if a == "web_search":
@@ -127,7 +130,8 @@ def route_requires_websearch_after_answer(
     Backup router pass when the model answered tool-free.
     This prompt is intentionally conservative: if verifying would be helpful, search.
     """
-    if "search_web" not in coerce_enabled_tools(enabled_tools):
+    et = coerce_enabled_tools(enabled_tools)
+    if preferred_web_search_tool(et) is None:
         return None
     uq = (user_query or "").strip()
     ans = (proposed_answer or "").strip()
@@ -151,7 +155,7 @@ def route_requires_websearch_after_answer(
     )
     msgs = router_llm_messages(slice_, prompt)
     try:
-        raw = call_ollama_chat(msgs, primary_profile, enabled_tools)
+        raw = call_ollama_chat(msgs, primary_profile, et)
         d = parse_agent_json(raw)
         a = (d.get("action") or "").strip()
         if a == "web_search":

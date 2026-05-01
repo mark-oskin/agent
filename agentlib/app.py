@@ -60,6 +60,7 @@ from agentlib.repl.io import repl_buffered_line_max_bytes
 from agentlib.repl.loop import run_interactive_repl_loop
 from agentlib.repl.while_cmd import call_while_condition_judge, parse_while_repl_tokens, parse_while_judge_bit
 from agentlib.runtime import ConversationTurnDeps, run_agent_conversation_turn
+from agentlib.sink import sink_emit
 from agentlib.skills.loader import load_skills_from_dir
 from agentlib.skills.planner import skill_plan_steps as skill_plan_steps_impl
 from agentlib.skills.selection import match_skill_detail, ml_select_skill_id as ml_select_skill_id_impl
@@ -67,6 +68,7 @@ from agentlib.tools import builtins as tool_builtins
 from agentlib.tools.progress import tool_progress_message_with_settings
 from agentlib.tools import turn_support
 from agentlib.tools.registry import ToolRegistry
+from agentlib.tools.routing import preferred_web_search_tool
 from agentlib.tools.websearch import search_backend_banner_line, search_web_effective_max_results
 
 
@@ -257,7 +259,7 @@ class AgentApp:
     def agent_progress(self, msg: str) -> None:
         if not self.agent_progress_enabled() or not (msg or "").strip():
             return
-        print(f"→ {msg.strip()}", file=sys.stderr, flush=True)
+        sink_emit({"type": "progress", "text": f"→ {msg.strip()}"})
 
     # --- LLM calls (overridable in tests by monkeypatching these methods) ---
 
@@ -411,11 +413,11 @@ class AgentApp:
         et = sorted(effective_tools)
         bt = sorted(base_tools)
         if set(bt) != set(et):
-            print(f"[*] [skills:{source}] id={sk!r} tools={et} (narrowed from session {bt})")
+            sink_emit({"type": "output", "text": f"[*] [skills:{source}] id={sk!r} tools={et} (narrowed from session {bt})"})
         else:
-            print(f"[*] [skills:{source}] id={sk!r} tools={et}")
+            sink_emit({"type": "output", "text": f"[*] [skills:{source}] id={sk!r} tools={et}"})
         if detail:
-            print(f"[*] [skills:{source}] {detail}")
+            sink_emit({"type": "output", "text": f"[*] [skills:{source}] {detail}"})
 
     def effective_enabled_tools_for_skill(
         self, base_enabled: AbstractSet[str], skills_map: dict, skill_id: Optional[str]
@@ -564,6 +566,9 @@ class AgentApp:
             ),
             search_backend_banner_line=lambda: search_backend_banner_line(self.settings),
             search_web=lambda query, params=None: tool_builtins.search_web(
+                query, params=params, settings=self.settings
+            ),
+            search_web_fetch_top=lambda query, params=None: tool_builtins.search_web_fetch_top(
                 query, params=params, settings=self.settings
             ),
             fetch_page=tool_builtins.fetch_page,
@@ -1184,7 +1189,7 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
                 )
                 return
 
-    si0 = prompts.effective_system_instruction_text(sys_prompt_override)
+    si0 = prompts.effective_system_instruction_text_for_tools(sys_prompt_override, frozenset(enabled_tools))
     first_user = (
         f"{si0}\n\n"
         f"Today's date (system clock): {today_str}\n\n"
@@ -1227,12 +1232,13 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
     if deliverable_skip_mandatory_web(user_query):
         router_query = None
     web_required = bool(router_query)
-    if router_query and "search_web" in enabled_tools:
+    _mw_run = preferred_web_search_tool(frozenset(enabled_tools))
+    if router_query and _mw_run:
         messages.append(
             {
                 "role": "user",
                 "content": (
-                    "Before answering, you MUST call the tool search_web.\n"
+                    f"Before answering, you MUST call the tool {_mw_run}.\n"
                     "Respond with JSON only in tool_call form.\n"
                     f'Suggested query: "{router_query}"'
                 ),

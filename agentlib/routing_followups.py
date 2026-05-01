@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import re
+from typing import AbstractSet
+
+from agentlib.tools.routing import preferred_web_search_tool
 
 
-def tool_need_review_followup(user_query: str, proposed_answer: str) -> str:
+def tool_need_review_followup(
+    user_query: str, proposed_answer: str, enabled_tools: AbstractSet[str]
+) -> str:
     """
     Model-driven check when the assistant answered tool-free on the first turn.
 
@@ -14,6 +19,7 @@ def tool_need_review_followup(user_query: str, proposed_answer: str) -> str:
     """
     uq = (user_query or "").strip()
     ans = (proposed_answer or "").strip()
+    wt = preferred_web_search_tool(enabled_tools) or "search_web"
     return (
         "You just responded with action=answer without using any tools.\n\n"
         "User request:\n"
@@ -23,11 +29,11 @@ def tool_need_review_followup(user_query: str, proposed_answer: str) -> str:
         "Internally decide: does answering the user's question correctly require fresh, verifiable "
         "facts from the web (news, prices, who holds an office today, versions, outages, etc.)?\n\n"
         "Respond with JSON only:\n"
-        '- If YES, use {"action":"tool_call","tool":"search_web","parameters":{"query":"..."}} with a focused query.\n'
+        f'- If YES, use {{"action":"tool_call","tool":"{wt}","parameters":{{"query":"..."}}}} with a focused query.\n'
         '- If NO, use {"action":"answer","answer":"..."} where the `answer` value is your **complete** reply to the '
         "user's question—normal helpful content only. Do **not** fill `answer` with meta about whether web search "
         'is needed, "timeless" facts, or timeliness—those belong in your internal decision, not in `answer`.\n'
-        "If unsure whether facts may be stale, prefer search_web.\n"
+        f"If unsure whether facts may be stale, prefer {wt}.\n"
         "Do not include any other keys."
     )
 
@@ -54,7 +60,7 @@ def self_capability_followup(user_query: str, proposed_answer: str) -> str:
     uq = (user_query or "").strip()
     ans = (proposed_answer or "").strip()
     tools = (
-        "search_web, fetch_page, run_command, use_git, write_file, read_file, list_directory, "
+        "search_web, search_web_fetch_top, fetch_page, run_command, use_git, write_file, read_file, list_directory, "
         "download_file, tail_file, replace_text, call_python"
     )
     return (

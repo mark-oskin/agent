@@ -5,8 +5,101 @@ from __future__ import annotations
 import re
 from typing import AbstractSet, Any, Optional, Tuple
 
+from agentlib.sink import sink_emit
+from agentlib.tools.routing import preferred_web_search_tool
+
 from .deps import ConversationTurnDeps
 
+_NEEDS_MORE_WEB_RE = re.compile(
+    r"(?is)\b("
+    r"need to (?:do|perform|run|try) (?:a|another|more|a more specific) (?:web )?search"
+    r"|need to search (?:again|more)"
+    r"|need to (?:perform|do|run|try) another query"
+    r"|i (?:should|must|need to) (?:search|look) (?:it|this) up"
+    r"|i (?:can't|cannot) (?:tell|determine|confirm) from (?:these|the) results"
+    r")\b"
+)
+
+
+def _answer_requests_more_web(answer_text: str) -> bool:
+    """Heuristic: model 'answered' but is really requesting another web lookup."""
+    a = (answer_text or "").strip()
+    if not a:
+        return False
+    return bool(_NEEDS_MORE_WEB_RE.search(a))
+
+
+_DEFLECTS_UNDER_WEB_REQUIRED_RE = re.compile(
+    r"(?is)\b("
+    r"unable to provide"
+    r"|cannot provide"
+    r"|can't provide"
+    r"|unable to (?:confirm|determine)"
+    r"|cannot (?:confirm|determine)"
+    r"|can't (?:confirm|determine)"
+    r"|do not contain a definitive"
+    r"|does not contain"
+    r"|doesn't contain"
+    r"|missing the current"
+    r"|missing the name"
+    r"|primarily code"
+    r"|schema markup"
+    r"|css/structure"
+    r"|css styling"
+    r"|styling information"
+    r"|no factual (?:text|information)"
+    r"|contains no factual"
+    r"|does not contain any factual"
+    r"|fetched content.*(?:does not contain|contains no)"
+    r"|html/schema"
+    r"|not (?:a )?definitive"
+    r"|conflicting"
+    r"|ambiguous"
+    r"|based solely on (?:the )?provided search snippets"
+    r"|please visit"
+    r"|recommend checking"
+    r"|recommend (?:you )?(?:checking|visiting)"
+    r"|i recommend (?:checking|visiting)"
+    r"|visit (?:the )?(?:official|primary) source"
+    r"|for (?:the )?most accurate.*visit"
+    r"|major news"
+    r"|reputable news"
+    r"|please provide an authoritative link"
+    r"|provide an authoritative link"
+    r"|i will be unable to definitively answer"
+    r"|unable to definitively answer"
+    r")\b"
+)
+
+
+def _answer_deflects_instead_of_verifying(answer_text: str) -> bool:
+    """Heuristic: model punts user to websites instead of fetching/verifying."""
+    a = (answer_text or "").strip()
+    if not a:
+        return False
+    return bool(_DEFLECTS_UNDER_WEB_REQUIRED_RE.search(a))
+
+
+_CLARIFYING_QUESTION_RE = re.compile(
+    r"(?is)\b("
+    r"which"
+    r"|what"
+    r"|do you mean"
+    r"|could you"
+    r"|can you"
+    r"|please clarify"
+    r")\b"
+)
+
+
+def _answer_is_clarifying_question(answer_text: str) -> bool:
+    """Allow answering with a clarifying question even under web_required."""
+    a = (answer_text or "").strip()
+    if not a:
+        return False
+    if a.endswith("?"):
+        return True
+    return bool(_CLARIFYING_QUESTION_RE.search(a))
 
 def run_agent_conversation_turn(
     messages: list,
@@ -28,20 +121,26 @@ def run_agent_conversation_turn(
     print_answer: bool = True,
 ) -> Tuple[bool, Optional[str]]:
     et = deps.coerce_enabled_tools(enabled_tools)
-    if web_required and "search_web" not in et:
+    mandatory_web_tool = preferred_web_search_tool(et)
+    if web_required and mandatory_web_tool is None:
         web_required = False
     seen_tool_fingerprints: set = set()
     reviewed_tool_need = False
     saw_strong_web_result = False
     answered = False
     tool_executed = False
+    tool_calls_executed = 0
+    fetch_pages_executed = 0
     second_opinion_rounds = 0
     final_answer: Optional[str] = None
     deliverable_path: Optional[str] = None
     deliverable_read_ok = False
     deliverable_file_chars = 0
     known = deps.all_known_tools()
-    for _ in range(30):
+    step_limit = 15 if web_required else 30
+    fetch_limit = 15
+    verified_by_fetch = False
+    for _ in range(step_limit):
         messages = deps.maybe_compact_context_window(
             messages,
             user_query=user_query,
@@ -77,8 +176,66 @@ def run_agent_conversation_turn(
                         "content": (
                             "You must not answer from memory for this request because web verification is required. "
                             "No usable web results have been obtained yet (or they were empty/blocked). "
-                            "Call search_web again with a different, more effective query, or fetch_page on a credible source URL "
+                            f"Call {mandatory_web_tool} again with a different, more effective query, or fetch_page on a credible source URL "
                             "from any results you do have. Respond with JSON tool_call only."
+                        ),
+                    }
+                )
+                continue
+            ans_out0 = response_data.get("answer")
+            if web_required and not verified_by_fetch:
+                # Web required means we need a real page fetch, not just URL-backed search snippets.
+                # However, if the correct response is to ask the user for clarification (ambiguous request),
+                # allow that without further tool calls.
+                if isinstance(ans_out0, str) and _answer_is_clarifying_question(ans_out0):
+                    pass
+                else:
+                    messages.append({"role": "assistant", "content": response_text})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Web verification is required. You must call fetch_page on a credible source URL "
+                                "before giving a final answer. If the current results don't include a good URL, "
+                                f"call {mandatory_web_tool} again with a better query to find a more direct page, then fetch_page it. "
+                                "Do not answer yet. Respond with JSON tool_call only."
+                            ),
+                        }
+                    )
+                    continue
+            if (
+                web_required
+                and saw_strong_web_result
+                and isinstance(ans_out0, str)
+                and _answer_requests_more_web(ans_out0)
+            ):
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You said you need to search again. Do not respond with action answer yet. "
+                            f"Call {mandatory_web_tool} again with a more effective query (or fetch_page on a credible URL) "
+                            "and respond with JSON tool_call only."
+                        ),
+                    }
+                )
+                continue
+            if (
+                web_required
+                and saw_strong_web_result
+                and isinstance(ans_out0, str)
+                and _answer_deflects_instead_of_verifying(ans_out0)
+            ):
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Web verification is required and you already have URL-backed search results. "
+                            "Do not punt the user to 'visit a website' or say you can't answer from snippets. "
+                            "Fetch and verify: call fetch_page on a credible source URL from the results (prefer official sites), "
+                            "then answer with the verified name and cite the source. Respond with JSON tool_call only."
                         ),
                     }
                 )
@@ -203,7 +360,7 @@ def run_agent_conversation_turn(
                         {
                             "role": "user",
                             "content": (
-                                "Before finalizing, you MUST call the tool search_web to verify.\n"
+                                f"Before finalizing, you MUST call the tool {mandatory_web_tool} to verify.\n"
                                 "Respond with JSON only in tool_call form.\n"
                                 f'Suggested query: "{router_q2}"'
                             ),
@@ -215,7 +372,7 @@ def run_agent_conversation_turn(
                 elif deps.is_self_capability_question(user_query):
                     follow = deps.self_capability_followup(user_query, proposed)
                 else:
-                    follow = deps.tool_need_review_followup(user_query, proposed)
+                    follow = deps.tool_need_review_followup(user_query, proposed, et)
                 messages.append({"role": "user", "content": follow})
                 continue
             messages.append({"role": "assistant", "content": response_text})
@@ -246,14 +403,14 @@ def run_agent_conversation_turn(
                     )
                     continue
             if print_answer:
-                print(ans_out if ans_out is not None else "")
+                sink_emit({"type": "answer", "text": ans_out if ans_out is not None else ""})
             final_answer = ans_out if isinstance(ans_out, str) else str(ans_out)
             answered = True
             break
         elif action == "error":
             messages.append({"role": "assistant", "content": response_text})
             err = response_data.get("error")
-            print(f"Agent error: {err}")
+            sink_emit({"type": "error", "text": f"Agent error: {err}"})
             final_answer = str(err) if err is not None else None
             answered = True
             break
@@ -273,14 +430,17 @@ def run_agent_conversation_turn(
             policy_blocked = False
             if verbose >= 1:
                 if skipped_duplicate:
-                    print(f"[*] Skipping duplicate tool: {tool} (same logical parameters as earlier)")
+                    sink_emit({"type": "output", "text": f"[*] Skipping duplicate tool: {tool} (same logical parameters as earlier)"})
                 else:
                     if tool == "search_web":
-                        print(
-                            f"[*] Executing tool: {tool} ({deps.search_backend_banner_line()}) with {params}"
+                        sink_emit(
+                            {
+                                "type": "output",
+                                "text": f"[*] Executing tool: {tool} ({deps.search_backend_banner_line()}) with {params}",
+                            }
                         )
                     else:
-                        print(f"[*] Executing tool: {tool} with {params}")
+                        sink_emit({"type": "output", "text": f"[*] Executing tool: {tool} with {params}"})
             if skipped_duplicate:
                 result = (
                     "[Duplicate call skipped: this tool was already run with the same parameters "
@@ -288,10 +448,27 @@ def run_agent_conversation_turn(
                 )
             else:
                 tool_executed = True
+                tool_calls_executed += 1
                 if verbose < 1:
                     deps.agent_progress(deps.tool_progress_message(tool, params))
                 result = ""
-                if tool in known and tool not in et:
+                if web_required and tool_calls_executed > 15:
+                    result = (
+                        "Tool error: web verification budget exceeded (15 tool calls). "
+                        "Stop and explain the verification failure."
+                    )
+                    policy_blocked = True
+                if not policy_blocked and tool == "fetch_page":
+                    fetch_pages_executed += 1
+                    if web_required and fetch_pages_executed > fetch_limit:
+                        result = (
+                            "Tool error: web verification budget exceeded (15 fetch_page calls). "
+                            "Stop and explain the verification failure."
+                        )
+                        policy_blocked = True
+                if policy_blocked:
+                    pass
+                elif tool in known and tool not in et:
                     policy_blocked = True
                     result = (
                         f"Tool error: {tool} is disabled for this run (tool policy). "
@@ -301,6 +478,8 @@ def run_agent_conversation_turn(
                     try:
                         if tool == "search_web":
                             result = deps.search_web(params.get("query"), params=params)
+                        elif tool == "search_web_fetch_top":
+                            result = deps.search_web_fetch_top(params.get("query"), params=params)
                         elif tool == "fetch_page":
                             result = deps.fetch_page(params.get("url"))
                         elif tool == "run_command":
@@ -363,12 +542,14 @@ def run_agent_conversation_turn(
                     new_fp = deps.tool_params_fingerprint(tool, new_params)
                     if new_fp == orig_fp:
                         if verbose >= 1:
-                            print("[*] Tool recovery: proposed parameters unchanged; skip retry.")
+                            sink_emit({"type": "output", "text": "[*] Tool recovery: proposed parameters unchanged; skip retry."})
                     elif dedupe_ok and new_fp in seen_tool_fingerprints:
                         if verbose >= 1:
-                            print(
-                                "[*] Tool recovery: proposed parameters match an earlier "
-                                "tool call; skip retry."
+                            sink_emit(
+                                {
+                                    "type": "output",
+                                    "text": "[*] Tool recovery: proposed parameters match an earlier tool call; skip retry.",
+                                }
                             )
                     elif deps.confirm_tool_recovery_retry(
                         tool,
@@ -380,7 +561,7 @@ def run_agent_conversation_turn(
                         params = new_params
                         fp = new_fp
                         if verbose >= 1:
-                            print(f"[*] Re-running {tool} after confirmed recovery.")
+                            sink_emit({"type": "output", "text": f"[*] Re-running {tool} after confirmed recovery."})
                         else:
                             deps.agent_progress(f"Tool: {tool} (retry)")
                         tool_executed = True
@@ -397,6 +578,8 @@ def run_agent_conversation_turn(
                             result = deps.call_python(params.get("code"), params.get("globals"))
                         elif tool == "search_web":
                             result = deps.search_web(params.get("query"), params=params)
+                        elif tool == "search_web_fetch_top":
+                            result = deps.search_web_fetch_top(params.get("query"), params=params)
                         elif tool == "fetch_page":
                             result = deps.fetch_page(params.get("url"))
                         note = "[After one user-confirmed corrected retry]\n"
@@ -405,7 +588,7 @@ def run_agent_conversation_turn(
                         ):
                             result = note + result
                     elif verbose >= 1:
-                        print("[*] Tool recovery: retry not confirmed.")
+                        sink_emit({"type": "output", "text": "[*] Tool recovery: retry not confirmed."})
             if tool == "write_file" and deliverable_wanted and not policy_blocked:
                 wp = deps.scalar_to_str(params.get("path"), "").strip()
                 if wp and (not str(result).startswith("Write error:")):
@@ -427,6 +610,12 @@ def run_agent_conversation_turn(
                 # provides the authoritative content). Count that as "strong" too.
                 if tool == "search_web" and not deps.is_tool_result_weak_for_dedup(result):
                     saw_strong_web_result = True
+                elif tool == "search_web_fetch_top" and not deps.is_tool_result_weak_for_dedup(result):
+                    saw_strong_web_result = True
+                    # This tool includes page fetches + excerpts; count that as verification.
+                    rtxt = str(result or "")
+                    if rtxt and "[Fetched excerpts]" in rtxt and "Excerpt:" in rtxt and "Fetch error:" not in rtxt[:200]:
+                        verified_by_fetch = True
                 elif tool == "fetch_page":
                     rtxt = str(result or "")
                     if (
@@ -435,6 +624,7 @@ def run_agent_conversation_turn(
                         and re.search(r"https?://", rtxt)
                     ):
                         saw_strong_web_result = True
+                        verified_by_fetch = True
             if dedupe_ok and not skipped_duplicate and not policy_blocked:
                 if orig_fp not in seen_tool_fingerprints:
                     seen_tool_fingerprints.add(orig_fp)
@@ -476,12 +666,29 @@ def run_agent_conversation_turn(
             continue
     if not answered:
         if web_required and not saw_strong_web_result:
-            print(
-                "Unable to verify with web: no strong search result (URL-backed) was obtained in this turn. "
-                "Refusing to answer from memory alone. "
-                "Try again with a more specific query, fetch_page on a URL the user provided, "
-                "or check network / site blocking."
+            sink_emit(
+                {
+                    "type": "output",
+                    "text": (
+                        "Unable to verify with web: no strong search result (URL-backed) was obtained in this turn. "
+                        "Refusing to answer from memory alone. "
+                        "Try again with a more specific query, fetch_page on a URL the user provided, "
+                        "or check network / site blocking."
+                    ),
+                }
             )
         else:
-            print("Unable to complete the request within the step limit.")
+            sink_emit(
+                {
+                    "type": "output",
+                    "text": (
+                        "Unable to complete the request within the step limit."
+                        if not web_required
+                        else (
+                            "Unable to complete web verification within the step/tool budget. "
+                            "Try again with a more specific query or provide a source URL to fetch."
+                        )
+                    ),
+                }
+            )
     return answered, final_answer
