@@ -15,8 +15,11 @@ def build_embedded_session(*, verbose: int = 0):
 
     `/` commands (e.g. `/settings ...`) work the same way in embedded mode.
     """
+    import requests
+
     from agentlib.app import default_app
     from agentlib.context.io import load_context_messages, save_context_bundle
+    from agentlib.llm.discovery import fetch_ollama_local_model_names as fetch_ollama_local_model_names_impl
     from agentlib.deliverables import deliverable_skip_mandatory_web, user_wants_written_deliverable
     from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
     from agentlib.prefs import bootstrap as prefs_bootstrap
@@ -147,7 +150,9 @@ def build_embedded_session(*, verbose: int = 0):
         system_prompt_path=st.get("system_prompt_path"),
         session_prompt_template=None,
         agent_progress=app.agent_progress,
-        fetch_ollama_local_model_names=lambda: [],
+        fetch_ollama_local_model_names=lambda: fetch_ollama_local_model_names_impl(
+            app.ollama_base_url(), http_get=requests.get, timeout=60
+        ),
         format_last_ollama_usage_for_repl=lambda: "",
         format_session_primary_llm_line=format_session_primary_llm_line,
         format_session_reviewer_line=format_session_reviewer_line,

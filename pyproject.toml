@@ -16,6 +16,11 @@ dependencies = [
 [project.scripts]
 agent = "agent:main"
 
+[project.optional-dependencies]
+tui = [
+    "textual>=0.83.0",
+]
+
 [tool.setuptools]
 py-modules = ["agent"]
 
