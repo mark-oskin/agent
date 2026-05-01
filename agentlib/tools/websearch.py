@@ -59,7 +59,7 @@ def _fetch_html(url: str) -> tuple[str, int, str]:
         return ("", 0, f"Fetch error: {type(ex).__name__}: {ex}")
 
 
-def _readability_excerpt_from_html(html_text: str, *, url: str, max_chars: int = 2600) -> tuple[str, str]:
+def readability_excerpt_from_html(html_text: str, *, url: str = "", max_chars: int = 2600) -> tuple[str, str]:
     """
     Return (title, excerpt_text) using readability-lxml.
     Falls back to regex tag stripping if readability fails.
@@ -85,7 +85,7 @@ def _readability_excerpt_from_html(html_text: str, *, url: str, max_chars: int =
     except Exception:
         text = re.sub(r"<[^>]*>", " ", body)
 
-    text = re.sub(r"\\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
     if len(text) > max_chars:
         text = text[: max_chars - 1] + "…"
     return (title, text)
@@ -132,7 +132,7 @@ def search_web_fetch_top(
             if isinstance(body, str) and body.startswith("Fetch error:"):
                 recs.append((u0, final_url, status, "", body))
                 continue
-            title, excerpt = _readability_excerpt_from_html(body, url=u0)
+            title, excerpt = readability_excerpt_from_html(body, url=u0)
             recs.append((u0, final_url, status, title, excerpt))
 
     # Preserve original URL order in output.

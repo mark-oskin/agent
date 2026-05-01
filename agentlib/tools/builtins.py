@@ -11,6 +11,8 @@ from typing import Optional
 
 import requests
 
+from agentlib.tools.websearch import readability_excerpt_from_html
+
 
 def _scalar_to_str(x, default: str) -> str:
     if x is None:
@@ -210,11 +212,22 @@ def fetch_page(url):
                 "Do not use run_command with curl."
             )
         final_url = resp.url
-        text = re.sub(r"<[^>]*>", " ", resp.text)
-        text = re.sub(r"\\s+", " ", text).strip()
-        prefix = f"Fetched URL: {url}\\nFinal URL: {final_url}\\n\\n"
+        raw_html = resp.text or ""
+        prefix = f"Fetched URL: {url}\nFinal URL: {final_url}\n\n"
         if attempt == 1:
             prefix = "[After automatic retry] " + prefix
+        title, excerpt = readability_excerpt_from_html(
+            raw_html, url=final_url, max_chars=8000
+        )
+        excerpt = (excerpt or "").strip()
+        if excerpt:
+            parts = [prefix]
+            if (title or "").strip():
+                parts.append(f"Title: {(title or '').strip()}\n\n")
+            parts.append(excerpt)
+            return "".join(parts)
+        text = re.sub(r"<[^>]*>", " ", raw_html)
+        text = re.sub(r"\s+", " ", text).strip()
         return prefix + text[:5000]
     if last_exc is not None:
         return f"Fetch error: {last_exc}"

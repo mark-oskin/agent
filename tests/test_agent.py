@@ -893,6 +893,31 @@ def test_fetch_page_prefix_contains_urls(monkeypatch):
     assert "https://example.com/there" in out
 
 
+def test_fetch_page_prefers_readability_article_body(monkeypatch):
+    """fetch_page uses readability extraction (not naive tag-strip) when possible."""
+    import requests
+
+    html = """<!DOCTYPE html><html><head><title>Article Title</title></head><body>
+<div id="nav">Skip Nav Alpha Beta Gamma Delta</div>
+<article class="story"><h1>Headline</h1><p>Unique body sentence for readability test.</p></article>
+</body></html>"""
+
+    class Resp:
+        status_code = 200
+        url = "https://example.com/story"
+        text = html
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(requests, "get", lambda url, **kwargs: Resp())
+    from agentlib.tools import builtins as tool_builtins
+
+    out = tool_builtins.fetch_page("https://example.com/story")
+    assert "Unique body sentence for readability test." in out
+    assert "Title: Article Title" in out
+
+
 def test_user_wants_written_deliverable_true():
     from agentlib.deliverables import user_wants_written_deliverable
 
