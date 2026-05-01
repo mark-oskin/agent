@@ -198,6 +198,8 @@ def build_test_session(
         verbose_ack_message=app.verbose_ack_message,
         parse_while_repl_tokens=parse_while_repl_tokens,
         call_while_condition_judge=call_while_judge,
+        python_fork_agent=None,
+        python_delegate_line=None,
     )
     return app, session
 

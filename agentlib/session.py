@@ -4,8 +4,10 @@ import datetime
 import json
 import os
 import shlex
+import traceback
 from dataclasses import dataclass
-from typing import AbstractSet, Callable, Optional
+from pathlib import Path
+from typing import AbstractSet, Callable, Iterable, Optional
 
 from agentlib.sink import emit_sink_scope, sink_emit, sink_print_compat
 from agentlib.tools.registry import ToolRegistry
@@ -91,6 +93,8 @@ class AgentSession:
         verbose_ack_message: Callable[[int], str],
         parse_while_repl_tokens: Callable[[list[str]], tuple[int, str, list[str]]],
         call_while_condition_judge: Callable[..., int],
+        python_fork_agent: Optional[Callable[..., dict]] = None,
+        python_delegate_line: Optional[Callable[..., dict]] = None,
     ):
         self.settings = settings
         self.verbose = int(verbose)
@@ -159,6 +163,9 @@ class AgentSession:
         self._verbose_ack_message = verbose_ack_message
         self._parse_while_repl_tokens = parse_while_repl_tokens
         self._call_while_condition_judge = call_while_condition_judge
+
+        self.python_fork_agent = python_fork_agent
+        self.python_delegate_line = python_delegate_line
 
     def execute_line(self, line: str, *, emit: Optional[Callable[[dict], None]] = None) -> dict:
         """
@@ -528,7 +535,15 @@ class AgentSession:
             return self._cmd_load_context(s)
         if low.startswith("/save_context"):
             return self._cmd_save_context(s)
+        if low.startswith("/call_python"):
+            return self._cmd_call_python(s)
         if low in ("/help", "/?"):
+            ma = ""
+            if self.python_fork_agent is not None:
+                ma = (
+                    "  /fork NAME [\"cmd1,cmd2\"]           Fork lane from history; switch to new lane\n"
+                    "  /fork_background NAME [\"cmd1,cmd2\"]   Fork lane without switching sidebar focus\n"
+                )
             sink_print_compat(
                 "Commands:\n"
                 "  /quit                    Exit\n"
@@ -542,9 +557,130 @@ class AgentSession:
                 "  /settings ...            Configuration (try /settings help)\n"
                 "  /load_context <file>     Replace session messages from JSON\n"
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
+                "  /call_python ...         Run Python in-process (try /call_python help)\n"
+                + ma
             )
             return SessionLineResult()
         sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
+        return SessionLineResult()
+
+    def _split_call_python_rest(self, s: str) -> tuple[str, Optional[str]]:
+        """Return (kind, payload): help | error | code | file."""
+        prefix = "/call_python"
+        t = (s or "").strip()
+        low = t.lower()
+        if not low.startswith(prefix):
+            return ("bad", None)
+        rest = t[len(prefix) :].strip()
+        if not rest or rest.lower() in ("help", "-h", "--help", "-?"):
+            return ("help", None)
+        try:
+            parts = shlex.split(rest)
+        except ValueError as e:
+            return ("error", str(e))
+        if not parts:
+            return ("help", None)
+        if parts[0] == "-c":
+            if len(parts) < 2:
+                return ("error", "/call_python -c requires Python source")
+            return ("code", " ".join(parts[1:]))
+        return ("file", parts[0])
+
+    def _cmd_call_python(self, s: str) -> SessionLineResult:
+        """
+        Execute Python in this interpreter (full ``__builtins__`` — trusted users only).
+
+        Injected globals: ``ai``, ``fork_agent``, ``session`` (this AgentSession),
+        ``print`` (routes through emit/sink like other REPL output).
+
+        ``ai(line)`` runs ``execute_line(line)`` on this session (LLM turns and ``/`` commands).
+        ``ai(line, agent_name)`` forwards to ``python_delegate_line`` when configured (multi-agent UIs).
+
+        ``fork_agent(name[, commands])`` calls ``python_fork_agent`` when configured.
+        """
+        kind, payload = self._split_call_python_rest(s)
+        if kind == "help":
+            sink_print_compat(
+                "/call_python — run Python in the agent process\n\n"
+                "Usage:\n"
+                "  /call_python help\n"
+                "  /call_python -c CODE          One logical line (quote for spaces)\n"
+                "  /call_python PATH.py          UTF-8 script file\n\n"
+                "Globals:\n"
+                "  ai(cmd)                       Same as typing ``cmd`` here (LLM or ``/command``).\n"
+                "  ai(cmd, agent_name)           Target another agent when multi-agent hooks exist.\n"
+                "  fork_agent(name [, cmds])     Fork a lane when ``python_fork_agent`` is wired.\n"
+                "  session                       This AgentSession.\n"
+                "  print(...)                    Routed like REPL output (emit when streaming).\n"
+            )
+            return SessionLineResult()
+        if kind == "bad":
+            sink_print_compat("/call_python: invalid invocation.")
+            return SessionLineResult()
+        if kind == "error":
+            sink_print_compat(f"/call_python: {payload}")
+            return SessionLineResult()
+
+        session = self
+
+        def ai(cmd: str, agent_name: Optional[str] = None) -> dict:
+            line = (cmd or "").strip()
+            if not line:
+                return {"type": "noop", "quit": False}
+            sub = (agent_name or "").strip()
+            if sub:
+                dl = session.python_delegate_line
+                if dl is None:
+                    sink_print_compat(
+                        "ai(..., agent_name) requires a multi-agent host "
+                        "(e.g. agent_tui.py); delegate hook not configured."
+                    )
+                    return {"type": "command", "quit": False, "output": "delegate unavailable"}
+                return dl(sub, line)
+            return session.execute_line(line)
+
+        def fork_agent(name: str, commands: Optional[Iterable[str]] = None) -> dict:
+            hook = session.python_fork_agent
+            cmds = None if commands is None else list(commands)
+            if hook is None:
+                sink_print_compat(
+                    "fork_agent() requires a multi-agent host (e.g. agent_tui.py); hook not configured."
+                )
+                return {"type": "fork", "ok": False, "error": "fork unavailable"}
+            return hook(str(name).strip(), cmds)
+
+        g = {
+            "__builtins__": __builtins__,
+            "__name__": "__call_python__",
+            "ai": ai,
+            "fork_agent": fork_agent,
+            "session": session,
+            "print": sink_print_compat,
+        }
+
+        try:
+            if kind == "code":
+                assert payload is not None
+                filename = "<call_python -c>"
+                src = payload
+            else:
+                assert payload is not None
+                path = Path(payload).expanduser()
+                if not path.is_file():
+                    sink_print_compat(f"/call_python: not a file: {path}")
+                    return SessionLineResult()
+                filename = str(path.resolve())
+                src = path.read_text(encoding="utf-8")
+            code = compile(src, filename, "exec")
+            # Use the same mapping for globals and locals so imports and top-level defs
+            # live in ``g``. With ``exec(code, g, {})``, CPython treats the code like a class
+            # body and binds module-level imports into the empty locals dict, so functions
+            # (whose __globals__ is ``g``) see NameError for stdlib/third-party names.
+            exec(code, g, g)
+        except BaseException:
+            sink_print_compat(traceback.format_exc())
+            return SessionLineResult()
+
         return SessionLineResult()
 
     def _cmd_show(self, s: str) -> SessionLineResult:

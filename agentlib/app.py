@@ -926,6 +926,8 @@ class AgentApp:
             verbose_ack_message=self.verbose_ack_message,
             parse_while_repl_tokens=parse_while_repl_tokens,
             call_while_condition_judge=call_while_judge,
+            python_fork_agent=None,
+            python_delegate_line=None,
         )
 
         run_interactive_repl_loop(

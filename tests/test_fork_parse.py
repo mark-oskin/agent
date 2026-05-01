@@ -1,4 +1,9 @@
-from fork_parse import parse_fork_command, parse_kill_command
+from fork_parse import (
+    format_fork_command_line,
+    parse_fork_background_command,
+    parse_fork_command,
+    parse_kill_command,
+)
 
 
 def test_parse_fork_name_only():
@@ -22,6 +27,28 @@ def test_parse_fork_not_fork():
 def test_parse_fork_invalid():
     assert parse_fork_command("/fork") is None
     assert parse_fork_command('/fork Name "unclosed') is None
+
+
+def test_parse_fork_shlex_quoted_name():
+    assert parse_fork_command("/fork 'Bob Jr'") == ("Bob Jr", [])
+
+
+def test_format_fork_roundtrip():
+    assert parse_fork_command(format_fork_command_line("Reviewer", ["a", "b"])) == (
+        "Reviewer",
+        ["a", "b"],
+    )
+    line = format_fork_command_line("Bob Jr", [])
+    assert parse_fork_command(line) == ("Bob Jr", [])
+
+
+def test_parse_fork_background_matches_fork_body():
+    assert parse_fork_background_command('/fork_background X "a,b"') == parse_fork_command(
+        '/fork X "a,b"'
+    )
+    assert parse_fork_background_command("/fork_background Y hello") == parse_fork_command(
+        "/fork Y hello"
+    )
 
 
 def test_parse_kill_basic():

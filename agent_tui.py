@@ -17,8 +17,10 @@ Fork the current agent's history into a new lane (same shared app wiring)::
 
     /fork Reviewer "Short task one,Short task two"
     /fork Experiment
+    /fork_background Worker "queued task"
 
-Quoted part is optional; comma-separated requests run on the new agent in order.
+``/fork_background`` creates the lane but keeps the current agent focused; comma-separated
+requests still run on the new lane when quoted as with ``/fork``.
 
 Close an agent by display name (must be unique among lanes)::
 
@@ -26,6 +28,11 @@ Close an agent by display name (must be unique among lanes)::
     /kill "Agent 2"
 
 At least one agent must remain.
+
+Run Python in-process (same helpers as CLI): ``/call_python help`` — ``ai()`` targets this lane;
+``ai(cmd, name)`` and ``fork_agent()`` target other lanes when using multi-agent hooks.
+
+Prompt history is **per lane**: focus the bottom input and press **↑** / **↓** to recall prior lines for that agent.
 """
 
 from __future__ import annotations
@@ -36,7 +43,12 @@ import threading
 import traceback
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from fork_parse import parse_fork_command, parse_kill_command
+from fork_parse import (
+    format_fork_command_line,
+    parse_fork_background_command,
+    parse_fork_command,
+    parse_kill_command,
+)
 
 
 def _die_need_tui_extra() -> None:
@@ -53,6 +65,7 @@ try:
     from rich.markup import escape
     from rich.text import Text
     from textual import on
+    from textual.actions import SkipAction
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
@@ -93,6 +106,8 @@ def _parse_agent_spec(spec: str) -> Tuple[str, str]:
 class AgentTuiApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=True),
+        Binding("up", "prompt_hist_prev", "", show=False, priority=True),
+        Binding("down", "prompt_hist_next", "", show=False, priority=True),
     ]
 
     CSS = """
@@ -194,6 +209,8 @@ class AgentTuiApp(App[None]):
         self._activity_logs: List[RichLog] = []
         self._stream_widgets: List[Static] = []
         self._chat_logs: List[RichLog] = []
+        self._prompt_hist_lines: Dict[int, List[str]] = {}
+        self._prompt_hist_idx: Dict[int, Optional[int]] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -229,7 +246,7 @@ class AgentTuiApp(App[None]):
                 yield OptionList(*opts, id="agent_list")
         yield Input(
             id="prompt",
-            placeholder="Message or /command… · /fork … · /kill NAME",
+            placeholder="Message (↑↓ history per agent) · /fork · /kill · /call_python …",
         )
         yield Footer()
 
@@ -241,16 +258,26 @@ class AgentTuiApp(App[None]):
         ol = self.query_one("#agent_list", OptionList)
         ol.highlighted = 0
 
+        py_kw = dict(
+            python_fork_agent=self._python_fork_bridge,
+            python_delegate_line=self._python_delegate_bridge,
+        )
         for i, (label, model_part) in enumerate(self._specs):
             prof = LlmProfile(backend="ollama", model=model_part) if model_part.strip() else None
             if i == 0:
                 app, sess = build_embedded_session(
-                    verbose=int(self._verbose), primary_profile=prof, app=None
+                    verbose=int(self._verbose),
+                    primary_profile=prof,
+                    app=None,
+                    **py_kw,
                 )
                 self._embed_app = app
             else:
                 _, sess = build_embedded_session(
-                    verbose=int(self._verbose), primary_profile=prof, app=self._embed_app
+                    verbose=int(self._verbose),
+                    primary_profile=prof,
+                    app=self._embed_app,
+                    **py_kw,
                 )
             self._sessions.append(sess)
             self._stream_buf[i] = ""
@@ -277,6 +304,42 @@ class AgentTuiApp(App[None]):
 
     def action_quit(self) -> None:
         self.exit()
+
+    def action_prompt_hist_prev(self) -> None:
+        pr = self.query_one("#prompt", Input)
+        if self.screen.focused is not pr or pr.disabled:
+            raise SkipAction()
+        lane = self._active_lane
+        hist = self._prompt_hist_lines.setdefault(lane, [])
+        if not hist:
+            raise SkipAction()
+        pos = self._prompt_hist_idx.get(lane)
+        if pos is None:
+            pos = len(hist) - 1
+        else:
+            pos = max(0, pos - 1)
+        self._prompt_hist_idx[lane] = pos
+        pr.value = hist[pos]
+        pr.cursor_position = len(pr.value)
+
+    def action_prompt_hist_next(self) -> None:
+        pr = self.query_one("#prompt", Input)
+        if self.screen.focused is not pr or pr.disabled:
+            raise SkipAction()
+        lane = self._active_lane
+        hist = self._prompt_hist_lines.setdefault(lane, [])
+        pos = self._prompt_hist_idx.get(lane)
+        if pos is None:
+            raise SkipAction()
+        nxt = pos + 1
+        if nxt >= len(hist):
+            self._prompt_hist_idx[lane] = None
+            pr.value = ""
+            pr.cursor_position = 0
+        else:
+            self._prompt_hist_idx[lane] = nxt
+            pr.value = hist[nxt]
+            pr.cursor_position = len(pr.value)
 
     def _sidebar_line_for_agent(self, label: str, session) -> str:
         from agentlib.llm.profile import effective_ollama_model_from_profile
@@ -321,24 +384,21 @@ class AgentTuiApp(App[None]):
         container.mount(lane)
         return chat
 
-    def _handle_fork(self, line: str) -> None:
+    def _fork_new_lane(
+        self,
+        name: str,
+        cmds: List[str],
+        parent_lane: int,
+        *,
+        switch_to_new: bool,
+    ) -> None:
         from agentlib import fork_embedded_session
 
-        parent_lane = self._active_lane
-        parsed = parse_fork_command(line)
-        if parsed is None:
-            self._activity_logs[parent_lane].write(
-                Text.from_markup(
-                    "[yellow]/fork NAME[/yellow] or [yellow]/fork NAME \"cmd1,cmd2\"[/yellow]"
-                )
-            )
-            return
-        name, cmds = parsed
         parent_sess = self._sessions[parent_lane]
         new_idx = self._n
         new_sess = fork_embedded_session(parent_sess, app=self._embed_app)
 
-        chat = self._mount_lane_widgets(new_idx, hidden=False)
+        chat = self._mount_lane_widgets(new_idx, hidden=not switch_to_new)
         ol = self.query_one("#agent_list", OptionList)
         ol.add_option(Option(self._sidebar_line_for_agent(name, new_sess), id=f"agent-{new_idx}"))
 
@@ -349,27 +409,111 @@ class AgentTuiApp(App[None]):
         self._thinking_follow[new_idx] = False
         self._n += 1
 
-        hint = (
-            f"[bold]{escape(name)}[/bold] — [dim]forked from lane {parent_lane + 1}[/dim]\n"
-            f"[dim]Ctrl+Q quit · /help · /fork …[/dim]"
-        )
+        if switch_to_new:
+            hint = (
+                f"[bold]{escape(name)}[/bold] — [dim]forked from lane {parent_lane + 1}[/dim]\n"
+                f"[dim]Ctrl+Q quit · /help · /fork …[/dim]"
+            )
+            parent_note = f"[dim]Fork → [bold]{escape(name)}[/bold][/dim]\n"
+        else:
+            hint = (
+                f"[bold]{escape(name)}[/bold] — [dim]background fork from lane {parent_lane + 1}[/dim]\n"
+                f"[dim]Select in sidebar when ready · /fork · /fork_background …[/dim]"
+            )
+            parent_note = f"[dim]Fork (background) → [bold]{escape(name)}[/bold][/dim]\n"
         chat.write(Text.from_markup(hint))
+        self._chat_logs[parent_lane].write(Text.from_markup(parent_note))
 
-        self._chat_logs[parent_lane].write(
-            Text.from_markup(f"[dim]Fork → [bold]{escape(name)}[/bold][/dim]\n")
-        )
-
-        self._show_lane(new_idx)
-        ol.highlighted = new_idx
+        if switch_to_new:
+            self._show_lane(new_idx)
+            ol.highlighted = new_idx
         self._sync_prompt_enabled()
 
         filtered = [c.strip() for c in cmds if c.strip()]
+        self._prompt_hist_lines[new_idx] = []
+        self._prompt_hist_idx.pop(new_idx, None)
         if filtered:
             self._execute_lines_chain(new_idx, filtered)
+
+    def _handle_fork(self, line: str) -> None:
+        parent_lane = self._active_lane
+        parsed = parse_fork_command(line)
+        if parsed is None:
+            self._activity_logs[parent_lane].write(
+                Text.from_markup(
+                    "[yellow]/fork NAME[/yellow] or [yellow]/fork NAME \"cmd1,cmd2\"[/yellow]"
+                )
+            )
+            return
+        name, cmds = parsed
+        self._fork_new_lane(name, cmds, parent_lane, switch_to_new=True)
+
+    def _handle_fork_background(self, line: str) -> None:
+        parent_lane = self._active_lane
+        parsed = parse_fork_background_command(line)
+        if parsed is None:
+            self._activity_logs[parent_lane].write(
+                Text.from_markup(
+                    "[yellow]/fork_background NAME[/yellow] or "
+                    "[yellow]/fork_background NAME \"cmd1,cmd2\"[/yellow]"
+                )
+            )
+            return
+        name, cmds = parsed
+        self._fork_new_lane(name, cmds, parent_lane, switch_to_new=False)
+
+    def _record_prompt_submission(self, lane: int, text: str) -> None:
+        """Append a submitted line to this lane's recall list (dedupe consecutive repeats)."""
+        self._prompt_hist_idx[lane] = None
+        if not text:
+            return
+        hist = self._prompt_hist_lines.setdefault(lane, [])
+        if hist and hist[-1] == text:
+            return
+        hist.append(text)
 
     def _lanes_matching_name(self, name: str) -> List[int]:
         key = name.casefold().strip()
         return [i for i, lab in enumerate(self._lane_labels) if lab.casefold().strip() == key]
+
+    def _python_fork_bridge(self, name: str, commands=None) -> dict:
+        """Host hook for ``fork_agent()`` inside ``/call_python`` (runs UI on main thread)."""
+        cmds = [str(c).strip() for c in (commands or []) if str(c).strip()]
+        nm = (name or "").strip()
+        if not nm:
+            return {"type": "fork", "ok": False, "error": "fork_agent requires a non-empty name"}
+        line = format_fork_command_line(nm, cmds)
+        box: List[dict] = []
+
+        def ui() -> None:
+            try:
+                self._handle_fork(line)
+                box.append({"type": "fork", "ok": True})
+            except Exception as e:
+                box.append({"type": "fork", "ok": False, "error": str(e)})
+
+        self.call_from_thread(ui)
+        return box[0] if box else {"type": "fork", "ok": False, "error": "no result"}
+
+    def _python_delegate_bridge(self, agent_name: str, cmd: str) -> dict:
+        """Host hook for ``ai(cmd, agent_name)`` inside ``/call_python``."""
+        from agentlib.sink import emit_sink_scope
+
+        matches = self._lanes_matching_name((agent_name or "").strip())
+        if not matches:
+            return {"type": "command", "quit": False, "output": f"No agent named {agent_name!r}."}
+        if len(matches) > 1:
+            lanes_s = ", ".join(str(i + 1) for i in matches)
+            return {
+                "type": "command",
+                "quit": False,
+                "output": f"Ambiguous agent {agent_name!r} (lanes {lanes_s}).",
+            }
+        lane_idx = matches[0]
+        sess = self._sessions[lane_idx]
+        emit_fn = lambda ev, ln=lane_idx: self._emit_for(ln, ev)
+        with emit_sink_scope(emit_fn):
+            return sess.execute_line((cmd or "").strip())
 
     def _sync_lane_visual_from(self, src: int, dst: int) -> None:
         """Copy transcript/UI state from lane ``src`` onto widgets at lane ``dst``."""
@@ -427,6 +571,14 @@ class AgentTuiApp(App[None]):
 
         self._busy_lanes.discard(last)
         self._busy_lanes.discard(k)
+
+        if k != last:
+            tail_hist = self._prompt_hist_lines.pop(last, [])
+            self._prompt_hist_lines[k] = list(tail_hist)
+        else:
+            self._prompt_hist_lines.pop(last, None)
+        self._prompt_hist_idx.pop(last, None)
+        self._prompt_hist_idx.pop(k, None)
 
         lane_widget = self._lane_verticals.pop()
         lane_widget.remove()
@@ -522,6 +674,9 @@ class AgentTuiApp(App[None]):
     @on(OptionList.OptionSelected, "#agent_list")
     def agent_selected(self, event: OptionList.OptionSelected) -> None:
         self._show_lane(event.option_index)
+        self._prompt_hist_idx[self._active_lane] = None
+        pr = self.query_one("#prompt", Input)
+        pr.value = ""
         self._sync_prompt_enabled()
 
     def _emit_for(self, lane: int, ev: dict) -> None:
@@ -614,8 +769,12 @@ class AgentTuiApp(App[None]):
             return
         if self._active_lane in self._busy_lanes:
             return
+        self._record_prompt_submission(lane, line)
         if line.startswith("/kill"):
             self._handle_kill(line)
+            return
+        if line.startswith("/fork_background"):
+            self._handle_fork_background(line)
             return
         if line.startswith("/fork"):
             self._handle_fork(line)

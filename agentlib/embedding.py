@@ -39,10 +39,19 @@ def fork_embedded_session(parent_session: "AgentSession", *, app):
     sm = parent_session.skills_map
     session.skills_map = copy.deepcopy(sm) if isinstance(sm, dict) else sm
     session.last_reuse_skill_id = parent_session.last_reuse_skill_id
+    session.python_fork_agent = getattr(parent_session, "python_fork_agent", None)
+    session.python_delegate_line = getattr(parent_session, "python_delegate_line", None)
     return session
 
 
-def build_embedded_session(*, verbose: int = 0, primary_profile=None, app=None):
+def build_embedded_session(
+    *,
+    verbose: int = 0,
+    primary_profile=None,
+    app=None,
+    python_fork_agent=None,
+    python_delegate_line=None,
+):
     """
     Create an `AgentSession` suitable for embedding in other Python programs.
 
@@ -53,6 +62,9 @@ def build_embedded_session(*, verbose: int = 0, primary_profile=None, app=None):
       session.execute_line("...", emit=emit)   # typed events stream as they occur
 
     `/` commands (e.g. `/settings ...`) work the same way in embedded mode.
+
+    Optional ``python_fork_agent`` / ``python_delegate_line`` hooks enable ``/call_python``
+    helpers ``fork_agent()`` and ``ai(..., agent_name)`` in multi-agent hosts.
 
     Parameters
     ----------
@@ -256,6 +268,8 @@ def build_embedded_session(*, verbose: int = 0, primary_profile=None, app=None):
         verbose_ack_message=app.verbose_ack_message,
         parse_while_repl_tokens=parse_while_repl_tokens,
         call_while_condition_judge=call_while_judge,
+        python_fork_agent=python_fork_agent,
+        python_delegate_line=python_delegate_line,
     )
     return app, session
 
