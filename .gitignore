@@ -11,3 +11,6 @@ wheels/
 
 # macOS
 .DS_Store
+
+# Nested repo: company site sources + FTP deploy (see website/README.md)
+website/
