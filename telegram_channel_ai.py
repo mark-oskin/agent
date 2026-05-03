@@ -11,6 +11,8 @@ Use an absolute path if your cwd is not the repo root.
 
 Setup
 -----
+Docs (TUI walkthrough): https://openchainsaw.com/docs/tutorials/telegram-channel-ai-tui/
+
 1. Create a bot with `@BotFather`, copy the token.
 2. Add the bot to your **channel** as an administrator (it only receives ``channel_post``
    updates when it can read the channel).
