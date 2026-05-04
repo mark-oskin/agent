@@ -20,6 +20,9 @@ agent = "agent:main"
 tui = [
     "textual>=0.83.0",
 ]
+browser = [
+    "playwright>=1.49.0",
+]
 
 [tool.setuptools]
 py-modules = ["agent"]

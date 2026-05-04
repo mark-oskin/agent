@@ -79,6 +79,28 @@ def merge_tool_param_aliases(tool: str, params: dict, *, scalar_to_str_fn=scalar
                     p["content"] = t
                     p.pop(alt, None)
                     break
+    elif tool == "browser_navigate":
+        if not st(p.get("url"), "").strip():
+            for alt in ("href", "link", "uri", "target"):
+                t = st(p.get(alt), "").strip()
+                if t:
+                    p["url"] = t
+                    p.pop(alt, None)
+                    break
+    elif tool in ("browser_click", "browser_fill", "browser_type", "browser_press", "browser_snapshot", "browser_wait"):
+        if not st(p.get("selector"), "").strip():
+            for alt in ("css", "locator", "element"):
+                t = st(p.get(alt), "").strip()
+                if t:
+                    p["selector"] = t
+                    p.pop(alt, None)
+                    break
+        if tool in ("browser_fill", "browser_type") and p.get("text") is None:
+            for alt in ("value", "input", "string"):
+                if p.get(alt) is not None:
+                    p["text"] = p.get(alt)
+                    p.pop(alt, None)
+                    break
     return p
 
 
