@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 DEFAULT_SETTINGS: dict = {
     "ollama": {
         "host": "http://localhost:11434",
-        "model": "gemma4:e4b",
+        "model": "qwen3.6:latest",
         "second_opinion_model": "llama3.2:latest",
         "debug": False,
         "tool_output_max": 14000,

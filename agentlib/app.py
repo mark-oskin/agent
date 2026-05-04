@@ -140,7 +140,7 @@ class AgentApp:
         return self.settings_get_str(("ollama", "host"), "http://localhost:11434").rstrip("/")
 
     def ollama_model(self) -> str:
-        return self.settings_get_str(("ollama", "model"), "gemma4:e4b")
+        return self.settings_get_str(("ollama", "model"), "qwen3.6:latest")
 
     def ollama_second_opinion_model(self) -> str:
         return self.settings_get_str(("ollama", "second_opinion_model"), "llama3.2:latest").strip()
