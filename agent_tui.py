@@ -60,7 +60,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from agentlib.session import parse_send_command
 
-from fork_parse import (
+from agentlib.tui_parse import (
     format_fork_command_line,
     parse_fork_background_command,
     parse_fork_command,

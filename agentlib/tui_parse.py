@@ -92,7 +92,7 @@ def parse_fork_background_command(line: str) -> tuple[str, list[str]] | None:
 
 def format_fork_command_line(name: str, commands: list[str] | None = None) -> str:
     """
-    Build a ``/fork`` line understood by [parse_fork_command][fork_parse.parse_fork_command].
+    Build a ``/fork`` line understood by :func:`parse_fork_command`.
 
     ``commands`` become one comma-separated quoted segment when non-empty (same as manual ``/fork``).
     """
