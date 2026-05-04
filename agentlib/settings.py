@@ -10,7 +10,7 @@ DEFAULT_SETTINGS: dict = {
         "model": "qwen3.6:latest",
         "second_opinion_model": "llama3.2:latest",
         "debug": False,
-        "tool_output_max": 14000,
+        "tool_output_max": 100000,
         "search_enrich": True,
     },
     "openai": {
@@ -44,6 +44,11 @@ DEFAULT_SETTINGS: dict = {
         "context_target_frac": 0.55,
         "context_keep_tail_messages": 12,
         "router_transcript_max_messages": 80,
+        # Agent loop budgets (per user turn): model iterations + web-verification tool caps.
+        "max_agent_steps": 30,
+        "max_agent_steps_web": 15,
+        "max_tool_calls_web": 15,
+        "max_fetch_page_web": 15,
     },
 }
 

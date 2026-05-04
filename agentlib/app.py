@@ -131,6 +131,19 @@ class AgentApp:
     def settings_get_int(self, path: tuple[str, str], default: int = 0) -> int:
         return self.settings.get_int(path, default=default)
 
+    def agent_loop_budget(self) -> tuple[int, int, int, int]:
+        """
+        Per-turn agent loop limits from settings:
+        (max_agent_steps, max_agent_steps_web, max_tool_calls_web, max_fetch_page_web).
+        Each value is at least 1.
+        """
+        return (
+            max(1, self.settings_get_int(("agent", "max_agent_steps"), 30)),
+            max(1, self.settings_get_int(("agent", "max_agent_steps_web"), 15)),
+            max(1, self.settings_get_int(("agent", "max_tool_calls_web"), 15)),
+            max(1, self.settings_get_int(("agent", "max_fetch_page_web"), 15)),
+        )
+
     def settings_set(self, path: tuple[str, str], value) -> None:
         self.settings.set(path, value)
 
@@ -624,7 +637,7 @@ class AgentApp:
                 params,
                 result,
                 deliverable_reminder=deliverable_reminder,
-                tool_output_max=self.settings_get_int(("ollama", "tool_output_max"), 14000),
+                tool_output_max=self.settings_get_int(("ollama", "tool_output_max"), 100000),
             ),
         )
         if agent_progress is None:
@@ -676,6 +689,12 @@ class AgentApp:
             "Interactive REPL tips:\n"
             "  - Type /help for commands.\n"
             "  - Use /settings ... to view/set config and /settings save to persist.\n"
+            "\n"
+            "Agent loop budgets (prefs group agent; defaults in parentheses):\n"
+            "  max_agent_steps (30)           Max model iterations when web verification is off.\n"
+            "  max_agent_steps_web (15)       Max model iterations when web verification is required.\n"
+            "  max_tool_calls_web (15)        Max tool executions under web verification.\n"
+            "  max_fetch_page_web (15)        Max fetch_page calls under web verification.\n"
         )
 
     @staticmethod
@@ -1018,6 +1037,7 @@ class AgentApp:
         user_query = " ".join(query_parts)
         today_str = datetime.date.today().strftime("%Y-%m-%d (%A)")
         messages = [{"role": "user", "content": user_query}]
+        lb_ms, lb_msw, lb_mtcw, lb_mfpw = self.agent_loop_budget()
         answered, final_answer = run_agent_conversation_turn(
             messages,
             user_query,
@@ -1035,6 +1055,10 @@ class AgentApp:
             interactive_tool_recovery=bool(sys.stdin.isatty() and sys.stdout.isatty()),
             context_cfg=st.get("context_manager"),
             print_answer=False,
+            max_agent_steps=lb_ms,
+            max_agent_steps_web=lb_msw,
+            max_tool_calls_web=lb_mtcw,
+            max_fetch_page_web=lb_mfpw,
         )
         _ = answered
         if final_answer:
@@ -1257,6 +1281,7 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
             }
         )
 
+    lb_ms, lb_msw, lb_mtcw, lb_mfpw = app0.agent_loop_budget()
     answered, final_answer = run_agent_conversation_turn(
         messages,
         user_query,
@@ -1274,6 +1299,10 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
         interactive_tool_recovery=bool(sys.stdin.isatty() and sys.stdout.isatty()),
         context_cfg=st.get("context_manager"),
         print_answer=False,
+        max_agent_steps=lb_ms,
+        max_agent_steps_web=lb_msw,
+        max_tool_calls_web=lb_mtcw,
+        max_fetch_page_web=lb_mfpw,
     )
     if final_answer:
         print(final_answer)

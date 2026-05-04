@@ -119,6 +119,10 @@ def run_agent_conversation_turn(
     interactive_tool_recovery: bool = False,
     context_cfg: Optional[dict] = None,
     print_answer: bool = True,
+    max_agent_steps: int = 30,
+    max_agent_steps_web: int = 15,
+    max_tool_calls_web: int = 15,
+    max_fetch_page_web: int = 15,
 ) -> Tuple[bool, Optional[str]]:
     et = deps.coerce_enabled_tools(enabled_tools)
     mandatory_web_tool = preferred_web_search_tool(et)
@@ -137,8 +141,11 @@ def run_agent_conversation_turn(
     deliverable_read_ok = False
     deliverable_file_chars = 0
     known = deps.all_known_tools()
-    step_limit = 15 if web_required else 30
-    fetch_limit = 15
+    ms = max(1, int(max_agent_steps))
+    msw = max(1, int(max_agent_steps_web))
+    mtcw = max(1, int(max_tool_calls_web))
+    fetch_limit = max(1, int(max_fetch_page_web))
+    step_limit = msw if web_required else ms
     verified_by_fetch = False
     for _ in range(step_limit):
         messages = deps.maybe_compact_context_window(
@@ -452,9 +459,9 @@ def run_agent_conversation_turn(
                 if verbose < 1:
                     deps.agent_progress(deps.tool_progress_message(tool, params))
                 result = ""
-                if web_required and tool_calls_executed > 15:
+                if web_required and tool_calls_executed > mtcw:
                     result = (
-                        "Tool error: web verification budget exceeded (15 tool calls). "
+                        f"Tool error: web verification budget exceeded ({mtcw} tool calls). "
                         "Stop and explain the verification failure."
                     )
                     policy_blocked = True
@@ -462,7 +469,7 @@ def run_agent_conversation_turn(
                     fetch_pages_executed += 1
                     if web_required and fetch_pages_executed > fetch_limit:
                         result = (
-                            "Tool error: web verification budget exceeded (15 fetch_page calls). "
+                            f"Tool error: web verification budget exceeded ({fetch_limit} fetch_page calls). "
                             "Stop and explain the verification failure."
                         )
                         policy_blocked = True

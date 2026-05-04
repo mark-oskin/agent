@@ -991,7 +991,7 @@ def test_tool_result_user_message_includes_deliverable_reminder():
         {"url": "u"},
         "out",
         deliverable_reminder="REM",
-        tool_output_max=14000,
+        tool_output_max=100000,
         scalar_to_str_fn=scalar_to_str,
     )
     assert "REM" in msg

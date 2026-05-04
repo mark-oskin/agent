@@ -185,6 +185,15 @@ class AgentSession:
         self.python_host_command = python_host_command
         self.python_enqueue_line = python_enqueue_line
 
+    def _agent_loop_budget(self) -> tuple[int, int, int, int]:
+        s = self.settings
+        return (
+            max(1, s.get_int(("agent", "max_agent_steps"), 30)),
+            max(1, s.get_int(("agent", "max_agent_steps_web"), 15)),
+            max(1, s.get_int(("agent", "max_tool_calls_web"), 15)),
+            max(1, s.get_int(("agent", "max_fetch_page_web"), 15)),
+        )
+
     def host_ctl(self, op: str, arg: Optional[str] = None) -> dict:
         """
         Multi-agent host RPC (optional). Used by ``/list``, ``/switch``, ``/last_answer``,
@@ -402,6 +411,7 @@ class AgentSession:
                     ),
                 }
             )
+        ms, msw, mtcw, mfpw = self._agent_loop_budget()
         answered, final_answer = run_agent_conversation_turn(
             self.messages,
             user_query,
@@ -419,6 +429,10 @@ class AgentSession:
             interactive_tool_recovery=True,
             context_cfg=self.context_cfg,
             print_answer=False,
+            max_agent_steps=ms,
+            max_agent_steps_web=msw,
+            max_tool_calls_web=mtcw,
+            max_fetch_page_web=mfpw,
         )
         if self.session_save_path:
             try:
@@ -557,6 +571,7 @@ class AgentSession:
                             ),
                         }
                     )
+                ms, msw, mtcw, mfpw = self._agent_loop_budget()
                 answered, final_answer = run_agent_conversation_turn(
                     self.messages,
                     step_user,
@@ -574,6 +589,10 @@ class AgentSession:
                     interactive_tool_recovery=True,
                     context_cfg=self.context_cfg,
                     print_answer=False,
+                    max_agent_steps=ms,
+                    max_agent_steps_web=msw,
+                    max_tool_calls_web=mtcw,
+                    max_fetch_page_web=mfpw,
                 )
                 self._agent_progress(f"Step {i}/{len(steps)} finished.")
                 if final_answer:
@@ -614,6 +633,7 @@ class AgentSession:
                     ),
                 }
             )
+        ms, msw, mtcw, mfpw = self._agent_loop_budget()
         run_agent_conversation_turn(
             self.messages,
             req,
@@ -630,6 +650,10 @@ class AgentSession:
             enabled_tools=et_turn,
             interactive_tool_recovery=True,
             context_cfg=self.context_cfg,
+            max_agent_steps=ms,
+            max_agent_steps_web=msw,
+            max_tool_calls_web=mtcw,
+            max_fetch_page_web=mfpw,
         )
 
     def _execute_command_line(self, s: str) -> SessionLineResult:
