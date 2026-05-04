@@ -101,6 +101,14 @@ def merge_tool_param_aliases(tool: str, params: dict, *, scalar_to_str_fn=scalar
                     p["text"] = p.get(alt)
                     p.pop(alt, None)
                     break
+    elif tool == "run_applescript":
+        if not st(p.get("script"), "").strip():
+            for alt in ("code", "applescript", "source", "text", "body"):
+                t = st(p.get(alt), "").strip()
+                if t:
+                    p["script"] = t
+                    p.pop(alt, None)
+                    break
     return p
 
 

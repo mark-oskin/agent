@@ -31,6 +31,7 @@ Security: only ``http://`` and ``https://`` URLs are accepted for navigation.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import threading
 from typing import Any, Optional, Tuple
@@ -41,6 +42,17 @@ _PW: Any = None
 _BROWSER: Any = None
 _PAGE: Any = None
 _CURRENT_ENGINE: Optional[str] = None  # "chromium" | "webkit"
+
+_PLAYWRIGHT_AVAILABLE = importlib.util.find_spec("playwright") is not None
+_PLAYWRIGHT_INSTALL_HINT = (
+    "Playwright is not installed. Install it with:\n"
+    "  uv sync --extra browser\n"
+    "  playwright install chromium webkit"
+)
+
+
+def _no_playwright(tool: str) -> str:
+    return f"{tool} error: {_PLAYWRIGHT_INSTALL_HINT}"
 
 
 def _url_allowed(url: str) -> Optional[str]:
@@ -88,9 +100,7 @@ def _launch_locked(engine: str) -> Any:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:  # pragma: no cover - env dependent
-        raise ImportError(
-            "Playwright is not installed. Run: uv sync --extra browser && playwright install chromium webkit"
-        ) from e
+        raise ImportError(_PLAYWRIGHT_INSTALL_HINT) from e
     sp = sync_playwright().start()
     pw = sp
     if engine == "chromium":
@@ -127,6 +137,8 @@ def _teardown_locked() -> list[str]:
 
 def _get_page(params: Optional[dict] = None) -> Any:
     """Return a live Playwright Page, launching or switching engine as needed."""
+    if not _PLAYWRIGHT_AVAILABLE:
+        raise ImportError(_PLAYWRIGHT_INSTALL_HINT)
     p = params or {}
     with _STATE_LOCK:
         raw: Optional[str] = None
@@ -174,6 +186,8 @@ def browser_navigate(params: dict) -> str:
         )
     except ValueError as e:
         return str(e)
+    except ImportError:
+        return _no_playwright("browser_navigate")
     except Exception as e:
         return f"browser_navigate error: {type(e).__name__}: {e}"
 
@@ -189,6 +203,8 @@ def browser_click(params: dict) -> str:
         return f"Clicked selector: {sel!r}"
     except ValueError as e:
         return str(e)
+    except ImportError:
+        return _no_playwright("browser_click")
     except Exception as e:
         return f"browser_click error: {type(e).__name__}: {e}"
 
@@ -208,6 +224,8 @@ def browser_fill(params: dict) -> str:
         return f"Filled selector {sel!r} ({len(text)} chars)."
     except ValueError as e:
         return str(e)
+    except ImportError:
+        return _no_playwright("browser_fill")
     except Exception as e:
         return f"browser_fill error: {type(e).__name__}: {e}"
 
@@ -226,6 +244,8 @@ def browser_type(params: dict) -> str:
         return f"Typed {len(text)} chars into {sel!r}."
     except ValueError as e:
         return str(e)
+    except ImportError:
+        return _no_playwright("browser_type")
     except Exception as e:
         return f"browser_type error: {type(e).__name__}: {e}"
 
@@ -242,6 +262,8 @@ def browser_press(params: dict) -> str:
         return f"Pressed {key!r} on {sel!r}."
     except ValueError as e:
         return str(e)
+    except ImportError:
+        return _no_playwright("browser_press")
     except Exception as e:
         return f"browser_press error: {type(e).__name__}: {e}"
 
@@ -265,6 +287,8 @@ def browser_snapshot(params: dict) -> str:
         return header + _truncate(text.strip(), max_chars)
     except ValueError as e:
         return str(e)
+    except ImportError:
+        return _no_playwright("browser_snapshot")
     except Exception as e:
         return f"browser_snapshot error: {type(e).__name__}: {e}"
 
@@ -281,6 +305,8 @@ def browser_wait(params: dict) -> str:
             return f"Selector visible: {sel!r}"
         except ValueError as e:
             return str(e)
+        except ImportError:
+            return _no_playwright("browser_wait")
         except Exception as e:
             return f"browser_wait error: {type(e).__name__}: {e}"
     state = str(p.get("load_state") or "networkidle").strip().lower()
@@ -293,6 +319,8 @@ def browser_wait(params: dict) -> str:
         return f"Load state reached: {state!r}"
     except ValueError as e:
         return str(e)
+    except ImportError:
+        return _no_playwright("browser_wait")
     except Exception as e:
         return f"browser_wait error: {type(e).__name__}: {e}"
 
@@ -304,7 +332,10 @@ def browser_close(params: dict) -> str:
 
 TOOLSET = {
     "name": "browser",
-    "description": "Headless browser control via Playwright: Chromium and WebKit (Safari engine).",
+    "description": (
+        "Headless browser control via Playwright: Chromium and WebKit (Safari engine)."
+        + ("" if _PLAYWRIGHT_AVAILABLE else " (Playwright not installed; enable will fail until installed.)")
+    ),
     "triggers": [
         "playwright",
         "headless",
