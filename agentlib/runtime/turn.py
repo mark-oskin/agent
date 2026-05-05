@@ -101,6 +101,25 @@ def _answer_is_clarifying_question(answer_text: str) -> bool:
         return True
     return bool(_CLARIFYING_QUESTION_RE.search(a))
 
+_REFUSES_DUE_TO_ACCESS_RE = re.compile(
+    r"(?is)\b("
+    r"i (?:can't|cannot|do not|don't) (?:directly )?(?:access|interact with|control|modify)"
+    r"|i (?:don't|do not) have (?:direct|programmatic) access"
+    r"|i am (?:unable|not able) to (?:access|interact|control|modify)"
+    r"|no tool is provided"
+    r"|no tool (?:is|was) available"
+    r"|not (?:possible|able) to (?:access|interact|control|modify)"
+    r")\b"
+)
+
+
+def _answer_refuses_despite_tools(answer_text: str) -> bool:
+    """Heuristic: model refuses with 'no access' language even though tools may exist."""
+    a = (answer_text or "").strip()
+    if not a:
+        return False
+    return bool(_REFUSES_DUE_TO_ACCESS_RE.search(a))
+
 def run_agent_conversation_turn(
     messages: list,
     user_query: str,
@@ -147,6 +166,7 @@ def run_agent_conversation_turn(
     fetch_limit = max(1, int(max_fetch_page_web))
     step_limit = msw if web_required else ms
     verified_by_fetch = False
+    forced_tool_attempt_after_refusal = False
     for _ in range(step_limit):
         messages = deps.maybe_compact_context_window(
             messages,
@@ -190,6 +210,28 @@ def run_agent_conversation_turn(
                 )
                 continue
             ans_out0 = response_data.get("answer")
+            # Refusal-gate: when a model answers with "I can't access..." despite having allowed tools,
+            # force one more step that requires a tool call.
+            if (
+                not web_required
+                and not forced_tool_attempt_after_refusal
+                and isinstance(ans_out0, str)
+                and _answer_refuses_despite_tools(ans_out0)
+                and et
+            ):
+                forced_tool_attempt_after_refusal = True
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You have permission to use the allowed tools in this session. "
+                            "Do not refuse due to lack of access when a relevant tool exists. "
+                            "Pick an appropriate tool and call it now. Respond with JSON tool_call only."
+                        ),
+                    }
+                )
+                continue
             if web_required and not verified_by_fetch:
                 # Web required means we need a real page fetch, not just URL-backed search snippets.
                 # However, if the correct response is to ask the user for clarification (ambiguous request),

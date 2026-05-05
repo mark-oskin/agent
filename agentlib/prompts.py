@@ -49,6 +49,8 @@ SYSTEM_INSTRUCTIONS = (
     "(4) After a web search step, use fetch_page when snippets or excerpts are not enough and you need full page text.\n\n"
     "Tool permission policy:\n"
     "- You are explicitly permitted to invoke ANY tool described in the tool section below.\n"
+    "- If the user request asks you to perform an action on the user's system (create/edit/delete, run a command, automate a workflow, etc.) "
+    "and an appropriate tool is available, start by responding with action=tool_call.\n"
     "- If the user request requires interacting with external systems and an appropriate allowed tool exists, you MUST attempt "
     "at least one tool call before refusing. Do not refuse by claiming you lack access when an appropriate allowed tool exists.\n"
     "- Tool failure handling: if a tool call fails or returns an error/unhelpful result, you MUST include the tool output in your "

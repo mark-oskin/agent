@@ -625,6 +625,32 @@ def test_search_web_fetch_top_tool_call_runs(monkeypatch):
     assert out == "ok"
 
 
+def test_refusal_gate_forces_tool_call_when_tools_exist(monkeypatch):
+    """
+    If the model answers with a canned "can't access" refusal even though a relevant tool is enabled,
+    the runtime should force a follow-up step requiring a tool_call.
+    """
+    out = run_main(
+        monkeypatch,
+        ["q"],
+        [
+            json.dumps({"action": "answer", "answer": "I cannot directly access or modify your files."}),
+            json.dumps(
+                {
+                    "action": "tool_call",
+                    "tool": "write_file",
+                    "parameters": {"path": "x.txt", "content": "hi"},
+                }
+            ),
+            json.dumps({"action": "answer", "answer": "done"}),
+        ],
+        route_web=None,
+        route_after_answer=None,
+        stub_write_file=lambda p, c: "ok",
+    )
+    assert out == "done"
+
+
 def test_web_required_blocks_curl_run_command(monkeypatch):
     responses = [
         json.dumps({"action": "tool_call", "tool": "search_web", "parameters": {"query": "q"}}),
