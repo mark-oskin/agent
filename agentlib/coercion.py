@@ -42,7 +42,7 @@ def scalar_to_int(value, default):
 
 
 def coerce_verbose_level(v) -> int:
-    """0 = off, 1 = log tool invocations, 2 = log tools + stream model JSON (local Ollama)."""
+    """0 = off, 1 = log tool invocations, 2 = log tools + stream model JSON, 3 = plus full prompts."""
     if isinstance(v, bool):
         return 2 if v else 0
     if v is None:
@@ -50,6 +50,6 @@ def coerce_verbose_level(v) -> int:
     n = scalar_to_int(v, 0)
     if n < 0:
         return 0
-    if n > 2:
-        return 2
+    if n > 3:
+        return 3
     return n

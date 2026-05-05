@@ -668,7 +668,7 @@ class AgentApp:
             "  --config PATH            Use PATH as the prefs JSON file (instead of ~/.agent.json).\n"
             "  --model NAME             Override the primary model (Ollama model tag or hosted model name).\n"
             "  --prompt-template NAME   Select a prompt template (default: coding).\n"
-            "  --verbose [0|1|2]        Verbosity (default comes from prefs). With no value sets 2.\n"
+            "  --verbose [0|1|2|3]      Verbosity (default comes from prefs). With no value sets 2.\n"
             "  --second-opinion         Enable second opinion reviewer for this run.\n"
             "  --cloud-ai               Enable hosted/cloud AI usage for this run.\n"
             "  --load-context PATH      Load a context bundle before asking your question (one-shot only).\n"
@@ -699,7 +699,12 @@ class AgentApp:
 
     @staticmethod
     def verbose_ack_message(level: int) -> str:
-        labels = ("off", "tool invocations", "tool invocations and streamed model JSON")
+        labels = (
+            "off",
+            "tool invocations",
+            "tool invocations and streamed model JSON",
+            "tool invocations, streamed model JSON, and full prompts",
+        )
         return f"verbose level {level} ({labels[level]}) for this session."
 
     # --- REPL I/O ---

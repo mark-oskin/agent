@@ -13,6 +13,25 @@ _THINK_FALLBACK_WARNING = (
     "Ollama rejected thinking for this model (HTTP 400); retrying without the think option.\n"
 )
 
+def _emit_full_llm_prompts_if_verbose(messages: list, *, verbose: int, backend: str, model: str, format_json: bool) -> None:
+    """
+    Verbose level 3: emit the exact prompts (messages list) sent to the LLM.
+    """
+    if int(verbose) < 3:
+        return
+    try:
+        header = f"[*] LLM request prompts (backend={backend}, model={model!r}, format_json={bool(format_json)}):"
+        sink_emit({"type": "output", "text": header})
+        sink_emit(
+            {
+                "type": "output",
+                "text": json.dumps(messages, ensure_ascii=False, indent=2),
+            }
+        )
+    except Exception:
+        # Never fail the model call due to verbose printing.
+        return
+
 
 def _should_retry_ollama_chat_without_think(exc: BaseException, body: dict) -> bool:
     """If True, caller may retry the same /api/chat body with ``think: False``."""
@@ -129,6 +148,13 @@ def call_llm_json_content(
             "stream": False,
             "temperature": 0.2,
         }
+        _emit_full_llm_prompts_if_verbose(
+            messages,
+            verbose=verbose,
+            backend="hosted",
+            model=str(getattr(prof, "model", "") or ""),
+            format_json=False,
+        )
         try:
             r = requests.post(url, json=body, headers=headers, timeout=300)
             r.raise_for_status()
@@ -152,6 +178,7 @@ def call_llm_json_content(
         "format": "json",
         "think": False,
     }
+    _emit_full_llm_prompts_if_verbose(messages, verbose=verbose, backend="ollama", model=ollama_model, format_json=True)
     try:
 
         def run_once(streaming: bool) -> Tuple[str, Optional[dict]]:
@@ -206,6 +233,7 @@ def call_hosted_agent_chat(
         "stream": False,
         "temperature": 0.3,
     }
+    _emit_full_llm_prompts_if_verbose(messages, verbose=verbose, backend="hosted", model=model, format_json=False)
     try:
         r = requests.post(url, json=body, headers=headers, timeout=600)
         r.raise_for_status()
@@ -264,6 +292,7 @@ def call_ollama_chat(
         "format": "json",
         "think": ollama_think_value,
     }
+    _emit_full_llm_prompts_if_verbose(messages, verbose=verbose, backend="ollama", model=ollama_model, format_json=True)
     stream_llm = verbose >= 2
 
     def run_chat(streaming: bool) -> Tuple[str, Optional[dict], bool]:
