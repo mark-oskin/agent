@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import AbstractSet, Callable, Optional
 
-from agentlib.tools.routing import CORE_TOOL_ENTRIES
+from agentlib.tools.routing import CORE_TOOL_ENTRIES, all_known_tools
 
 
 SYSTEM_INSTRUCTIONS = (
@@ -91,22 +91,27 @@ def default_system_instruction_text() -> str:
     return "".join(SYSTEM_INSTRUCTIONS)
 
 
-def _enabled_core_tools_list(enabled_tools: Optional[AbstractSet[str]]) -> list[str]:
+def _enabled_tools_list(enabled_tools: Optional[AbstractSet[str]]) -> list[str]:
     """
-    Ordered list of core tool ids that are enabled for this turn.
+    Ordered list of tool ids that are enabled for this turn (core + plugins).
 
     If enabled_tools is None, treat it as "all tools enabled" (default).
     """
     all_core = [tid for tid, _label, _aliases in CORE_TOOL_ENTRIES]
+    known = set(all_known_tools())
     if enabled_tools is None:
-        return all_core
-    et = set(enabled_tools or ())
-    return [tid for tid in all_core if tid in et]
+        enabled = known
+    else:
+        enabled = set(enabled_tools or ()) & known
+
+    core_enabled = [tid for tid in all_core if tid in enabled]
+    plugin_enabled = sorted(tid for tid in enabled if tid not in set(all_core))
+    return core_enabled + plugin_enabled
 
 
 def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
     """Allowed-tool list + minimal per-tool parameter docs, filtered by tool policy."""
-    enabled = _enabled_core_tools_list(enabled_tools)
+    enabled = _enabled_tools_list(enabled_tools)
     allowed_line = "Allowed tool names (exact strings only): " + ", ".join(enabled) + ".\n\n"
     header = (
         "Tool calls use this shape: {\"action\":\"tool_call\",\"tool\":<name>,\"parameters\":{...}} "
@@ -176,6 +181,16 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
                 "those belong in write_file content or in action answer. "
                 "Optional: parameters.globals (object, extra globals).\n"
             )
+            i += 1
+        elif tid == "run_applescript":
+            docs.append(
+                f"{i}. run_applescript — parameters.script (AppleScript source code string); "
+                "optional parameters.timeout_ms (integer, default 20000).\n"
+            )
+            i += 1
+        else:
+            # Plugin tools: keep docs minimal here; full contracts are available via /settings tools describe <tool-id>.
+            docs.append(f"{i}. {tid} — parameters: JSON object (tool-specific).\n")
             i += 1
     return allowed_line + header + "".join(docs)
 

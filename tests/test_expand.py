@@ -598,6 +598,17 @@ def test_system_prompt_omits_disabled_search_web():
     assert "search_web_fetch_top" in si
 
 
+def test_system_prompt_includes_plugin_tools_when_enabled():
+    from agentlib import prompts as agent_prompts
+
+    si = agent_prompts.effective_system_instruction_text_for_tools(
+        None, {"search_web_fetch_top", "fetch_page", "run_applescript"}
+    )
+    assert "run_applescript" in si
+    assert "Allowed tool names (exact strings only):" in si
+    assert "run_applescript — parameters.script" in si
+
+
 def test_route_requires_websearch_runs_when_only_fetch_top_enabled(monkeypatch):
     from agentlib import routing
 
