@@ -6,6 +6,7 @@ import re
 from typing import AbstractSet, Any, Optional, Tuple
 
 from agentlib.sink import sink_emit
+from agentlib.tools import turn_support
 from agentlib.tools.routing import preferred_web_search_tool
 
 from .deps import ConversationTurnDeps
@@ -472,6 +473,7 @@ def run_agent_conversation_turn(
                 params = {}
             params = deps.merge_tool_param_aliases(tool, params)
             params = deps.ensure_tool_defaults(tool, params, user_query)
+            params = turn_support.apply_session_cwd_tool_params(tool, params, deps)
             fp = deps.tool_params_fingerprint(tool, params)
             orig_fp = fp
             dedupe_ok = tool not in ("read_file", "tail_file")
@@ -539,7 +541,7 @@ def run_agent_conversation_turn(
                                     "with curl/wget to fetch web content. Use fetch_page instead."
                                 )
                             else:
-                                result = deps.run_command(cmd)
+                                result = turn_support.run_command_with_session_cwd(deps, cmd)
                         elif tool == "use_git":
                             result = deps.use_git(params)
                         elif tool == "write_file":
@@ -608,6 +610,7 @@ def run_agent_conversation_turn(
                         interactive_tool_recovery=interactive_tool_recovery,
                     ):
                         params = new_params
+                        params = turn_support.apply_session_cwd_tool_params(tool, params, deps)
                         fp = new_fp
                         if verbose >= 1:
                             sink_emit({"type": "output", "text": f"[*] Re-running {tool} after confirmed recovery."})
@@ -622,7 +625,7 @@ def run_agent_conversation_turn(
                                     "with curl/wget to fetch web content. Use fetch_page instead."
                                 )
                             else:
-                                result = deps.run_command(cmd)
+                                result = turn_support.run_command_with_session_cwd(deps, cmd)
                         elif tool == "call_python":
                             result = deps.call_python(params.get("code"), params.get("globals"))
                         elif tool == "search_web":

@@ -14,6 +14,7 @@ from agentlib.coercion import coerce_verbose_level
 from agentlib.sink import emit_sink_scope, sink_emit, sink_print_compat
 from agentlib.tools.registry import ToolRegistry
 from agentlib.tools.routing import preferred_web_search_tool
+from agentlib.tools.turn_support import resolve_path_under_session
 from agentlib import prompts as agent_prompts
 from agentlib.tools import builtins as tool_builtins
 
@@ -167,11 +168,12 @@ class AgentSession:
         self._deliverable_skip_mandatory_web = deliverable_skip_mandatory_web
         self._user_wants_written_deliverable = user_wants_written_deliverable
         self._interactive_turn_user_message = interactive_turn_user_message
-        # Each interactive session needs its own deps object so per-session state (like cwd for run_command)
+        # Each interactive session needs its own deps object so per-session state (like cwd for shell/filesystem tools)
         # does not leak across embedded sessions / TUI lanes that share a cached AgentApp deps bundle.
         self._conversation_turn_deps = copy.deepcopy(conversation_turn_deps)
         self.session_cwd = os.path.abspath(os.getcwd())
-        self._rebind_run_command_cwd()
+        self._conversation_turn_deps = replace(self._conversation_turn_deps, session_cwd=self.session_cwd)
+        self._rebind_session_fs_tools()
         self._save_context_bundle = save_context_bundle
         self._load_context_messages = load_context_messages
         self._registry = registry
@@ -206,15 +208,48 @@ class AgentSession:
         self.python_host_command = python_host_command
         self.python_enqueue_line = python_enqueue_line
 
+    def _resolve_session_path(self, raw: object) -> str:
+        """Resolve a user/tool path against this session's cwd when relative."""
+        return resolve_path_under_session(raw, self.session_cwd, self._conversation_turn_deps.scalar_to_str)
+
     def _session_run_command(self, cmd: object) -> str:
         """Shell runner used by REPL ``/run_command`` / ``!`` (session cwd-aware)."""
         return tool_builtins.run_command(cmd, cwd=self.session_cwd)
 
-    def _rebind_run_command_cwd(self) -> None:
-        """Rebuild ConversationTurnDeps.run_command so agent tool calls follow this session's cwd."""
+    def _session_write_file(self, path: object, content: object) -> str:
+        return tool_builtins.write_file(self._resolve_session_path(path), content)
+
+    def _session_read_file(self, path: object) -> str:
+        return tool_builtins.read_file(self._resolve_session_path(path))
+
+    def _session_list_directory(self, path: object) -> str:
+        return tool_builtins.list_directory(self._resolve_session_path(path))
+
+    def _session_download_file(self, url: object, path: object) -> str:
+        return tool_builtins.download_file(url, self._resolve_session_path(path))
+
+    def _session_tail_file(self, path: object, lines: object = 20) -> str:
+        return tool_builtins.tail_file(self._resolve_session_path(path), lines)
+
+    def _session_replace_text(self, path: object, pattern: object, replacement: object, replace_all: object = True) -> str:
+        return tool_builtins.replace_text(
+            self._resolve_session_path(path),
+            pattern,
+            replacement,
+            replace_all,
+        )
+
+    def _rebind_session_fs_tools(self) -> None:
+        """Rebuild ConversationTurnDeps tool bindings so filesystem tools honor session cwd."""
         self._conversation_turn_deps = replace(
             self._conversation_turn_deps,
-            run_command=self._session_run_command,
+            session_cwd=self.session_cwd,
+            write_file=self._session_write_file,
+            read_file=self._session_read_file,
+            list_directory=self._session_list_directory,
+            download_file=self._session_download_file,
+            tail_file=self._session_tail_file,
+            replace_text=self._session_replace_text,
         )
 
     def _cmd_cd(self, s: str) -> SessionLineResult:
@@ -236,7 +271,7 @@ class AgentSession:
             sink_print_compat(f"/cd: not a directory: {target!r}")
             return SessionLineResult()
         self.session_cwd = target
-        self._rebind_run_command_cwd()
+        self._rebind_session_fs_tools()
         sink_print_compat(f"Working directory: {self.session_cwd}")
         return SessionLineResult()
 

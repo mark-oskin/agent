@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-from typing import AbstractSet, Callable, Optional, Tuple
+from typing import AbstractSet, Any, Callable, Optional, Tuple
 
 from agentlib.agent_json import try_json_loads_object
 from agentlib.coercion import scalar_to_str
@@ -121,6 +122,135 @@ def ensure_tool_defaults(tool: str, params: dict, user_query: str, *, scalar_to_
         if not st(p.get("query"), "").strip():
             p["query"] = uq if uq else "web search"
     return p
+
+
+def resolve_path_under_session(raw: object, base: Optional[str], scalar_to_str_fn: Callable[..., str]) -> str:
+    """If ``base`` is set, join relative paths to it; absolute paths and ``~`` are unchanged."""
+    p = scalar_to_str_fn(raw, "").strip()
+    if not p:
+        return ""
+    p = os.path.expanduser(p)
+    if os.path.isabs(p):
+        return os.path.normpath(p)
+    b = (base or "").strip()
+    if not b:
+        return os.path.normpath(p)
+    return os.path.normpath(os.path.join(os.path.abspath(os.path.expanduser(b)), p))
+
+
+_PLUGIN_PATH_PARAM_KEYS = frozenset(
+    {
+        "path",
+        "paths",
+        "file",
+        "files",
+        "filepath",
+        "destination",
+        "dest",
+        "output",
+        "outfile",
+        "out_path",
+        "cwd",
+        "worktree",
+        "root",
+        "repo",
+        "directory",
+        "dir",
+        "target_path",
+    }
+)
+
+
+def _looks_like_url_or_scheme(s: str) -> bool:
+    t = (s or "").strip()
+    if t.startswith(("http://", "https://", "file://", "stdin:", "stdout:", "stderr:")):
+        return True
+    return bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", t))
+
+
+def apply_session_cwd_plugin_params(params: dict, base: str, scalar_to_str_fn: Callable[..., str]) -> dict:
+    """Best-effort path resolution for plugin tools (common filesystem-like parameter names)."""
+    p = dict(params)
+    for key in list(p.keys()):
+        if key not in _PLUGIN_PATH_PARAM_KEYS:
+            continue
+        val = p.get(key)
+        if isinstance(val, list):
+            out = []
+            for item in val:
+                if isinstance(item, str):
+                    s = item.strip()
+                    if s and not _looks_like_url_or_scheme(s):
+                        out.append(resolve_path_under_session(item, base, scalar_to_str_fn))
+                    else:
+                        out.append(item)
+                elif item is None:
+                    out.append(item)
+                else:
+                    s = scalar_to_str_fn(item, "").strip()
+                    if s and not _looks_like_url_or_scheme(s):
+                        out.append(resolve_path_under_session(item, base, scalar_to_str_fn))
+                    else:
+                        out.append(item)
+            p[key] = out
+        else:
+            s = scalar_to_str_fn(val, "").strip() if val is not None else ""
+            if s and not _looks_like_url_or_scheme(s):
+                p[key] = resolve_path_under_session(val, base, scalar_to_str_fn)
+    return p
+
+
+def apply_session_cwd_tool_params(tool: str, params: dict, deps: Any) -> dict:
+    """Rewrite filesystem-related tool parameters relative to ``deps.session_cwd`` when set."""
+    raw_base = getattr(deps, "session_cwd", None)
+    if not raw_base or not str(raw_base).strip():
+        return params
+    base = os.path.abspath(os.path.expanduser(str(raw_base).strip()))
+    st = deps.scalar_to_str
+    p = dict(params)
+
+    def rp(v: object) -> str:
+        return resolve_path_under_session(v, base, st)
+
+    if tool == "write_file":
+        if "path" in p:
+            p["path"] = rp(p.get("path"))
+    elif tool == "read_file":
+        if "path" in p:
+            p["path"] = rp(p.get("path"))
+    elif tool == "list_directory":
+        if "path" in p:
+            p["path"] = rp(p.get("path"))
+    elif tool == "download_file":
+        if "path" in p:
+            p["path"] = rp(p.get("path"))
+    elif tool == "tail_file":
+        if "path" in p:
+            p["path"] = rp(p.get("path"))
+    elif tool == "replace_text":
+        if "path" in p:
+            p["path"] = rp(p.get("path"))
+    elif tool == "use_git":
+        for key in ("worktree", "cwd", "repo", "work_tree", "path_root"):
+            if key not in p:
+                continue
+            if st(p.get(key), "").strip():
+                p[key] = rp(p.get(key))
+        wt = st(p.get("worktree") or p.get("cwd") or p.get("path_root") or "", "").strip()
+        if not wt:
+            p["worktree"] = base
+    elif tool in getattr(deps, "plugin_tool_handlers", {}):
+        p = apply_session_cwd_plugin_params(p, base, st)
+    return p
+
+
+def run_command_with_session_cwd(deps: Any, cmd: str) -> str:
+    """Invoke ``deps.run_command`` with subprocess cwd when ``deps.session_cwd`` is set."""
+    raw_base = getattr(deps, "session_cwd", None)
+    if raw_base and str(raw_base).strip():
+        cwd = os.path.abspath(os.path.expanduser(str(raw_base).strip()))
+        return deps.run_command(cmd, cwd=cwd)
+    return deps.run_command(cmd)
 
 
 def tool_params_fingerprint(
