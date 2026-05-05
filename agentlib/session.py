@@ -266,7 +266,9 @@ class AgentSession:
         if not raw:
             sink_print_compat("Usage: /cd <dir>")
             return SessionLineResult()
-        target = os.path.abspath(os.path.expanduser(raw))
+        # Relative segments are resolved against this session's cwd, not the process cwd.
+        base = (self.session_cwd or os.path.abspath(os.getcwd())).strip()
+        target = resolve_path_under_session(raw, base, self._conversation_turn_deps.scalar_to_str)
         if not os.path.isdir(target):
             sink_print_compat(f"/cd: not a directory: {target!r}")
             return SessionLineResult()

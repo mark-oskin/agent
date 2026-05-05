@@ -3,6 +3,19 @@
 from agentlib.embedding import build_embedded_session
 
 
+def test_cd_relative_target_is_against_session_cwd(tmp_path):
+    base = tmp_path / "a"
+    nested = base / "nested"
+    base.mkdir()
+    nested.mkdir()
+
+    _, sess = build_embedded_session(verbose=0)
+    sess.execute_line(f"/cd {base}")
+    assert sess.session_cwd == str(base.resolve())
+    sess.execute_line("/cd nested")
+    assert sess.session_cwd == str(nested.resolve())
+
+
 def test_cd_updates_session_cwd_and_shell_commands(tmp_path, monkeypatch):
     from agentlib.tools import builtins as tb
 
