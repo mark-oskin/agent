@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AbstractSet, Callable, Iterable, Optional
 
+from agentlib.coercion import coerce_verbose_level
 from agentlib.sink import emit_sink_scope, sink_emit, sink_print_compat
 from agentlib.tools.registry import ToolRegistry
 from agentlib.tools.routing import preferred_web_search_tool
@@ -1449,18 +1450,18 @@ class AgentSession:
 
         if key == "verbose":
             if len(toks) != 3:
-                sink_print_compat("Usage: /set verbose 0|1|2|on|off")
+                sink_print_compat("Usage: /set verbose 0|1|2|3|on|off")
                 return SessionLineResult()
             tok = toks[2].strip().lower()
-            if tok == "on":
+            if tok in ("on", "true", "yes", "y"):
                 self.verbose = 2
-            elif tok == "off":
+            elif tok in ("off", "false", "no", "n"):
                 self.verbose = 0
-            elif tok in ("0", "1", "2"):
-                self.verbose = int(tok)
             else:
-                sink_print_compat("Usage: /set verbose 0|1|2|on|off")
-                return SessionLineResult()
+                if not tok.isdigit():
+                    sink_print_compat("Usage: /set verbose 0|1|2|3|on|off")
+                    return SessionLineResult()
+                self.verbose = coerce_verbose_level(int(tok, 10))
             sink_print_compat(self._verbose_ack_message(self.verbose))
             return SessionLineResult()
 

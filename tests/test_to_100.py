@@ -203,6 +203,7 @@ def test_interactive_settings_verbose_toggle(monkeypatch):
     lines = [
         "/set verbose on",
         "/set verbose off",
+        "/set verbose 3",
         "/set enable verbose",
         "/set disable verbose",
         "/quit",
@@ -213,6 +214,7 @@ def test_interactive_settings_verbose_toggle(monkeypatch):
         run_session_lines(session, lines)
     out = buf.getvalue()
     assert "verbose level 2" in out
+    assert "verbose level 3" in out
     assert "verbose level 0" in out
 
 
