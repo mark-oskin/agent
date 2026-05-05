@@ -59,8 +59,6 @@ def build_agent_prefs_payload(
         payload["second_opinion_reviewer"] = rev
     if session_save_path and str(session_save_path).strip():
         payload["save_context_path"] = str(session_save_path).strip()
-    payload["system_prompt"] = None
-    payload["system_prompt_path"] = None
     spp = (system_prompt_path_override or "").strip()
     if spp:
         payload["system_prompt_path"] = os.path.abspath(os.path.expanduser(spp))

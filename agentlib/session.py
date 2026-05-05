@@ -1531,6 +1531,7 @@ class AgentSession:
                     "Usage:\n"
                     "  /set system_prompt show\n"
                     "  /set system_prompt reset\n"
+                    "  /set system_prompt pin\n"
                     "  /set system_prompt file <path>\n"
                     "  /set system_prompt save <path>\n"
                     "  /set system_prompt <text>\n"
@@ -1548,6 +1549,17 @@ class AgentSession:
                     sink_print_compat("(Session inline override.)")
                 else:
                     sink_print_compat("(Built-in default.)")
+                return SessionLineResult()
+            if sub in ("pin", "snapshot"):
+                body = agent_prompts.effective_system_instruction_text_for_tools(
+                    self.session_system_prompt, frozenset(self.enabled_tools)
+                )
+                self.session_system_prompt = body
+                self.session_system_prompt_path = None
+                sink_print_compat(
+                    f"System prompt pinned for this session ({len(body)} chars). "
+                    "Use /set save to persist to ~/.agent.json."
+                )
                 return SessionLineResult()
             if sub in ("reset", "default"):
                 self.session_system_prompt = None

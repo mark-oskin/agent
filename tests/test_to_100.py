@@ -272,8 +272,8 @@ def test_agent_prefs_roundtrip(tmp_path, monkeypatch):
     assert st["context_manager"]["tokens"] == 1234
     data = json.loads(pref_path.read_text(encoding="utf-8"))
     assert data["version"] == 4
-    assert data.get("system_prompt") is None
-    assert data.get("system_prompt_path") is None
+    assert "system_prompt" not in data
+    assert "system_prompt_path" not in data
     assert data.get("verbose") == 1
     prefs.set_agent_prefs_path_override(None)
 
