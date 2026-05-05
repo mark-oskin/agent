@@ -14,7 +14,7 @@ from agentlib.llm.calls import (
     call_ollama_chat,
     call_ollama_plaintext,
 )
-from agentlib.llm.profile import default_primary_llm_profile
+from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
 from agentlib.tools import turn_support
 from agentlib.tools.registry import ToolRegistry
 import os
@@ -109,6 +109,69 @@ def test_call_ollama_chat_retries_without_think_on_400(monkeypatch):
     assert bodies[1].get("think") is False
     out = json.loads(raw)
     assert out.get("answer") == "ok"
+
+
+def test_call_ollama_chat_routes_hosted_profile_to_openai_chat_completions(monkeypatch):
+    from agentlib.llm import calls as calls_mod
+
+    got: dict = {}
+
+    class _OkResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"action":"answer","answer":"hosted ok"}',
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(url, json=None, **kwargs):
+        got["url"] = url
+        got["json"] = dict(json or {})
+        assert kwargs.get("stream") is not True
+        return _OkResp()
+
+    monkeypatch.setattr(calls_mod.requests, "post", fake_post)
+
+    raw = call_ollama_chat(
+        [{"role": "user", "content": "hi"}],
+        primary_profile=LlmProfile(
+            backend="hosted",
+            base_url="https://api.x.ai/v1",
+            model="grok-test:latest",
+            api_key="xai-key",
+        ),
+        enabled_tools=None,
+        verbose=0,
+        ollama_base_url="http://localhost:11434",
+        ollama_model="dummy:latest",
+        ollama_think_value=True,
+        ollama_debug=False,
+        merge_stream_message_chunks=lambda lines_iter, stream_chunks=False: streaming.merge_stream_message_chunks(
+            lines_iter,
+            stream_chunks=stream_chunks,
+            agent_stream_thinking_enabled=lambda: False,
+        ),
+        ollama_usage_from_chat_response=streaming.ollama_usage_from_chat_response,
+        message_to_agent_json_text=_msg_to_json,
+        verbose_emit_final_agent_readable=lambda _t: None,
+        format_ollama_usage_line=lambda _u: "",
+        set_last_ollama_usage=lambda _u: None,
+        call_hosted_agent_chat_impl=calls_mod.call_hosted_agent_chat,
+    )
+
+    assert got["url"] == "https://api.x.ai/v1/chat/completions"
+    assert got["json"].get("model") == "grok-test:latest"
+    out = json.loads(raw)
+    assert out.get("answer") == "hosted ok"
 
 
 def test_call_ollama_plaintext_retries_without_think_on_400(monkeypatch):

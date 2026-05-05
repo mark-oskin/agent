@@ -278,9 +278,13 @@ def call_ollama_chat(
         set_last_ollama_usage(None)
         return call_hosted_agent_chat_impl(
             messages,
-            profile=prof,
+            base_url=str(getattr(prof, "base_url", "") or ""),
+            model=str(getattr(prof, "model", "") or ""),
+            api_key=str(getattr(prof, "api_key", "") or ""),
             enabled_tools=enabled_tools,
             verbose=verbose,
+            message_to_agent_json_text=message_to_agent_json_text,
+            verbose_emit_final_agent_readable=verbose_emit_final_agent_readable,
         )
 
     base = (ollama_base_url or "").rstrip("/")

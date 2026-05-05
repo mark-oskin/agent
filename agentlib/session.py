@@ -1386,7 +1386,7 @@ class AgentSession:
             sink_print_compat(
                 "Usage:\n"
                 "  /set save\n"
-                "  /set model <ollama-model>\n"
+                "  /set model <ollama-model>   (local Ollama only; for hosted/Grok use /set primary llm hosted …)\n"
                 "  /set enable|disable <feature/tool>\n"
                 "  /set tools ...\n"
                 "  /set system_prompt ...\n"
@@ -1394,6 +1394,7 @@ class AgentSession:
                 "  /set context ...\n"
                 "  /set thinking ...\n"
                 "  /set ollama|openai|agent show|keys|set|unset\n"
+                "  /set primary llm ollama|hosted …\n"
             )
             return SessionLineResult()
 
@@ -1878,11 +1879,25 @@ class AgentSession:
 
         if key == "model":
             if len(toks) < 3:
-                sink_print_compat("Usage: /set model <ollama-model-name>")
+                sink_print_compat(
+                    "Usage: /set model <ollama-model-name>\n"
+                    "  Sets the local Ollama tag stored in ollama.model (when primary LLM is Ollama).\n"
+                    "  For an OpenAI-compatible hosted API (xAI Grok, etc.), switch primary:\n"
+                    "    /set primary llm hosted <base_url> <model> [api_key]\n"
+                    "  Example (xAI): /set primary llm hosted https://api.x.ai/v1 grok-2-latest <key>\n"
+                    "  (base_url should include /v1 — requests go to {base_url}/chat/completions.)"
+                )
                 return SessionLineResult()
             name = toks[2].strip()
             if not name:
-                sink_print_compat("Usage: /set model <ollama-model-name>")
+                sink_print_compat(
+                    "Usage: /set model <ollama-model-name>\n"
+                    "  Sets the local Ollama tag stored in ollama.model (when primary LLM is Ollama).\n"
+                    "  For an OpenAI-compatible hosted API (xAI Grok, etc.), switch primary:\n"
+                    "    /set primary llm hosted <base_url> <model> [api_key]\n"
+                    "  Example (xAI): /set primary llm hosted https://api.x.ai/v1 grok-2-latest <key>\n"
+                    "  (base_url should include /v1 — requests go to {base_url}/chat/completions.)"
+                )
                 return SessionLineResult()
             self._settings_set(("ollama", "model"), name)
             sink_print_compat(f"ollama.model set to {name!r}. Use /set save to persist.")
