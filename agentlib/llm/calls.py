@@ -4,8 +4,23 @@ import json
 from typing import AbstractSet, Callable, Optional, Tuple
 
 import requests
+from requests.exceptions import HTTPError
 
 from agentlib.sink import sink_emit
+
+
+_THINK_FALLBACK_WARNING = (
+    "Ollama rejected thinking for this model (HTTP 400); retrying without the think option.\n"
+)
+
+
+def _should_retry_ollama_chat_without_think(exc: BaseException, body: dict) -> bool:
+    """If True, caller may retry the same /api/chat body with ``think: False``."""
+    if not isinstance(exc, HTTPError) or exc.response is None:
+        return False
+    if exc.response.status_code != 400:
+        return False
+    return body.get("think") is not False
 
 
 def call_ollama_plaintext(
@@ -28,19 +43,27 @@ def call_ollama_plaintext(
 
     def run_chat(streaming: bool) -> Tuple[str, Optional[dict]]:
         body = {**payload, "stream": streaming}
-        if streaming:
-            with requests.post(url, json=body, stream=True, timeout=600) as r:
+        for attempt in range(2):
+            try:
+                if streaming:
+                    with requests.post(url, json=body, stream=True, timeout=600) as r:
+                        r.raise_for_status()
+                        msg, usage, _ = merge_stream_message_chunks(
+                            r.iter_lines(decode_unicode=True), stream_chunks=False
+                        )
+                    return (msg.get("content") or "").strip(), usage
+                r = requests.post(url, json=body, timeout=600)
                 r.raise_for_status()
-                msg, usage, _ = merge_stream_message_chunks(
-                    r.iter_lines(decode_unicode=True), stream_chunks=False
-                )
-            return (msg.get("content") or "").strip(), usage
-        r = requests.post(url, json=body, timeout=600)
-        r.raise_for_status()
-        data = r.json()
-        msg = data.get("message") or {}
-        usage = data.get("usage") if isinstance(data, dict) else None
-        return (msg.get("content") or "").strip(), usage if isinstance(usage, dict) else None
+                data = r.json()
+                msg = data.get("message") or {}
+                usage = data.get("usage") if isinstance(data, dict) else None
+                return (msg.get("content") or "").strip(), usage if isinstance(usage, dict) else None
+            except HTTPError as e:
+                if attempt == 0 and _should_retry_ollama_chat_without_think(e, body):
+                    sink_emit({"type": "warning", "text": _THINK_FALLBACK_WARNING})
+                    body = {**body, "think": False}
+                    continue
+                raise
 
     text, _usage = run_chat(streaming=True)
     if not text:
@@ -245,28 +268,36 @@ def call_ollama_chat(
 
     def run_chat(streaming: bool) -> Tuple[str, Optional[dict], bool]:
         body = {**payload, "stream": streaming}
-        if streaming:
-            with requests.post(url, json=body, stream=True, timeout=600) as r:
+        for attempt in range(2):
+            try:
+                if streaming:
+                    with requests.post(url, json=body, stream=True, timeout=600) as r:
+                        r.raise_for_status()
+                        msg, usage, streamed = merge_stream_message_chunks(
+                            r.iter_lines(decode_unicode=True), stream_chunks=stream_llm
+                        )
+                    if ollama_debug:
+                        sink_emit({"type": "debug", "text": f"[DEBUG] Ollama merged message: {msg!r}"})
+                    text = message_to_agent_json_text(msg, enabled_tools)
+                    return text, usage, streamed
+                r = requests.post(url, json=body, timeout=600)
                 r.raise_for_status()
-                msg, usage, streamed = merge_stream_message_chunks(
-                    r.iter_lines(decode_unicode=True), stream_chunks=stream_llm
-                )
-            if ollama_debug:
-                sink_emit({"type": "debug", "text": f"[DEBUG] Ollama merged message: {msg!r}"})
-            text = message_to_agent_json_text(msg, enabled_tools)
-            return text, usage, streamed
-        r = requests.post(url, json=body, timeout=600)
-        r.raise_for_status()
-        data = r.json()
-        if ollama_debug:
-            sink_emit({"type": "debug", "text": f"[DEBUG] Ollama API response: {data!r}"})
-        msg = data.get("message") or {}
-        text = message_to_agent_json_text(msg, enabled_tools)
-        usage = ollama_usage_from_chat_response(data)
-        if stream_llm and text.strip():
-            sink_emit({"type": "output", "text": text})
-            return text, usage, True
-        return text, usage, False
+                data = r.json()
+                if ollama_debug:
+                    sink_emit({"type": "debug", "text": f"[DEBUG] Ollama API response: {data!r}"})
+                msg = data.get("message") or {}
+                text = message_to_agent_json_text(msg, enabled_tools)
+                usage = ollama_usage_from_chat_response(data)
+                if stream_llm and text.strip():
+                    sink_emit({"type": "output", "text": text})
+                    return text, usage, True
+                return text, usage, False
+            except HTTPError as e:
+                if attempt == 0 and _should_retry_ollama_chat_without_think(e, body):
+                    sink_emit({"type": "warning", "text": _THINK_FALLBACK_WARNING})
+                    body = {**body, "think": False}
+                    continue
+                raise
 
     try:
         text, usage, streamed = run_chat(streaming=True)
