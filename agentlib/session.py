@@ -894,10 +894,6 @@ class AgentSession:
         if not cmd:
             sink_print_compat("/run_command: missing command.")
             return SessionLineResult()
-        if cmd.strip() == "pwd":
-            # Session cwd is not necessarily the process cwd (multi-session / TUI); make `! pwd` useful.
-            sink_print_compat(self.session_cwd)
-            return SessionLineResult()
 
         sink_print_compat(self._session_run_command(cmd))
         return SessionLineResult()
@@ -935,7 +931,7 @@ class AgentSession:
                 "Shorthand:\n"
                 "  ! COMMAND                  Same as /run_command COMMAND\n\n"
                 "Working directory:\n"
-                "  Commands run in this session's cwd (see /cd). Check with: ! pwd\n\n"
+                "  Commands run in this session's cwd (see /cd).\n\n"
                 "Uses the same backend as the agent run_command tool; local/trusted use only."
             )
             return SessionLineResult()

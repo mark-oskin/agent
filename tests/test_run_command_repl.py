@@ -40,9 +40,8 @@ def test_bang_shorthand(monkeypatch, capsys):
     monkeypatch.setattr(tb, "run_command", stub)
     _, sess = build_embedded_session(verbose=0)
     sess.execute_line("! pwd")
-    assert calls == []
-    out = capsys.readouterr().out
-    assert sess.session_cwd in out
+    assert calls == [("pwd", sess.session_cwd)]
+    assert "ok" in capsys.readouterr().out
 
 
 def test_bang_empty_usage(capsys):
