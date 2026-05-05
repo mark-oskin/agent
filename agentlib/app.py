@@ -689,7 +689,7 @@ class AgentApp:
             "\n"
             "Interactive REPL tips:\n"
             "  - Type /help for commands.\n"
-            "  - Use /settings ... to view/set config and /settings save to persist.\n"
+            "  - Use /set ... to view/set config and /set save to persist.\n"
             "\n"
             "Agent loop budgets (prefs group agent; defaults in parentheses):\n"
             "  max_agent_steps (30)           Max model iterations when web verification is off.\n"

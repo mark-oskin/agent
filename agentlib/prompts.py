@@ -178,7 +178,7 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
             )
             i += 1
         else:
-            # Plugin tools: keep docs minimal here; full contracts are available via /settings tools describe <tool-id>.
+            # Plugin tools: keep docs minimal here; full contracts are available via /set tools describe <tool-id>.
             docs.append(f"{i}. {tid} — parameters: JSON object (tool-specific).\n")
             i += 1
     return header + "".join(docs)

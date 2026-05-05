@@ -176,10 +176,10 @@ def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
     )
     out_file = tmp_path / "out.json"
     lines = [
-        "/settings model repl-test-model",
-        "/settings enable second_opinion",
-        "/settings disable second_opinion",
-        "/settings enable second-opinion",
+        "/set model repl-test-model",
+        "/set enable second_opinion",
+        "/set disable second_opinion",
+        "/set enable second-opinion",
         f"/load_context {ctx_file}",
         f"/save_context {out_file}",
         "/quit",
@@ -201,10 +201,10 @@ def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
 
 def test_interactive_settings_verbose_toggle(monkeypatch):
     lines = [
-        "/settings verbose on",
-        "/settings verbose off",
-        "/settings enable verbose",
-        "/settings disable verbose",
+        "/set verbose on",
+        "/set verbose off",
+        "/set enable verbose",
+        "/set disable verbose",
         "/quit",
     ]
     buf = io.StringIO()
@@ -449,7 +449,7 @@ def test_prefs_system_prompt_path_roundtrip(tmp_path, monkeypatch):
 
 
 def test_interactive_settings_ollama_show_renders(tmp_path, monkeypatch):
-    lines = ["/settings ollama show", "/quit"]
+    lines = ["/set ollama show", "/quit"]
     buf = io.StringIO()
     with redirect_stdout(buf):
         _app, session = build_test_session(monkeypatch, verbose=0, prefs_path=str(tmp_path / "x.json"))
@@ -460,12 +460,12 @@ def test_interactive_settings_ollama_show_renders(tmp_path, monkeypatch):
 
 def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch):
     lines = [
-        "/settings thinking show",
-        "/settings thinking level high",
-        "/settings thinking show",
-        "/settings disable stream_thinking",
-        "/settings thinking off",
-        "/settings thinking show",
+        "/set thinking show",
+        "/set thinking level high",
+        "/set thinking show",
+        "/set disable stream_thinking",
+        "/set thinking off",
+        "/set thinking show",
         "/quit",
     ]
     buf = io.StringIO()
@@ -480,9 +480,9 @@ def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch
 
 def test_interactive_settings_tools_lists_toolsets_and_describe(tmp_path, monkeypatch):
     lines = [
-        "/settings tools",
-        "/settings tools describe run_pytest",
-        "/settings tools describe dev",
+        "/set tools",
+        "/set tools describe run_pytest",
+        "/set tools describe dev",
         "/quit",
     ]
     buf = io.StringIO()
@@ -499,7 +499,7 @@ def test_interactive_settings_save_command(tmp_path, monkeypatch):
     from agentlib import prefs
 
     pref_path = tmp_path / "saved.json"
-    lines = ["/settings save", "/quit"]
+    lines = ["/set save", "/quit"]
     buf = io.StringIO()
     with redirect_stdout(buf):
         _app, session = build_test_session(
@@ -569,7 +569,7 @@ def test_normalize_tool_user_aliases():
 
 
 def test_interactive_settings_tools_command(monkeypatch):
-    lines = ["/settings tools", "/quit"]
+    lines = ["/set tools", "/quit"]
     buf = io.StringIO()
     with redirect_stdout(buf):
         _app, session = build_test_session(monkeypatch, verbose=0)
@@ -602,13 +602,13 @@ def test_cli_enable_tool_accepts_user_alias(monkeypatch):
 def test_cli_unknown_tool_prints_hint(monkeypatch):
     out = run_main(monkeypatch, ["-enable_tool", "notatool"], [])
     assert "Unknown tool" in out
-    assert "list-tools" in out or "/settings tools" in out
+    assert "list-tools" in out or "/set tools" in out
 
 
 def test_interactive_phrase_disable_enable_web_search(monkeypatch):
     lines = [
-        "/settings disable web search",
-        "/settings enable web search",
+        "/set disable web search",
+        "/set enable web search",
         "/quit",
     ]
     buf = io.StringIO()
@@ -622,8 +622,8 @@ def test_interactive_phrase_disable_enable_web_search(monkeypatch):
 
 def test_interactive_settings_tools(monkeypatch):
     lines = [
-        "/settings disable search_web",
-        "/settings enable search_web",
+        "/set disable search_web",
+        "/set enable search_web",
         "/quit",
     ]
     buf = io.StringIO()
@@ -666,10 +666,10 @@ def test_route_requires_websearch_skips_when_search_web_disabled(monkeypatch):
 
 def test_interactive_settings_llm_profiles(monkeypatch):
     lines = [
-        "/settings primary llm hosted https://api.example/v1 fake-model sk-test",
-        "/settings second_opinion llm ollama tinyllama:latest",
-        "/settings second_opinion llm hosted https://review.example/v1 rev-model",
-        "/settings primary llm ollama",
+        "/set primary llm hosted https://api.example/v1 fake-model sk-test",
+        "/set second_opinion llm ollama tinyllama:latest",
+        "/set second_opinion llm hosted https://review.example/v1 rev-model",
+        "/set primary llm ollama",
         "/quit",
     ]
     buf = io.StringIO()
@@ -712,7 +712,7 @@ def test_interactive_skill_list(monkeypatch):
 def test_interactive_skill_help_and_prompt_template_help(monkeypatch):
     lines = [
         "/skill help",
-        "/settings prompt_template help",
+        "/set prompt_template help",
         "/quit",
     ]
     buf = io.StringIO()
@@ -734,9 +734,9 @@ def test_interactive_help_is_top_level(monkeypatch):
         run_session_lines(session, lines)
     out = buf.getvalue()
     assert "/skill ..." in out
-    assert "/settings ..." in out
+    assert "/set ..." in out
     assert "try /skill help" in out.lower()
-    assert "try /settings help" in out.lower()
+    assert "try /set help" in out.lower()
 
 
 def test_parse_while_repl_tokens_and_judge_bit():
@@ -768,6 +768,18 @@ def test_interactive_show_model_and_reviewer(monkeypatch):
     out = buf.getvalue()
     assert "Primary LLM: ollama (" in out and "custom-llm:latest" in out
     assert "Second-opinion reviewer:" in out
+
+
+def test_interactive_show_models_lists_local_ollama_models(monkeypatch):
+    lines = ["/show models", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        session._fetch_ollama_local_model_names = lambda: ["qwen3.6:latest", "laguna-xs.2:latest"]
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "qwen3.6:latest" in out
+    assert "laguna-xs.2:latest" in out
 
 
 # --- transcripts ---

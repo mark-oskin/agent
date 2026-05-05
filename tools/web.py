@@ -12,8 +12,8 @@ would require AppleScript / ``safaridriver`` and is not implemented here.
 
 Enable the toolset in-session::
 
-    /settings tools enable browser
-    /settings save
+    /set tools enable browser
+    /set save
 
 Requires::
 

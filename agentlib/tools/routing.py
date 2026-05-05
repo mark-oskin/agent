@@ -115,7 +115,7 @@ def format_unknown_tool_hint(phrase: str) -> str:
                 internal = resolve_tool_token(m) or m
                 bits.append(f"{m} → {internal}" if m != internal else internal)
             lines.append("Did you mean: " + ", ".join(bits) + "?")
-    lines.append("Run /settings tools (or --list-tools) for every tool and its id.")
+    lines.append("Run /set tools (or --list-tools) for every tool and its id.")
     return "\n".join(lines)
 
 
@@ -125,7 +125,7 @@ def format_settings_tools_list(enabled_tools: AbstractSet[str]) -> str:
         on = "on" if internal in enabled_tools else "off"
         lines.append(f"  [{on}] {label}  ({internal})")
     lines.append(
-        "You can use plain phrases, e.g. /settings disable web search  "
+        "You can use plain phrases, e.g. /set disable web search  "
         "or  -disable_tool shell"
     )
     return "\n".join(lines)

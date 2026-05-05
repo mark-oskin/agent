@@ -168,7 +168,7 @@ class AgentSettings:
         else:
             v = text
         self.set((grp, key), v)
-        return f"{grp}.{key} set. Use /settings save to persist."
+        return f"{grp}.{key} set. Use /set save to persist."
 
     def group_unset(self, group: str, raw_key: str) -> str:
         grp = (group or "").strip().lower()
@@ -179,7 +179,7 @@ class AgentSettings:
         if key not in defaults:
             raise ValueError(f"unknown key {key!r} for group {grp!r}")
         self.set((grp, key), defaults.get(key))
-        return f"{grp}.{key} reset to default. Use /settings save to persist."
+        return f"{grp}.{key} reset to default. Use /set save to persist."
 
     def apply_prefs_groups_with_legacy_migration(self, prefs: dict) -> None:
         """

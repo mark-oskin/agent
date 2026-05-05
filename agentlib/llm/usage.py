@@ -42,7 +42,7 @@ def format_last_ollama_usage_for_repl(last_usage: Optional[dict]) -> str:
         return (
             "No Ollama usage captured yet. Stats come from the local primary model's last "
             "/api/chat response (not hosted APIs). After a turn, try again, or use "
-            "/settings verbose 2 to print usage after each Ollama call (level 2)."
+            "/set verbose 2 to print usage after each Ollama call (level 2)."
         )
     return (
         format_ollama_usage_line(last_usage)
