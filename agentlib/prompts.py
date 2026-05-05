@@ -48,39 +48,14 @@ SYSTEM_INSTRUCTIONS = (
     "user is not asking for up-to-date real-world data, you may use action answer without tools.\n"
     "(4) After a web search step, use fetch_page when snippets or excerpts are not enough and you need full page text.\n\n"
     "Tool permission policy:\n"
-    "- You are explicitly permitted to invoke ANY tool that appears in the \"Allowed tool names\" list.\n"
+    "- You are explicitly permitted to invoke ANY tool described in the tool section below.\n"
     "- If the user request requires interacting with external systems and an appropriate allowed tool exists, you MUST attempt "
     "at least one tool call before refusing. Do not refuse by claiming you lack access when an appropriate allowed tool exists.\n"
     "- Tool failure handling: if a tool call fails or returns an error/unhelpful result, you MUST include the tool output in your "
     "next message, then try ONE corrected tool call (different parameters or a different allowed tool). Only after that may you "
     "fall back to a non-tool answer and briefly explain the concrete failure.\n\n"
-    "Allowed tool names (exact strings only): search_web, search_web_fetch_top, fetch_page, run_command, use_git, write_file, read_file, list_directory, "
-    "download_file, tail_file, replace_text, call_python.\n\n"
-    "Tool calls use this shape: {\"action\":\"tool_call\",\"tool\":<name>,\"parameters\":{...}} with every required key "
-    "for that tool present. Example: {\"action\":\"tool_call\",\"tool\":\"search_web\",\"parameters\":{\"query\":\"search terms\"}}.\n"
-    "Required parameters per tool (use JSON strings, numbers, or booleans as noted):\n"
-    "1. search_web — parameters.query (non-empty string, the web search terms); optional parameters.max_results "
-    "(integer 1–30, how many result rows to parse; default from AGENT_SEARCH_WEB_MAX_RESULTS, else 5).\n"
-    "2. search_web_fetch_top — parameters.query (non-empty string); optional parameters.max_results (1–30) and "
-    "parameters.fetch_top_n (1–10, default 10). Returns web results plus fetched excerpts.\n"
-    "3. fetch_page — parameters.url (string, full http/https URL to fetch).\n"
-    "4. run_command — parameters.command (string, shell command to run).\n"
-    "5. use_git — parameters.op (string: status|log|diff|add|commit|push|pull|branch), "
-    "optional parameters.worktree (repo path), parameters.message (for commit), parameters.remote / parameters.branch (for push/pull), "
-    "parameters.staged (boolean, for diff), parameters.paths (array of strings for add).\n"
-    "6. write_file — parameters.path (file path string), parameters.content (string to write).\n"
-    "7. read_file — parameters.path (file path string).\n"
-    "8. list_directory — parameters.path (directory path string).\n"
-    "9. download_file — parameters.url (source URL string), parameters.path (destination file path).\n"
-    "10. tail_file — parameters.path (file path string); optional: parameters.lines (integer, default 20).\n"
-    "11. replace_text — parameters.path, parameters.pattern (regex string), parameters.replacement (string); "
-    "optional: parameters.replace_all (boolean, default true).\n"
-    "12. call_python — parameters.code (string, syntactically valid Python ONLY). "
-    "Tool output includes STDOUT from print() (if any) plus a JSON summary of assigned variables (locals); "
-    "use print for human-readable trace. "
-    "Never put shell/batch/cmd text, pseudo-code, or natural-language document drafts in code; "
-    "those belong in write_file content or in action answer. "
-    "Optional: parameters.globals (object, extra globals).\n\n"
+    "Tools you can use and how to call them:\n"
+    "(This section is generated per run based on tool policy.)\n\n"
     "Finishing: use {\"action\":\"answer\",\"answer\":\"string\","
     "\"next_action\":\"finalize\",\"rationale\":\"short note (e.g. why you are done)\"}. "
     "To request an independent second opinion before finishing, use "
@@ -118,14 +93,14 @@ def _enabled_tools_list(enabled_tools: Optional[AbstractSet[str]]) -> list[str]:
 
 
 def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
-    """Allowed-tool list + minimal per-tool parameter docs, filtered by tool policy."""
+    """Minimal per-tool parameter docs, filtered by tool policy."""
     enabled = _enabled_tools_list(enabled_tools)
-    allowed_line = "Allowed tool names (exact strings only): " + ", ".join(enabled) + ".\n\n"
     header = (
+        "Tools you can use and how to call them:\n"
         "Tool calls use this shape: {\"action\":\"tool_call\",\"tool\":<name>,\"parameters\":{...}} "
         "with every required key for that tool present. Example: "
         "{\"action\":\"tool_call\",\"tool\":\"search_web\",\"parameters\":{\"query\":\"search terms\"}}.\n\n"
-        "Required parameters per tool (use JSON strings, numbers, or booleans as noted):\n"
+        "Parameters per tool (use JSON strings, numbers, or booleans as noted):\n"
     )
     docs: list[str] = []
     i = 1
@@ -200,19 +175,18 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
             # Plugin tools: keep docs minimal here; full contracts are available via /settings tools describe <tool-id>.
             docs.append(f"{i}. {tid} — parameters: JSON object (tool-specific).\n")
             i += 1
-    return allowed_line + header + "".join(docs)
+    return header + "".join(docs)
 
 
 def effective_system_instruction_text_for_tools(
     override: Optional[str], enabled_tools: Optional[AbstractSet[str]]
 ) -> str:
     """
-    Like `effective_system_instruction_text`, but the "Allowed tool names" section is filtered
-    to match the runner tool policy for this turn.
+    Like `effective_system_instruction_text`, but the tools section is generated to match tool policy.
     """
     base = effective_system_instruction_text(override)
     tool_block = _tool_docs_block(enabled_tools)
-    start = base.find("Allowed tool names (exact strings only):")
+    start = base.find("Tools you can use and how to call them:")
     end = base.find("\n\nFinishing:", start if start >= 0 else 0)
     if start >= 0 and end >= 0 and end > start:
         return base[:start] + tool_block + base[end:]
