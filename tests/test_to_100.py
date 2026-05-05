@@ -782,6 +782,28 @@ def test_interactive_show_models_lists_local_ollama_models(monkeypatch):
     assert "laguna-xs.2:latest" in out
 
 
+def test_interactive_source_reads_and_executes_lines(tmp_path, monkeypatch):
+    script = tmp_path / "script.txt"
+    script.write_text(
+        "\n".join(
+            [
+                "/set model sourced-llm:latest",
+                "/show model",
+                "/quit",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lines = [f"/source {script}", "should not run", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "Primary LLM:" in out and "sourced-llm:latest" in out
+
+
 # --- transcripts ---
 
 

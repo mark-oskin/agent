@@ -702,6 +702,8 @@ class AgentSession:
             return self._cmd_skill_backcompat(s)
         if cmd in ("/set", "/settings"):
             return self._cmd_settings(s)
+        if low.startswith("/source"):
+            return self._cmd_source(s)
         if low.startswith("/load_context"):
             return self._cmd_load_context(s)
         if low.startswith("/save_context"):
@@ -779,6 +781,7 @@ class AgentSession:
                 "  /skill ...               Skills (try /skill help)\n"
                 "  /while ...               Loops (try /while help)\n"
                 "  /set ...                 Configuration (try /set help)\n"
+                "  /source <file>           Read commands/prompts from file (like bash source)\n"
                 "  /load_context <file>     Replace session messages from JSON\n"
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
                 "  /call_python ...         Run Python in-process (try /call_python help)\n"
@@ -791,6 +794,43 @@ class AgentSession:
             )
             return SessionLineResult()
         sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
+        return SessionLineResult()
+
+    def _cmd_source(self, s: str) -> SessionLineResult:
+        """
+        Read a file of commands/prompts and execute them line-by-line.
+
+        Similar to bash `source`: each non-empty line is processed as if typed into the REPL.
+        """
+        try:
+            toks = shlex.split(s)
+        except ValueError as e:
+            sink_print_compat(f"/source: {e}")
+            return SessionLineResult()
+        if len(toks) < 2:
+            sink_print_compat("Usage: /source <file>")
+            return SessionLineResult()
+        path = os.path.expanduser(" ".join(toks[1:]).strip())
+        if not path:
+            sink_print_compat("Usage: /source <file>")
+            return SessionLineResult()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError as e:
+            sink_print_compat(f"/source error: {e}")
+            return SessionLineResult()
+
+        executed = 0
+        for raw in lines:
+            line = (raw or "").rstrip("\n")
+            if not line.strip():
+                continue
+            executed += 1
+            res = self.execute_line(line)
+            if bool((res or {}).get("quit", False)):
+                return SessionLineResult(quit=True)
+        sink_print_compat(f"Sourced {executed} line(s) from {path!r}.")
         return SessionLineResult()
 
     def _repl_shell_run(self, cmd: str) -> SessionLineResult:
