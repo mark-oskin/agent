@@ -185,7 +185,7 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
         elif tid == "run_applescript":
             docs.append(
                 f"{i}. run_applescript — parameters.script (AppleScript source code string); "
-                "optional parameters.timeout_ms (integer, default 20000).\n"
+                "optional parameters.timeout_ms (integer, default 20000), echo_script (bool), use_temp_file (bool).\n"
             )
             i += 1
         else:

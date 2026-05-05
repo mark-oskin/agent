@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import tempfile
 from typing import Optional
 
 
@@ -14,6 +15,9 @@ def run_applescript(params: dict) -> str:
     if not script:
         return "AppleScript tool error: missing required parameter: script"
 
+    echo_script = bool(p.get("echo_script", False))
+    use_temp_file = bool(p.get("use_temp_file", False))
+
     timeout_ms: Optional[int]
     try:
         timeout_ms = int(p.get("timeout_ms")) if p.get("timeout_ms") is not None else 20_000
@@ -26,21 +30,38 @@ def run_applescript(params: dict) -> str:
         return "AppleScript tool error: osascript not found (this tool requires macOS)."
 
     try:
-        r = subprocess.run(
-            [exe, "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
+        cmd: list[str]
+        tmp_path = None
+        if use_temp_file:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".applescript", delete=False) as f:
+                tmp_path = f.name
+                f.write(script)
+            cmd = [exe, tmp_path]
+        else:
+            cmd = [exe, "-e", script]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return f"AppleScript tool error: timed out after {timeout_ms}ms"
     except Exception as e:
         return f"AppleScript tool error: {type(e).__name__}: {e}"
+    finally:
+        if use_temp_file and tmp_path:
+            try:
+                import os
+
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
     out = (r.stdout or "").rstrip()
     err = (r.stderr or "").rstrip()
     lines: list[str] = []
-    lines.append("COMMAND: osascript -e <script>")
+    if use_temp_file:
+        lines.append("COMMAND: osascript <tempfile.applescript>")
+    else:
+        lines.append("COMMAND: osascript -e <script>")
+    if echo_script:
+        lines.append("SCRIPT:\n" + script)
     if out:
         lines.append("STDOUT:\n" + out)
     if err:
@@ -69,6 +90,8 @@ TOOLSET = {
             "params": {
                 "script": "AppleScript source code (string)",
                 "timeout_ms": "optional: execution timeout in milliseconds (default 20000)",
+                "echo_script": "optional: include SCRIPT: block in tool output (default false)",
+                "use_temp_file": "optional: run script via temp .applescript file for better error line/column (default false)",
             },
             "returns": "Command-like output with stdout/stderr and exit code.",
             "handler": run_applescript,

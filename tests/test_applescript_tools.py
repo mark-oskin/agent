@@ -32,6 +32,9 @@ def test_run_applescript_success():
     out = a.run_applescript({"script": 'return "ok"'})
     assert "(exit 0)" in out
     assert "ok" in out
+    out2 = a.run_applescript({"script": 'return "ok"', "echo_script": True})
+    assert "SCRIPT:\n" in out2
+    assert 'return "ok"' in out2
 
 
 @pytest.mark.skipif(
@@ -44,4 +47,7 @@ def test_run_applescript_error_exit_nonzero():
     out = a.run_applescript({"script": 'error "boom" number 42'})
     assert "(exit " in out and "(exit 0)" not in out
     assert "boom" in out.lower()
+    out2 = a.run_applescript({"script": 'error "boom" number 42', "use_temp_file": True})
+    assert "COMMAND: osascript <tempfile.applescript>" in out2
+    assert "(exit " in out2 and "(exit 0)" not in out2
 
