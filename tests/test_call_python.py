@@ -22,6 +22,14 @@ def test_call_python_print(capsys):
     assert "123" in capsys.readouterr().out
 
 
+def test_call_python_c_supports_newline_escapes(capsys):
+    _, sess = build_embedded_session(verbose=0)
+    sess.execute_line(r'/call_python -c "print(1)\nprint(2)"')
+    out = capsys.readouterr().out
+    assert "1" in out
+    assert "2" in out
+
+
 def test_call_python_ai_noop(capsys):
     _, sess = build_embedded_session(verbose=0)
     sess.execute_line(r'/call_python -c "r = ai(\"\"); print(r.get(\"type\"))"')

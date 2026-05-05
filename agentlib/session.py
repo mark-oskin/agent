@@ -845,7 +845,16 @@ class AgentSession:
         if parts[0] == "-c":
             if len(parts) < 2:
                 return ("error", "/call_python -c requires Python source")
-            return ("code", " ".join(parts[1:]))
+            # Allow multi-line code to be passed as a single CLI argument by embedding
+            # `\n` sequences inside quotes: /call_python -c "line1\nline2".
+            # Decode common escapes so users don't need literal newlines (which the REPL
+            # would interpret as separate commands).
+            raw = " ".join(parts[1:])
+            try:
+                decoded = bytes(raw, "utf-8").decode("unicode_escape")
+            except Exception:
+                decoded = raw
+            return ("code", decoded)
         return ("file", parts[0])
 
     def _cmd_call_python(self, s: str) -> SessionLineResult:
@@ -873,7 +882,7 @@ class AgentSession:
                 "/call_python — run Python in the agent process\n\n"
                 "Usage:\n"
                 "  /call_python help\n"
-                "  /call_python -c CODE          One logical line (quote for spaces)\n"
+                "  /call_python -c CODE          Python source (quote for spaces; supports \\n escapes)\n"
                 "  /call_python PATH.py          UTF-8 script file\n\n"
                 "Globals:\n"
                 "  ai(cmd)                       Same as typing ``cmd`` here (LLM or ``/command``).\n"
