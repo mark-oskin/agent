@@ -178,7 +178,7 @@ def parse_main_argv(
                 help_requested=True,
             )
         if strip_leading_dashes_flag(a) == "verbose":
-            if i + 1 < len(argv) and argv[i + 1] in ("0", "1", "2"):
+            if i + 1 < len(argv) and argv[i + 1] in ("0", "1", "2", "3"):
                 verbose = int(argv[i + 1])
                 i += 2
             else:
