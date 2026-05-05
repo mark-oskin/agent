@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 import shlex
+import sys
 import traceback
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -276,6 +277,35 @@ class AgentSession:
         self._rebind_session_fs_tools()
         sink_print_compat(f"Working directory: {self.session_cwd}")
         return SessionLineResult()
+
+    def _resolve_call_python_argv_paths(self, argv: list[str]) -> list[str]:
+        """Resolve relative paths after ``-f`` / ``--file`` / ``<`` against ``session_cwd``."""
+        base = (self.session_cwd or "").strip()
+        if not base:
+            return argv
+        root = os.path.abspath(os.path.expanduser(base))
+
+        def fix(raw: str) -> str:
+            if not isinstance(raw, str) or not raw.strip():
+                return raw
+            exp = os.path.expanduser(raw.strip())
+            if os.path.isabs(exp):
+                return os.path.normpath(exp)
+            return os.path.normpath(os.path.join(root, exp))
+
+        out = list(argv)
+        i = 1
+        while i < len(out):
+            if i + 1 < len(out) and out[i] in ("-f", "--file"):
+                out[i + 1] = fix(out[i + 1])
+                i += 2
+                continue
+            if out[i] == "<" and i + 1 < len(out):
+                out[i + 1] = fix(out[i + 1])
+                i += 2
+                continue
+            i += 1
+        return out
 
     def _agent_loop_budget(self) -> tuple[int, int, int, int]:
         s = self.settings
@@ -974,8 +1004,12 @@ class AgentSession:
             return SessionLineResult()
         return self._repl_shell_run(rest)
 
-    def _split_call_python_rest(self, s: str) -> tuple[str, Optional[str]]:
-        """Return (kind, payload): help | error | code | file."""
+    def _split_call_python_rest(self, s: str) -> tuple[str, object]:
+        """Return (kind, payload): help | error | code | file.
+
+        For ``file``, payload is ``list[str]``: ``[PATH, ARG, ...]`` from ``shlex.split`` (script path
+        plus tokens forwarded as ``sys.argv`` for the executed script).
+        """
         prefix = "/call_python"
         t = (s or "").strip()
         low = t.lower()
@@ -1003,7 +1037,7 @@ class AgentSession:
             except Exception:
                 decoded = raw
             return ("code", decoded)
-        return ("file", parts[0])
+        return ("file", parts)
 
     def _cmd_call_python(self, s: str) -> SessionLineResult:
         """
@@ -1031,7 +1065,8 @@ class AgentSession:
                 "Usage:\n"
                 "  /call_python help\n"
                 "  /call_python -c CODE          Python source (quote for spaces; supports \\n escapes)\n"
-                "  /call_python PATH.py          UTF-8 script file\n\n"
+                "  /call_python PATH.py [ARG ...]  UTF-8 script; remaining tokens become sys.argv (after script path)\n"
+                "                                  Relative paths after -f, --file, or < use this session's cwd (see /cd)\n\n"
                 "Multi-line:\n"
                 "  You can paste multi-line Python by opening a quote after -c and closing it on a later line.\n\n"
                 "Globals:\n"
@@ -1140,19 +1175,35 @@ class AgentSession:
                 filename = "<call_python -c>"
                 src = payload
             else:
-                assert payload is not None
-                path = Path(payload).expanduser()
+                assert isinstance(payload, list) and payload
+                parts = payload
+                path = Path(parts[0]).expanduser()
                 if not path.is_file():
                     sink_print_compat(f"/call_python: not a file: {path}")
                     return SessionLineResult()
                 filename = str(path.resolve())
                 src = path.read_text(encoding="utf-8")
+                argv_for_script = self._resolve_call_python_argv_paths([filename] + [str(x) for x in parts[1:]])
             code = compile(src, filename, "exec")
             # Use the same mapping for globals and locals so imports and top-level defs
             # live in ``g``. With ``exec(code, g, {})``, CPython treats the code like a class
             # body and binds module-level imports into the empty locals dict, so functions
             # (whose __globals__ is ``g``) see NameError for stdlib/third-party names.
-            exec(code, g, g)
+            saved_argv = sys.argv
+            if kind == "file":
+                sys.argv = argv_for_script
+            try:
+                exec(code, g, g)
+            finally:
+                if kind == "file":
+                    sys.argv = saved_argv
+        except SystemExit as e:
+            # Scripts often end with ``raise SystemExit(main())``; treat clean exits as success.
+            code = e.code
+            if code is None or code == 0 or code is False:
+                return SessionLineResult()
+            sink_print_compat(f"/call_python: script exited with status {code!r}")
+            return SessionLineResult()
         except BaseException:
             sink_print_compat(traceback.format_exc())
             return SessionLineResult()
