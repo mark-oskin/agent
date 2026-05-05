@@ -4,6 +4,7 @@ import os
 import platform
 from typing import AbstractSet, Callable, Optional
 
+from agentlib.tools import plugins, routing
 from agentlib.tools.routing import CORE_TOOL_ENTRIES, all_known_tools
 
 
@@ -107,92 +108,14 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
     docs: list[str] = []
     i = 1
     for tid in enabled:
-        if tid == "search_web":
-            docs.append(
-                f"{i}. search_web — parameters.query (non-empty string, the web search terms); optional parameters.max_results "
-                "(integer 1–30, how many result rows to parse; default from AGENT_SEARCH_WEB_MAX_RESULTS, else 5).\n"
-            )
-            i += 1
-        elif tid == "search_web_fetch_top":
-            docs.append(
-                f"{i}. search_web_fetch_top — parameters.query (non-empty string); optional parameters.max_results (1–30) and "
-                "parameters.fetch_top_n (1–10, default 10). Returns web results plus fetched excerpts.\n"
-            )
-            i += 1
-        elif tid == "fetch_page":
-            docs.append(f"{i}. fetch_page — parameters.url (string, full http/https URL to fetch).\n")
-            i += 1
-        elif tid == "run_command":
-            docs.append(f"{i}. run_command — parameters.command (string, shell command to run).\n")
-            i += 1
-        elif tid == "use_git":
-            docs.append(
-                f"{i}. use_git — parameters.op (string: status|log|diff|add|commit|push|pull|branch), "
-                "optional parameters.worktree (repo path), parameters.message (for commit), parameters.remote / parameters.branch (for push/pull), "
-                "parameters.staged (boolean, for diff), parameters.paths (array of strings for add).\n"
-            )
-            i += 1
-        elif tid == "write_file":
-            docs.append(f"{i}. write_file — parameters.path (file path string), parameters.content (string to write).\n")
-            i += 1
-        elif tid == "read_file":
-            docs.append(f"{i}. read_file — parameters.path (file path string).\n")
-            i += 1
-        elif tid == "list_directory":
-            docs.append(f"{i}. list_directory — parameters.path (directory path string).\n")
-            i += 1
-        elif tid == "download_file":
-            docs.append(
-                f"{i}. download_file — parameters.url (source URL string), parameters.path (destination file path).\n"
-            )
-            i += 1
-        elif tid == "tail_file":
-            docs.append(
-                f"{i}. tail_file — parameters.path (file path string); optional: parameters.lines (integer, default 20).\n"
-            )
-            i += 1
-        elif tid == "replace_text":
-            docs.append(
-                f"{i}. replace_text — parameters.path, parameters.pattern (regex string), parameters.replacement (string); "
-                "optional: parameters.replace_all (boolean, default true).\n"
-            )
-            i += 1
-        elif tid == "call_python":
-            docs.append(
-                f"{i}. call_python — parameters.code (string, syntactically valid Python ONLY). "
-                "Tool output includes STDOUT from print() (if any) plus a JSON summary of assigned variables (locals); "
-                "use print for human-readable trace. "
-                "Never put shell/batch/cmd text, pseudo-code, or natural-language document drafts in code; "
-                "those belong in write_file content or in action answer. "
-                "Optional: parameters.globals (object, extra globals).\n"
-            )
-            i += 1
-        elif tid == "run_applescript":
-            docs.append(
-                f"{i}. run_applescript — parameters.script (AppleScript source code string); "
-                "optional parameters.timeout_ms (integer, default 20000), echo_script (bool), use_temp_file (bool). "
-                "Date/time rule: for a specific clock time on a calendar day (e.g. today at HH:MM), "
-                "do not add hours to `current date`—that offsets from now. "
-                "Set hours, minutes, and seconds on the target date explicitly (e.g. assign `current date` to a variable, "
-                "then set `hours of`, `minutes of`, `seconds of` on it).\n"
-            )
-            i += 1
-        elif tid == "agent_send":
-            docs.append(
-                f"{i}. agent_send — send one REPL line to another agent_tui lane. "
-                "parameters.agent (string lane label), parameters.line (string REPL line), "
-                "optional parameters.wait (bool, default false), parameters.timeout_ms (int; only for wait=true). "
-                "Use wait=true when you need the other lane's result; if timeout happens, the other lane may still be running.\n"
-                "Examples: "
-                "{\\\"action\\\":\\\"tool_call\\\",\\\"tool\\\":\\\"agent_send\\\",\\\"parameters\\\":{\\\"agent\\\":\\\"agent2\\\",\\\"line\\\":\\\"/show model\\\"}} "
-                "or "
-                "{\\\"action\\\":\\\"tool_call\\\",\\\"tool\\\":\\\"agent_send\\\",\\\"parameters\\\":{\\\"agent\\\":\\\"agent2\\\",\\\"line\\\":\\\"who is the president of France?\\\",\\\"wait\\\":true,\\\"timeout_ms\\\":30000}}.\n"
-            )
-            i += 1
-        else:
+        doc = routing.core_tool_prompt_doc(tid)
+        if not doc:
+            doc = plugins.plugin_tool_prompt_doc(tid)
+        if not doc:
             # Plugin tools: keep docs minimal here; full contracts are available via /set tools describe <tool-id>.
-            docs.append(f"{i}. {tid} — parameters: JSON object (tool-specific).\n")
-            i += 1
+            doc = f"{tid} — parameters: JSON object (tool-specific)."
+        docs.append(f"{i}. {doc}\n")
+        i += 1
     return header + "".join(docs)
 
 

@@ -129,6 +129,16 @@ TOOLSET = {
                 "wait": "Optional: wait for completion (bool, default false).",
                 "timeout_ms": "Optional: timeout for wait=true in ms (int).",
             },
+            "prompt_doc": (
+                "agent_send — send one REPL line to another agent_tui lane. "
+                "parameters.agent (string lane label), parameters.line (string REPL line), "
+                "optional parameters.wait (bool, default false), parameters.timeout_ms (int; only for wait=true). "
+                "Use wait=true when you need the other lane's result; if timeout happens, the other lane may still be running. "
+                "Examples: "
+                "{\"action\":\"tool_call\",\"tool\":\"agent_send\",\"parameters\":{\"agent\":\"agent2\",\"line\":\"/show model\"}} "
+                "or "
+                "{\"action\":\"tool_call\",\"tool\":\"agent_send\",\"parameters\":{\"agent\":\"agent2\",\"line\":\"who is the president of France?\",\"wait\":true,\"timeout_ms\":30000}}."
+            ),
             "returns": "JSON string: queued ack for wait=false, or target lane result for wait=true (may timeout).",
             "handler": agent_send,
         }

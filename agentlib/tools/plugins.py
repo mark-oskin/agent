@@ -12,6 +12,7 @@ PLUGIN_TOOLSETS: dict[str, dict] = {}
 PLUGIN_TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {}
 PLUGIN_TOOL_TO_TOOLSET: dict[str, str] = {}
 PLUGIN_TOOLSET_TRIGGERS: dict[str, list[str]] = {}
+PLUGIN_TOOL_PROMPT_DOCS: dict[str, str] = {}
 
 
 def load_plugin_toolsets(*, tools_dir: Optional[str], default_tools_dir: str) -> None:
@@ -33,6 +34,7 @@ def load_plugin_toolsets(*, tools_dir: Optional[str], default_tools_dir: str) ->
     PLUGIN_TOOL_HANDLERS.clear()
     PLUGIN_TOOL_TO_TOOLSET.clear()
     PLUGIN_TOOLSET_TRIGGERS.clear()
+    PLUGIN_TOOL_PROMPT_DOCS.clear()
     base0 = (tools_dir or "").strip()
     base = os.path.abspath(os.path.expanduser(base0)) if base0 else default_tools_dir
     if not os.path.isdir(base):
@@ -80,6 +82,14 @@ def load_plugin_toolsets(*, tools_dir: Optional[str], default_tools_dir: str) ->
                 continue
             PLUGIN_TOOL_HANDLERS[tid] = h
             PLUGIN_TOOL_TO_TOOLSET[tid] = nm
+            pd = str(td.get("prompt_doc") or "").strip()
+            if pd:
+                PLUGIN_TOOL_PROMPT_DOCS[tid] = pd
+
+
+def plugin_tool_prompt_doc(tool_id: str) -> str:
+    """Prompt-doc line for a plugin tool, or empty string if none/unknown."""
+    return str(PLUGIN_TOOL_PROMPT_DOCS.get(str(tool_id or "").strip(), "") or "")
 
 
 def plugin_tools_for_toolset(toolset: str) -> set[str]:

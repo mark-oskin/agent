@@ -58,6 +58,52 @@ CORE_TOOL_ENTRIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 
 
+# Single source of truth for tool-call prompt docs (core tools).
+# These strings are rendered into the system prompt under "Parameters per tool".
+CORE_TOOL_PROMPT_DOCS: dict[str, str] = {
+    "search_web": (
+        "search_web — parameters.query (non-empty string, the web search terms); optional parameters.max_results "
+        "(integer 1–30, how many result rows to parse; default from AGENT_SEARCH_WEB_MAX_RESULTS, else 5)."
+    ),
+    "search_web_fetch_top": (
+        "search_web_fetch_top — parameters.query (non-empty string); optional parameters.max_results (1–30) and "
+        "parameters.fetch_top_n (1–10, default 10). Returns web results plus fetched excerpts."
+    ),
+    "fetch_page": "fetch_page — parameters.url (string, full http/https URL to fetch).",
+    "run_command": "run_command — parameters.command (string, shell command to run).",
+    "use_git": (
+        "use_git — parameters.op (string: status|log|diff|add|commit|push|pull|branch), "
+        "optional parameters.worktree (repo path), parameters.message (for commit), "
+        "parameters.remote / parameters.branch (for push/pull), parameters.staged (boolean, for diff), "
+        "parameters.paths (array of strings for add)."
+    ),
+    "write_file": "write_file — parameters.path (file path string), parameters.content (string to write).",
+    "read_file": "read_file — parameters.path (file path string).",
+    "list_directory": "list_directory — parameters.path (directory path string).",
+    "download_file": "download_file — parameters.url (source URL string), parameters.path (destination file path).",
+    "tail_file": (
+        "tail_file — parameters.path (file path string); optional: parameters.lines (integer, default 20)."
+    ),
+    "replace_text": (
+        "replace_text — parameters.path, parameters.pattern (regex string), parameters.replacement (string); "
+        "optional: parameters.replace_all (boolean, default true)."
+    ),
+    "call_python": (
+        "call_python — parameters.code (string, syntactically valid Python ONLY). "
+        "Tool output includes STDOUT from print() (if any) plus a JSON summary of assigned variables (locals); "
+        "use print for human-readable trace. "
+        "Never put shell/batch/cmd text, pseudo-code, or natural-language document drafts in code; "
+        "those belong in write_file content or in action answer. "
+        "Optional: parameters.globals (object, extra globals)."
+    ),
+}
+
+
+def core_tool_prompt_doc(tool_id: str) -> str:
+    """Prompt-doc line for a core tool, or empty string if unknown."""
+    return str(CORE_TOOL_PROMPT_DOCS.get(str(tool_id or "").strip(), "") or "")
+
+
 TOOL_ALIASES: dict[str, str] = {}
 
 

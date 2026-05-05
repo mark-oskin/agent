@@ -93,6 +93,14 @@ TOOLSET = {
                 "echo_script": "optional: include SCRIPT: block in tool output (default false)",
                 "use_temp_file": "optional: run script via temp .applescript file for better error line/column (default false)",
             },
+            "prompt_doc": (
+                "run_applescript — parameters.script (AppleScript source code string); "
+                "optional parameters.timeout_ms (integer, default 20000), echo_script (bool), use_temp_file (bool). "
+                "Date/time rule: for a specific clock time on a calendar day (e.g. today at HH:MM), "
+                "do not add hours to `current date`—that offsets from now. "
+                "Set hours, minutes, and seconds on the target date explicitly (e.g. assign `current date` to a variable, "
+                "then set `hours of`, `minutes of`, `seconds of` on it)."
+            ),
             "returns": "Command-like output with stdout/stderr and exit code.",
             "handler": run_applescript,
         }
