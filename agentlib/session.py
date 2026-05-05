@@ -179,6 +179,8 @@ class AgentSession:
         self._verbose_ack_message = verbose_ack_message
         self._parse_while_repl_tokens = parse_while_repl_tokens
         self._call_while_condition_judge = call_while_condition_judge
+        # Multi-line /call_python support (buffer until closing quote).
+        self._call_python_pending: Optional[str] = None
 
         self.python_fork_agent = python_fork_agent
         self.python_delegate_line = python_delegate_line
@@ -296,20 +298,39 @@ class AgentSession:
           tool output, and REPL command text stream incrementally via typed emit events (same schema as before).
         - Returns a structured dict for embedding callers (CLI can ignore most fields).
         """
-        s = (line or "").strip()
-        if not s:
+        raw_line = (line or "").rstrip("\n")
+        s0 = raw_line.strip()
+        if not s0:
             return {"type": "noop", "quit": False}
+
+        # Multi-line /call_python -c: allow pasting code with literal newlines by buffering
+        # until shlex sees a closing quote.
+        if self._call_python_pending is not None:
+            combined = self._call_python_pending + "\n" + raw_line
+            kind, payload = self._split_call_python_rest(combined.strip())
+            if kind == "error" and isinstance(payload, str) and "No closing quotation" in payload:
+                self._call_python_pending = combined
+                return {"type": "command", "quit": False, "output": ""}
+            self._call_python_pending = None
+            s0 = combined.strip()
+        else:
+            # Start buffering if the user opened a quote but didn't close it yet.
+            if s0.lower().startswith("/call_python"):
+                kind, payload = self._split_call_python_rest(s0)
+                if kind == "error" and isinstance(payload, str) and "No closing quotation" in payload:
+                    self._call_python_pending = raw_line
+                    return {"type": "command", "quit": False, "output": ""}
 
         if emit is None:
             # Preserve legacy behavior (prints inside handlers).
-            if s.startswith("/"):
-                res = self._execute_command_line(s)
+            if s0.startswith("/"):
+                res = self._execute_command_line(s0)
                 return {"type": "command", "quit": bool(res.quit), "output": res.output}
-            if s.startswith("!"):
-                res = self._cmd_run_shell_bang(s)
+            if s0.startswith("!"):
+                res = self._cmd_run_shell_bang(s0)
                 return {"type": "command", "quit": bool(res.quit), "output": res.output}
-            answered, final_answer = self._execute_user_request(s)
-            self.repl_last_user_query = s
+            answered, final_answer = self._execute_user_request(s0)
+            self.repl_last_user_query = s0
             self.repl_last_assistant_answer = (
                 final_answer.strip()
                 if isinstance(final_answer, str) and final_answer.strip()
@@ -323,15 +344,15 @@ class AgentSession:
             }
 
         with emit_sink_scope(emit):
-            if s.startswith("/"):
-                res = self._execute_command_line(s)
+            if s0.startswith("/"):
+                res = self._execute_command_line(s0)
                 payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
-            elif s.startswith("!"):
-                res = self._cmd_run_shell_bang(s)
+            elif s0.startswith("!"):
+                res = self._cmd_run_shell_bang(s0)
                 payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
             else:
-                answered, final_answer = self._execute_user_request(s)
-                self.repl_last_user_query = s
+                answered, final_answer = self._execute_user_request(s0)
+                self.repl_last_user_query = s0
                 self.repl_last_assistant_answer = (
                     final_answer.strip()
                     if isinstance(final_answer, str) and final_answer.strip()
@@ -884,6 +905,8 @@ class AgentSession:
                 "  /call_python help\n"
                 "  /call_python -c CODE          Python source (quote for spaces; supports \\n escapes)\n"
                 "  /call_python PATH.py          UTF-8 script file\n\n"
+                "Multi-line:\n"
+                "  You can paste multi-line Python by opening a quote after -c and closing it on a later line.\n\n"
                 "Globals:\n"
                 "  ai(cmd)                       Same as typing ``cmd`` here (LLM or ``/command``).\n"
                 "  ai(cmd, agent_name)           Target another agent when multi-agent hooks exist.\n"

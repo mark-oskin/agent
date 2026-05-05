@@ -30,6 +30,18 @@ def test_call_python_c_supports_newline_escapes(capsys):
     assert "2" in out
 
 
+def test_call_python_c_supports_literal_multiline_paste(capsys):
+    _, sess = build_embedded_session(verbose=0)
+    r0 = sess.execute_line('/call_python -c "print(1)')
+    assert r0["type"] == "command"
+    assert not r0.get("quit")
+    r1 = sess.execute_line('print(2)"')
+    assert r1["type"] == "command"
+    out = capsys.readouterr().out
+    assert "1" in out
+    assert "2" in out
+
+
 def test_call_python_ai_noop(capsys):
     _, sess = build_embedded_session(verbose=0)
     sess.execute_line(r'/call_python -c "r = ai(\"\"); print(r.get(\"type\"))"')
