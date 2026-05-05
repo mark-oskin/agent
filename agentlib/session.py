@@ -1886,7 +1886,11 @@ class AgentSession:
                     "  For an OpenAI-compatible hosted API (xAI Grok, etc.), switch primary:\n"
                     "    /set primary llm hosted <base_url> <model> [api_key]\n"
                     "  Example (xAI): /set primary llm hosted https://api.x.ai/v1 grok-2-latest <key>\n"
-                    "  (base_url should include /v1 — requests go to {base_url}/chat/completions.)"
+                    "  (base_url should include /v1 — requests go to {base_url}/chat/completions.)\n"
+                    "  To switch back to local Ollama as the primary LLM:\n"
+                    "    /set primary llm ollama\n"
+                    "  Then pick the local model tag (persist with /set save):\n"
+                    "    /set model <ollama-model-name>"
                 )
                 return SessionLineResult()
             name = toks[2].strip()
@@ -1897,7 +1901,11 @@ class AgentSession:
                     "  For an OpenAI-compatible hosted API (xAI Grok, etc.), switch primary:\n"
                     "    /set primary llm hosted <base_url> <model> [api_key]\n"
                     "  Example (xAI): /set primary llm hosted https://api.x.ai/v1 grok-2-latest <key>\n"
-                    "  (base_url should include /v1 — requests go to {base_url}/chat/completions.)"
+                    "  (base_url should include /v1 — requests go to {base_url}/chat/completions.)\n"
+                    "  To switch back to local Ollama as the primary LLM:\n"
+                    "    /set primary llm ollama\n"
+                    "  Then pick the local model tag (persist with /set save):\n"
+                    "    /set model <ollama-model-name>"
                 )
                 return SessionLineResult()
             self._settings_set(("ollama", "model"), name)
