@@ -781,7 +781,7 @@ class AgentSession:
                 "  /skill ...               Skills (try /skill help)\n"
                 "  /while ...               Loops (try /while help)\n"
                 "  /set ...                 Configuration (try /set help)\n"
-                "  /source <file>           Read commands/prompts from file (like bash source)\n"
+                "  /source <file>           Read commands/prompts from file\n"
                 "  /load_context <file>     Replace session messages from JSON\n"
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
                 "  /call_python ...         Run Python in-process (try /call_python help)\n"
