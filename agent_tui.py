@@ -271,6 +271,7 @@ class AgentTuiApp(App[None]):
     def on_mount(self) -> None:
         from agentlib import build_embedded_session
         from agentlib.llm.profile import LlmProfile
+        from tools import lanes as lanes_tools
 
         self.title = "Agent TUI"
         ol = self.query_one("#agent_list", OptionList)
@@ -281,6 +282,12 @@ class AgentTuiApp(App[None]):
             python_delegate_line=self._python_delegate_bridge,
             python_enqueue_line=self._python_enqueue_bridge,
             python_host_command=self._python_host_bridge,
+        )
+
+        # Wire the lanes plugin tool (agent_send) to the TUI host bridges.
+        lanes_tools.set_lanes_host(
+            enqueue_line=self._python_enqueue_bridge,
+            delegate_line=self._python_delegate_bridge,
         )
         for i, (label, model_part) in enumerate(self._specs):
             prof = LlmProfile(backend="ollama", model=model_part) if model_part.strip() else None
@@ -300,6 +307,9 @@ class AgentTuiApp(App[None]):
                     **py_kw,
                 )
             self._sessions.append(sess)
+            # Enable cross-lane tool in TUI sessions (tool policy + prompt docs).
+            sess.enabled_toolsets.add("lanes")
+            sess.enabled_tools.add("agent_send")
             self._stream_buf[i] = ""
             self._thinking_buf[i] = ""
             self._thinking_follow[i] = False

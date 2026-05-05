@@ -85,6 +85,12 @@ def readability_excerpt_from_html(html_text: str, *, url: str = "", max_chars: i
     except Exception:
         text = re.sub(r"<[^>]*>", " ", body)
 
+    # Fallback: some readability versions return empty title for simple pages.
+    if not title:
+        m = re.search(r"(?is)<title[^>]*>(.*?)</title>", body)
+        if m:
+            title = html_module.unescape(re.sub(r"\s+", " ", (m.group(1) or "")).strip())
+
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > max_chars:
         text = text[: max_chars - 1] + "…"

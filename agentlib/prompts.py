@@ -177,6 +177,18 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
                 "then set `hours of`, `minutes of`, `seconds of` on it).\n"
             )
             i += 1
+        elif tid == "agent_send":
+            docs.append(
+                f"{i}. agent_send — send one REPL line to another agent_tui lane. "
+                "parameters.agent (string lane label), parameters.line (string REPL line), "
+                "optional parameters.wait (bool, default false), parameters.timeout_ms (int; only for wait=true). "
+                "Use wait=true when you need the other lane's result; if timeout happens, the other lane may still be running.\n"
+                "Examples: "
+                "{\\\"action\\\":\\\"tool_call\\\",\\\"tool\\\":\\\"agent_send\\\",\\\"parameters\\\":{\\\"agent\\\":\\\"agent2\\\",\\\"line\\\":\\\"/show model\\\"}} "
+                "or "
+                "{\\\"action\\\":\\\"tool_call\\\",\\\"tool\\\":\\\"agent_send\\\",\\\"parameters\\\":{\\\"agent\\\":\\\"agent2\\\",\\\"line\\\":\\\"who is the president of France?\\\",\\\"wait\\\":true,\\\"timeout_ms\\\":30000}}.\n"
+            )
+            i += 1
         else:
             # Plugin tools: keep docs minimal here; full contracts are available via /set tools describe <tool-id>.
             docs.append(f"{i}. {tid} — parameters: JSON object (tool-specific).\n")
