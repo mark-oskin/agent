@@ -170,7 +170,11 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
         elif tid == "run_applescript":
             docs.append(
                 f"{i}. run_applescript — parameters.script (AppleScript source code string); "
-                "optional parameters.timeout_ms (integer, default 20000), echo_script (bool), use_temp_file (bool).\n"
+                "optional parameters.timeout_ms (integer, default 20000), echo_script (bool), use_temp_file (bool). "
+                "Date/time rule: for a specific clock time on a calendar day (e.g. today at HH:MM), "
+                "do not add hours to `current date`—that offsets from now. "
+                "Set hours, minutes, and seconds on the target date explicitly (e.g. assign `current date` to a variable, "
+                "then set `hours of`, `minutes of`, `seconds of` on it).\n"
             )
             i += 1
         else:
