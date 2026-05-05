@@ -1,5 +1,7 @@
 """Tests for ``/run_command`` and ``!`` shell shorthand on ``AgentSession``."""
 
+import os
+
 from agentlib.embedding import build_embedded_session
 
 
@@ -15,14 +17,14 @@ def test_run_command_invokes_backend(monkeypatch, capsys):
 
     calls = []
 
-    def stub(cmd):
-        calls.append(cmd)
+    def stub(cmd, cwd=None):
+        calls.append((cmd, cwd))
         return "STDOUT:\nstubbed\nSTDERR:\n"
 
     monkeypatch.setattr(tb, "run_command", stub)
     _, sess = build_embedded_session(verbose=0)
     sess.execute_line("/run_command echo hello world")
-    assert calls == ["echo hello world"]
+    assert calls == [("echo hello world", sess.session_cwd)]
     assert "stubbed" in capsys.readouterr().out
 
 
@@ -31,15 +33,16 @@ def test_bang_shorthand(monkeypatch, capsys):
 
     calls = []
 
-    def stub(cmd):
-        calls.append(cmd)
+    def stub(cmd, cwd=None):
+        calls.append((cmd, cwd))
         return "STDOUT:\nok\nSTDERR:\n"
 
     monkeypatch.setattr(tb, "run_command", stub)
     _, sess = build_embedded_session(verbose=0)
     sess.execute_line("! pwd")
-    assert calls == ["pwd"]
-    assert "ok" in capsys.readouterr().out
+    assert calls == []
+    out = capsys.readouterr().out
+    assert sess.session_cwd in out
 
 
 def test_bang_empty_usage(capsys):
@@ -54,7 +57,7 @@ def test_run_command_via_emit(monkeypatch):
 
     events = []
 
-    def stub(cmd):
+    def stub(cmd, cwd=None):
         return f"STDOUT:\n{cmd}\nSTDERR:\n"
 
     monkeypatch.setattr(tb, "run_command", stub)

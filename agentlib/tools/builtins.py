@@ -163,11 +163,19 @@ def call_python(code, globals=None):
     return f"STDOUT:\n{out}\n\n--- locals (JSON) ---\n{j}"
 
 
-def run_command(command):
+def run_command(command, cwd: Optional[str] = None):
     command = _scalar_to_str(command, "")
     try:
+        cwd0 = None
+        if isinstance(cwd, str) and cwd.strip():
+            cwd0 = os.path.abspath(os.path.expanduser(cwd.strip()))
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=60
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=cwd0,
         )
         return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     except Exception as e:

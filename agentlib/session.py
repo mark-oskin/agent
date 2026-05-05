@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import copy
 import datetime
 import json
 import os
 import shlex
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import AbstractSet, Callable, Iterable, Optional
 
@@ -14,6 +15,7 @@ from agentlib.sink import emit_sink_scope, sink_emit, sink_print_compat
 from agentlib.tools.registry import ToolRegistry
 from agentlib.tools.routing import preferred_web_search_tool
 from agentlib import prompts as agent_prompts
+from agentlib.tools import builtins as tool_builtins
 
 from .runtime import ConversationTurnDeps, run_agent_conversation_turn
 from .settings import AgentSettings
@@ -165,7 +167,11 @@ class AgentSession:
         self._deliverable_skip_mandatory_web = deliverable_skip_mandatory_web
         self._user_wants_written_deliverable = user_wants_written_deliverable
         self._interactive_turn_user_message = interactive_turn_user_message
-        self._conversation_turn_deps = conversation_turn_deps
+        # Each interactive session needs its own deps object so per-session state (like cwd for run_command)
+        # does not leak across embedded sessions / TUI lanes that share a cached AgentApp deps bundle.
+        self._conversation_turn_deps = copy.deepcopy(conversation_turn_deps)
+        self.session_cwd = os.path.abspath(os.getcwd())
+        self._rebind_run_command_cwd()
         self._save_context_bundle = save_context_bundle
         self._load_context_messages = load_context_messages
         self._registry = registry
@@ -199,6 +205,40 @@ class AgentSession:
         self.python_delegate_line = python_delegate_line
         self.python_host_command = python_host_command
         self.python_enqueue_line = python_enqueue_line
+
+    def _session_run_command(self, cmd: object) -> str:
+        """Shell runner used by REPL ``/run_command`` / ``!`` (session cwd-aware)."""
+        return tool_builtins.run_command(cmd, cwd=self.session_cwd)
+
+    def _rebind_run_command_cwd(self) -> None:
+        """Rebuild ConversationTurnDeps.run_command so agent tool calls follow this session's cwd."""
+        self._conversation_turn_deps = replace(
+            self._conversation_turn_deps,
+            run_command=self._session_run_command,
+        )
+
+    def _cmd_cd(self, s: str) -> SessionLineResult:
+        """Change this session's working directory for ``run_command`` / ``!`` / tool runs."""
+        try:
+            toks = shlex.split(s)
+        except ValueError as e:
+            sink_print_compat(f"/cd: {e}")
+            return SessionLineResult()
+        if len(toks) < 2:
+            sink_print_compat("Usage: /cd <dir>")
+            return SessionLineResult()
+        raw = shlex.join(toks[1:]).strip()
+        if not raw:
+            sink_print_compat("Usage: /cd <dir>")
+            return SessionLineResult()
+        target = os.path.abspath(os.path.expanduser(raw))
+        if not os.path.isdir(target):
+            sink_print_compat(f"/cd: not a directory: {target!r}")
+            return SessionLineResult()
+        self.session_cwd = target
+        self._rebind_run_command_cwd()
+        sink_print_compat(f"Working directory: {self.session_cwd}")
+        return SessionLineResult()
 
     def _agent_loop_budget(self) -> tuple[int, int, int, int]:
         s = self.settings
@@ -721,6 +761,8 @@ class AgentSession:
             return self._cmd_load_context(s)
         if low.startswith("/save_context"):
             return self._cmd_save_context(s)
+        if cmd in ("/cd", "/chdir"):
+            return self._cmd_cd(s)
         if low.startswith("/run_command"):
             return self._cmd_run_command(s)
         if low.startswith("/call_python"):
@@ -794,6 +836,7 @@ class AgentSession:
                 "  /skill ...               Skills (try /skill help)\n"
                 "  /while ...               Loops (try /while help)\n"
                 "  /set ...                 Configuration (try /set help)\n"
+                "  /cd <dir>                Change this session's working directory for shell/tools\n"
                 "  /source <file>           Read commands/prompts from file\n"
                 "  /load_context <file>     Replace session messages from JSON\n"
                 "  /save_context <file>     Write session JSON; set auto-save path\n"
@@ -851,9 +894,12 @@ class AgentSession:
         if not cmd:
             sink_print_compat("/run_command: missing command.")
             return SessionLineResult()
-        from agentlib.tools import builtins as tool_builtins
+        if cmd.strip() == "pwd":
+            # Session cwd is not necessarily the process cwd (multi-session / TUI); make `! pwd` useful.
+            sink_print_compat(self.session_cwd)
+            return SessionLineResult()
 
-        sink_print_compat(tool_builtins.run_command(cmd))
+        sink_print_compat(self._session_run_command(cmd))
         return SessionLineResult()
 
     def _cmd_run_shell_bang(self, s: str) -> SessionLineResult:
@@ -888,6 +934,8 @@ class AgentSession:
                 "  /run_command COMMAND       Everything after the command name is passed to your shell\n\n"
                 "Shorthand:\n"
                 "  ! COMMAND                  Same as /run_command COMMAND\n\n"
+                "Working directory:\n"
+                "  Commands run in this session's cwd (see /cd). Check with: ! pwd\n\n"
                 "Uses the same backend as the agent run_command tool; local/trusted use only."
             )
             return SessionLineResult()
