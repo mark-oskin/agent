@@ -83,6 +83,27 @@ class AgentSettings:
             out[grp] = dict(cur) if isinstance(cur, dict) else {}
         return out
 
+    def as_groups_delta_dict(self) -> dict:
+        """
+        Return only settings that differ from built-in defaults.
+
+        This is used for minimal prefs persistence so new defaults can ship without
+        being frozen into ~/.agent.json.
+        """
+        out: dict = {}
+        for grp in ("ollama", "openai", "agent"):
+            cur = self._data.get(grp) if isinstance(self._data, dict) else None
+            cur = cur if isinstance(cur, dict) else {}
+            defs = DEFAULT_SETTINGS.get(grp) if isinstance(DEFAULT_SETTINGS.get(grp), dict) else {}
+            delta: dict = {}
+            for k, v in cur.items():
+                if k in defs and defs.get(k) == v:
+                    continue
+                delta[k] = v
+            if delta:
+                out[grp] = delta
+        return out
+
     def get(self, path: Tuple[str, str]) -> Any:
         grp, key = path
         g = self._data.get(grp) if isinstance(self._data, dict) else None

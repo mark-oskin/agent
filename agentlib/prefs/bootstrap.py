@@ -16,6 +16,27 @@ from agentlib.prefs import AGENT_PREFS_VERSION
 from agentlib.settings import AgentSettings
 
 
+_DEFAULT_CONTEXT_MANAGER: dict = {
+    "enabled": True,
+    "tokens": 0,
+    "trigger_frac": 0.75,
+    "target_frac": 0.55,
+    "keep_tail_messages": 12,
+}
+
+
+def _normalize_context_manager(cm: Optional[dict]) -> Optional[dict]:
+    if cm is None:
+        return None
+    if not isinstance(cm, dict):
+        return None
+    merged = dict(_DEFAULT_CONTEXT_MANAGER)
+    for k in ("enabled", "tokens", "trigger_frac", "target_frac", "keep_tail_messages"):
+        if k in cm:
+            merged[k] = cm[k]
+    return merged
+
+
 def build_agent_prefs_payload(
     *,
     settings: AgentSettings,
@@ -38,25 +59,33 @@ def build_agent_prefs_payload(
     context_manager: Optional[dict] = None,
     verbose_level: int = 0,
     enabled_toolsets: Optional[AbstractSet[str]] = None,
+    full_snapshot: bool = False,
 ) -> dict:
-    payload: dict = {
-        "version": AGENT_PREFS_VERSION,
-        "second_opinion_enabled": bool(second_opinion_on),
-        "cloud_ai_enabled": bool(cloud_ai_enabled),
-        "verbose": coerce_verbose_level(verbose_level),
-        "primary_llm": llm_profile_to_pref(primary_profile),
-        "enabled_tools": sorted(enabled_tools)
-        if len(enabled_tools) < len(core_tools)
-        else None,
-    }
-    payload.update(settings.as_groups_dict())
+    payload: dict = {"version": AGENT_PREFS_VERSION}
+
+    # Minimal-by-default persistence: omit values that match the built-in defaults.
+    if second_opinion_on:
+        payload["second_opinion_enabled"] = True
+    if cloud_ai_enabled:
+        payload["cloud_ai_enabled"] = True
+    vv = coerce_verbose_level(verbose_level)
+    if vv:
+        payload["verbose"] = vv
+
+    default_primary = llm_profile_to_pref(default_primary_llm_profile())
+    primary_pref = llm_profile_to_pref(primary_profile)
+    if full_snapshot or primary_pref != default_primary:
+        payload["primary_llm"] = primary_pref
+
+    if len(enabled_tools) < len(core_tools):
+        payload["enabled_tools"] = sorted(enabled_tools)
+
+    payload.update(settings.as_groups_dict() if full_snapshot else settings.as_groups_delta_dict())
     if reviewer_hosted_profile is not None and reviewer_hosted_profile.backend == "hosted":
         payload["second_opinion_reviewer"] = llm_profile_to_pref(reviewer_hosted_profile)
     else:
-        rev: dict = {"backend": "ollama"}
         if reviewer_ollama_model and str(reviewer_ollama_model).strip():
-            rev["ollama_model"] = str(reviewer_ollama_model).strip()
-        payload["second_opinion_reviewer"] = rev
+            payload["second_opinion_reviewer"] = {"backend": "ollama", "ollama_model": str(reviewer_ollama_model).strip()}
     if session_save_path and str(session_save_path).strip():
         payload["save_context_path"] = str(session_save_path).strip()
     spp = (system_prompt_path_override or "").strip()
@@ -68,20 +97,16 @@ def build_agent_prefs_payload(
         payload["prompt_templates"] = prompt_templates
     if prompt_template_default is not None:
         payload["prompt_template_default"] = str(prompt_template_default).strip() or None
-    ptd = (prompt_templates_dir or "").strip()
-    if ptd:
-        payload["prompt_templates_dir"] = os.path.abspath(os.path.expanduser(ptd))
-    skd = (skills_dir or "").strip()
-    if skd:
-        payload["skills_dir"] = os.path.abspath(os.path.expanduser(skd))
-    tld = (tools_dir or "").strip()
-    if tld:
-        payload["tools_dir"] = os.path.abspath(os.path.expanduser(tld))
-    if context_manager is not None:
-        payload["context_manager"] = context_manager
+    # NOTE: prefer persisting these via settings groups (agent.prompt_templates_dir/skills_dir/tools_dir)
+    # rather than top-level snapshot fields which tend to freeze defaults. We still accept these on load
+    # for backward compatibility.
+    cm_norm = _normalize_context_manager(context_manager)
+    if cm_norm is not None and (full_snapshot or cm_norm != _DEFAULT_CONTEXT_MANAGER):
+        payload["context_manager"] = cm_norm
     ets = {str(x).strip().lower() for x in (enabled_toolsets or set()) if str(x).strip()}
     ets = {x for x in ets if x in plugin_toolsets}
-    payload["enabled_toolsets"] = sorted(ets) if ets else None
+    if ets:
+        payload["enabled_toolsets"] = sorted(ets)
     return payload
 
 

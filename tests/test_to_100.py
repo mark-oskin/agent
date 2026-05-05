@@ -514,6 +514,60 @@ def test_interactive_settings_save_command(tmp_path, monkeypatch):
     data = json.loads(pref_path.read_text(encoding="utf-8"))
     assert data["version"] == 4
     assert data["second_opinion_enabled"] is True
+    # Default prompt templates should not be snapshotted into system_prompt unless explicitly set/pinned.
+    assert "system_prompt" not in data
+    assert "system_prompt_path" not in data
+    # Default settings groups should not be snapshotted unless changed.
+    assert "ollama" not in data
+    assert "openai" not in data
+    assert "agent" not in data
+    # Default context_manager should not be snapshotted unless changed.
+    assert "context_manager" not in data
+    prefs.set_agent_prefs_path_override(None)
+
+
+def test_interactive_settings_save_command_full_snapshot(tmp_path, monkeypatch):
+    from agentlib import prefs
+
+    pref_path = tmp_path / "saved_full.json"
+    lines = ["/set save full", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, _session = build_test_session(
+            monkeypatch,
+            verbose=0,
+            second_opinion_enabled=False,
+            prefs_path=str(pref_path),
+            write_prefs=True,
+        )
+        run_session_lines(_session, lines)
+    data = json.loads(pref_path.read_text(encoding="utf-8"))
+    assert data["version"] == 4
+    # Snapshot should include settings groups.
+    assert isinstance(data.get("ollama"), dict) and "host" in data["ollama"]
+    assert isinstance(data.get("openai"), dict) and "base_url" in data["openai"]
+    assert isinstance(data.get("agent"), dict) and "progress" in data["agent"]
+    prefs.set_agent_prefs_path_override(None)
+
+
+def test_interactive_settings_save_persists_context_manager_when_changed(tmp_path, monkeypatch):
+    from agentlib import prefs
+
+    pref_path = tmp_path / "saved_ctx.json"
+    lines = ["/set context tokens 123", "/set save", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(
+            monkeypatch,
+            verbose=0,
+            prefs_path=str(pref_path),
+            write_prefs=True,
+        )
+        run_session_lines(session, lines)
+    data = json.loads(pref_path.read_text(encoding="utf-8"))
+    assert data["version"] == 4
+    assert isinstance(data.get("context_manager"), dict)
+    assert data["context_manager"].get("tokens") == 123
     prefs.set_agent_prefs_path_override(None)
 
 

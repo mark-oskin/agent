@@ -129,6 +129,18 @@ class AgentSession:
         self.session_system_prompt = system_prompt_override
         self.session_system_prompt_path = system_prompt_path
         self.session_prompt_template = session_prompt_template
+        # Persist system_prompt only when the user explicitly overrides/pins/loads it.
+        self._system_prompt_explicit = bool(
+            (isinstance(self.session_system_prompt_path, str) and self.session_system_prompt_path.strip())
+            or (self.session_system_prompt is not None and str(self.session_system_prompt).strip())
+        )
+        # If the prompt is coming from a selected/default prompt template, treat it as non-explicit.
+        if self.session_prompt_template and not (self.session_system_prompt_path or "").strip():
+            self._system_prompt_explicit = False
+
+        # Persist prompt templates/default only when explicitly changed in-session.
+        self._prompt_templates_explicit = False
+        self._prompt_template_default_explicit = False
 
         self.messages: list = []
         self.last_reuse_skill_id: Optional[str] = None
@@ -1556,6 +1568,8 @@ class AgentSession:
                 )
                 self.session_system_prompt = body
                 self.session_system_prompt_path = None
+                self.session_prompt_template = None
+                self._system_prompt_explicit = True
                 sink_print_compat(
                     f"System prompt pinned for this session ({len(body)} chars). "
                     "Use /set save to persist to ~/.agent.json."
@@ -1564,6 +1578,7 @@ class AgentSession:
             if sub in ("reset", "default"):
                 self.session_system_prompt = None
                 self.session_system_prompt_path = None
+                self._system_prompt_explicit = False
                 sink_print_compat("System prompt reset to built-in default for this session.")
                 return SessionLineResult()
             if sub == "file":
@@ -1582,6 +1597,8 @@ class AgentSession:
                     return SessionLineResult()
                 self.session_system_prompt = body
                 self.session_system_prompt_path = os.path.abspath(path)
+                self.session_prompt_template = None
+                self._system_prompt_explicit = True
                 sink_print_compat(
                     f"System prompt loaded from {path!r} ({len(body)} chars). "
                     "/set save will store this path in ~/.agent.json."
@@ -1612,6 +1629,8 @@ class AgentSession:
                 return SessionLineResult()
             self.session_system_prompt = phrase
             self.session_system_prompt_path = None
+            self.session_prompt_template = None
+            self._system_prompt_explicit = True
             sink_print_compat(
                 f"System prompt set inline ({len(phrase)} chars). "
                 "/set save will store the text in ~/.agent.json."
@@ -1672,6 +1691,9 @@ class AgentSession:
                 self.session_system_prompt = resolved
                 self.session_system_prompt_path = None
                 self.session_prompt_template = nm
+                # Selecting a prompt template is not a system_prompt override; it should not be persisted
+                # as a system_prompt snapshot unless the user explicitly pins/sets it.
+                self._system_prompt_explicit = False
                 sink_print_compat(f"Using prompt template {nm!r} for this session.")
                 return SessionLineResult()
             if sub == "default":
@@ -1683,6 +1705,7 @@ class AgentSession:
                     sink_print_compat(f"Unknown template {nm!r}. Try: /set prompt_template list")
                     return SessionLineResult()
                 self.template_default = nm
+                self._prompt_template_default_explicit = True
                 sink_print_compat(f"Default prompt template set to {nm!r} (use /set save to persist).")
                 return SessionLineResult()
             if sub == "set":
@@ -1700,6 +1723,7 @@ class AgentSession:
                 cur = self.prompt_templates.get(nm) or {}
                 desc = str(cur.get("description") or "") if isinstance(cur, dict) else ""
                 self.prompt_templates[nm] = {"kind": "overlay", "description": desc, "text": text}
+                self._prompt_templates_explicit = True
                 sink_print_compat(f"Template {nm!r} set/updated (overlay). Use /set save to persist.")
                 return SessionLineResult()
             if sub in ("delete", "del", "rm", "remove"):
@@ -1721,6 +1745,7 @@ class AgentSession:
                 self.prompt_templates.pop(nm, None)
                 if self.session_prompt_template == nm:
                     self.session_prompt_template = None
+                self._prompt_templates_explicit = True
                 sink_print_compat(f"Deleted template {nm!r}. Use /set save to persist.")
                 return SessionLineResult()
             sink_print_compat("Unknown subcommand. Try: /set prompt_template list")
@@ -1814,8 +1839,13 @@ class AgentSession:
             return SessionLineResult()
 
         if key == "save":
-            if len(toks) != 2:
-                sink_print_compat("Usage: /set save")
+            full_snapshot = False
+            if len(toks) == 3 and toks[2].strip().lower() == "full":
+                full_snapshot = True
+            elif any(t.strip().lower() == "--full" for t in toks[2:]):
+                full_snapshot = True
+            elif len(toks) != 2:
+                sink_print_compat("Usage: /set save [full|--full]")
                 return SessionLineResult()
             try:
                 payload = self._build_agent_prefs_payload(
@@ -1827,15 +1857,17 @@ class AgentSession:
                     reviewer_hosted_profile=self.reviewer_hosted_profile,
                     reviewer_ollama_model=self.reviewer_ollama_model,
                     session_save_path=self.session_save_path,
-                    system_prompt_override=self.session_system_prompt,
-                    system_prompt_path_override=self.session_system_prompt_path,
-                    prompt_templates=self.prompt_templates,
-                    prompt_template_default=self.template_default,
-                    prompt_templates_dir=self.prompt_templates_dir,
-                    skills_dir=self.skills_dir,
-                    tools_dir=self.tools_dir,
+                    system_prompt_override=(
+                        self.session_system_prompt if self._system_prompt_explicit else None
+                    ),
+                    system_prompt_path_override=(
+                        self.session_system_prompt_path if self._system_prompt_explicit else None
+                    ),
+                    prompt_templates=self.prompt_templates if self._prompt_templates_explicit else None,
+                    prompt_template_default=self.template_default if self._prompt_template_default_explicit else None,
                     context_manager=self.context_cfg,
                     verbose_level=self.verbose,
+                    full_snapshot=full_snapshot,
                 )
                 self._write_agent_prefs_file(payload)
             except OSError as e:
