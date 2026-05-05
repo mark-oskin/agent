@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 from typing import AbstractSet, Callable, Optional
 
 from agentlib.tools.routing import CORE_TOOL_ENTRIES, all_known_tools
@@ -309,9 +310,11 @@ def interactive_turn_user_message(
     suff = (skill_suffix or "").strip()
     if suff:
         si = si + "\n\n--- Active skill ---\n" + suff
+    os_line = platform.platform()
     block = (
         f"{si}\n\n"
         f"Today's date (system clock): {today_str}\n\n"
+        f"User operating system: {os_line}\n\n"
         f"User request:\n{user_query}\n\n"
         "Respond with JSON only. No other text."
     )

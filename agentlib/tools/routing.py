@@ -186,7 +186,7 @@ def tool_policy_runner_text(enabled_tools: Optional[AbstractSet[str]]) -> str:
     return (
         "Runner: tool policy — you MUST NOT use tool_call for: "
         + ", ".join(disabled)
-        + ". Only these tools may be invoked: "
+        + ". Only these tools may be invoked (you have explicit permission to use them): "
         + ", ".join(allowed)
         + "."
     )

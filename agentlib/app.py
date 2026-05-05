@@ -25,6 +25,7 @@ import datetime
 import json
 import os
 import sys
+import platform
 from dataclasses import dataclass, replace
 from typing import AbstractSet, Callable, Optional
 
@@ -1231,9 +1232,11 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
                 return
 
     si0 = prompts.effective_system_instruction_text_for_tools(sys_prompt_override, frozenset(enabled_tools))
+    os_line = platform.platform()
     first_user = (
         f"{si0}\n\n"
         f"Today's date (system clock): {today_str}\n\n"
+        f"User operating system: {os_line}\n\n"
         f"User request: {user_query}\n\n"
         "Respond with JSON only. No other text."
     )
@@ -1258,6 +1261,7 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
             return
         cont = (
             f"Today's date (system clock): {today_str}\n\n"
+            f"User operating system: {os_line}\n\n"
             f"New user request:\n{user_query}\n\n"
             "Continue the conversation. Respond with JSON only. No other text."
         )
