@@ -48,11 +48,16 @@ mirror those behaviors for Telegram bridges and scripts.
 Run a shell command locally like the agent ``run_command`` tool: ``/run_command help`` or ``! ls``.
 
 Prompt history is **per lane**: focus the bottom input and press **↑** / **↓** to recall prior lines for that agent.
+
+While a turn is running, **Ctrl+C** opens a short prompt (**not** the old toast): press **Ctrl+C** again to send an
+interrupt to the worker (best-effort cancel), or press **any other key** to close the prompt and keep waiting.
+**Ctrl+Q** still quits the app when no modal is open (see Textual's quit hint when idle).
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import sys
 import threading
 import traceback
@@ -81,15 +86,76 @@ def _die_need_tui_extra() -> None:
 try:
     from rich.markup import escape
     from rich.text import Text
-    from textual import on
+    from textual import events, on
     from textual.actions import SkipAction
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
+    from textual.screen import Screen
     from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
     from textual.widgets.option_list import Option
 except ImportError:
     _die_need_tui_extra()
+
+
+def _inject_keyboard_interrupt(thread: threading.Thread) -> bool:
+    """Raise KeyboardInterrupt inside ``thread`` (best-effort cooperative cancel)."""
+    tid = thread.ident
+    if tid is None or not thread.is_alive():
+        return False
+    n = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), ctypes.py_object(KeyboardInterrupt))
+    if n == 0:
+        return False
+    if n != 1:
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
+        return False
+    return True
+
+
+class _BusyInterruptScreen(Screen[Optional[bool]]):
+    """First Ctrl+C opens this; Ctrl+C again confirms cancel; any other key dismisses."""
+
+    CSS = """
+    _BusyInterruptScreen {
+        align: center middle;
+    }
+    #busy_interrupt_box {
+        width: 72;
+        max-width: 95%;
+        height: auto;
+        border: heavy $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    """
+
+    def __init__(self, lane_index: int) -> None:
+        super().__init__()
+        self._lane_index = lane_index
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(
+                "[bold]Request still running on this lane[/bold]\n\n"
+                "[cyan]Ctrl+C[/cyan] again — interrupt / cancel this turn\n"
+                "Any other key — close this prompt and keep waiting\n\n"
+                "[dim]Ctrl+Q[/dim] — quit the app when not in this prompt",
+                id="busy_interrupt_msg",
+            ),
+            id="busy_interrupt_box",
+        )
+
+    def on_mount(self) -> None:
+        self.focus()
+
+    def on_key(self, event: events.Key) -> None:
+        key = event.key or ""
+        if key == "ctrl+c":
+            # Cancel is handled by MainApp.action_interrupt_prompt (same binding, higher dispatch).
+            return
+        self.dismiss(False)
+        event.stop()
+        event.prevent_default()
 
 
 def _is_activity_output_line(text: str) -> bool:
@@ -123,6 +189,7 @@ def _parse_agent_spec(spec: str) -> Tuple[str, str]:
 class AgentTuiApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=True),
+        Binding("ctrl+c", "interrupt_prompt", "", show=False, priority=True),
         Binding("up", "prompt_hist_prev", "", show=False, priority=True),
         Binding("down", "prompt_hist_next", "", show=False, priority=True),
     ]
@@ -229,6 +296,7 @@ class AgentTuiApp(App[None]):
         self._chat_logs: List[RichLog] = []
         self._prompt_hist_lines: Dict[int, List[str]] = {}
         self._prompt_hist_idx: Dict[int, Optional[int]] = {}
+        self._lane_worker_threads: Dict[int, threading.Thread] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -331,6 +399,36 @@ class AgentTuiApp(App[None]):
             chat.write(Text.from_markup(hint))
 
         self._sync_prompt_enabled()
+
+    def action_interrupt_prompt(self) -> None:
+        """Ctrl+C: while a turn is running, open a prompt; confirm cancel with Ctrl+C again."""
+        # App-level ctrl+c binding runs before the modal's on_key; do not no-op here or the
+        # second Ctrl+C never reaches dismiss(True).
+        if isinstance(self.screen, _BusyInterruptScreen):
+            self.screen.dismiss(True)
+            return
+        lane = self._active_lane
+        if lane in self._busy_lanes:
+            self.push_screen(
+                _BusyInterruptScreen(lane),
+                callback=lambda r, ln=lane: self._on_busy_interrupt_result(ln, r),
+            )
+            return
+        App.action_help_quit(self)
+
+    def _on_busy_interrupt_result(self, lane: int, result: Optional[bool]) -> None:
+        if result is not True:
+            return
+        th = self._lane_worker_threads.get(lane)
+        if th is None or not th.is_alive():
+            self._activity_logs[lane].write(
+                Text.from_markup("[yellow](Nothing to interrupt — turn may have finished.)[/yellow]")
+            )
+            return
+        if not _inject_keyboard_interrupt(th):
+            self._activity_logs[lane].write(
+                Text.from_markup("[yellow]Could not interrupt worker thread.[/yellow]")
+            )
 
     def action_quit(self) -> None:
         self.exit()
@@ -813,13 +911,25 @@ class AgentTuiApp(App[None]):
                 for i, ln in enumerate(lines):
                     last = i == len(lines) - 1
                     self.call_from_thread(self._prepare_turn_ui, lane, ln)
-                    res = session.execute_line(ln, emit=emit)
+                    try:
+                        res = session.execute_line(ln, emit=emit)
+                    except KeyboardInterrupt:
+                        self.call_from_thread(self._turn_cancelled, lane)
+                        return
                     self.call_from_thread(self._apply_turn_result, lane, res, finalize_busy=last)
             except BaseException:
                 tb = traceback.format_exc()
                 self.call_from_thread(self._turn_error, lane, tb)
+            finally:
 
-        threading.Thread(target=worker, name=f"agent-chain-{lane}", daemon=True).start()
+                def _clear_worker_ref(ln: int = lane) -> None:
+                    self._lane_worker_threads.pop(ln, None)
+
+                self.call_from_thread(_clear_worker_ref)
+
+        th = threading.Thread(target=worker, name=f"agent-chain-{lane}", daemon=True)
+        self._lane_worker_threads[lane] = th
+        th.start()
 
     def _prepare_turn_ui(self, lane: int, line: str) -> None:
         chat = self._chat_logs[lane]
@@ -961,11 +1071,21 @@ class AgentTuiApp(App[None]):
             try:
                 res = session.execute_line(line, emit=emit)
                 self.call_from_thread(self._turn_done, lane, res)
+            except KeyboardInterrupt:
+                self.call_from_thread(self._turn_cancelled, lane)
             except BaseException:
                 tb = traceback.format_exc()
                 self.call_from_thread(self._turn_error, lane, tb)
+            finally:
 
-        threading.Thread(target=worker, name=f"agent-turn-{lane}", daemon=True).start()
+                def _clear_worker_ref(ln: int = lane) -> None:
+                    self._lane_worker_threads.pop(ln, None)
+
+                self.call_from_thread(_clear_worker_ref)
+
+        th = threading.Thread(target=worker, name=f"agent-turn-{lane}", daemon=True)
+        self._lane_worker_threads[lane] = th
+        th.start()
 
     def _turn_error(self, lane: int, tb: str) -> None:
         self._set_lane_busy(lane, False)
@@ -974,6 +1094,17 @@ class AgentTuiApp(App[None]):
         self._stream_widgets[lane].update("")
         self._thinking_buf[lane] = ""
         self._thinking_widgets[lane].update("")
+
+    def _turn_cancelled(self, lane: int) -> None:
+        """Worker raised KeyboardInterrupt (user confirmed cancel on the interrupt prompt)."""
+        self._lane_turn_queues.pop(lane, None)
+        self._activity_logs[lane].write(Text.from_markup("[yellow][Cancelled][/yellow]"))
+        self._stream_buf[lane] = ""
+        self._stream_widgets[lane].update("")
+        self._thinking_buf[lane] = ""
+        self._thinking_follow[lane] = False
+        self._thinking_widgets[lane].update("")
+        self._set_lane_busy(lane, False)
 
     def _turn_done(self, lane: int, res: dict) -> None:
         self._apply_turn_result(lane, res, finalize_busy=True)
