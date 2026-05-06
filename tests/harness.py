@@ -53,6 +53,7 @@ def build_test_session(
     from agentlib.skills.loader import load_skills_from_dir
     from agentlib import prefs as prefs_mod
     from agentlib.prefs import bootstrap as prefs_bootstrap
+    from agentlib.coercion import scalar_to_str
     from agentlib.repl.while_cmd import call_while_condition_judge, parse_while_repl_tokens
 
     app = build_test_app(monkeypatch)
@@ -131,6 +132,7 @@ def build_test_session(
             call_hosted_chat_plain=app.call_hosted_chat_plain,
             call_ollama_plaintext=app.call_ollama_plaintext,
             ollama_model=app.ollama_model(),
+            scalar_to_str_fn=scalar_to_str,
         )
 
     session = AgentSession(
