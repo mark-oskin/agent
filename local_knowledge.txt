@@ -1,0 +1,40 @@
+# To use this file, write this into the agent discussion:
+#
+# The file "local_knowledge.txt" contains some knowledge that you have learned in the past on how to do things.  You should read it and import it into this conversation we are having.
+
+
+Here is some helpful pre-existing knowledge that will help you answer common user requests.
+
+** How to interact with the Calendar **
+
+When the user asks for information about their calendar (make an appointment, what their day is like, etc) you can use AppleScript to talk to Mac OS Calendar app.  There is a tool call "run_applescript" that you can use to invoke the script that you wrote.
+
+When you create calendar events, you have to tell Calendar the exact start and times.  Here's an example script you can base your work on:
+
+
+set theStartDate to (current date) + (1 * days)
+set hours of theStartDate to 15
+set minutes of theStartDate to 0
+set seconds of theStartDate to 0
+set theEndDate to theStartDate + (1 * hours)
+ 
+tell application "Calendar"
+    tell calendar "Project Calendar"
+        make new event with properties {summary:"Important Meeting!", start date:theStartDate, end date:theEndDate}
+    end tell
+end tell
+
+** How to interact with Email **
+
+When the user asks you to interact with Email know that they use Mac OS X's default Mail app.  You can talk to it with AppleScript using the run_applescript tool.  Here is an example script to get the subject line of the mail at the top of their inbox:
+
+tell application "Mail"
+    set firstMessage to first message of inbox
+    set subjectLine to subject of firstMessage
+    return subjectLine
+end tell
+
+** How to run the C compiler **
+
+Use the run_command tool.  gcc is installed.
+
