@@ -47,7 +47,10 @@ mirror those behaviors for Telegram bridges and scripts.
 
 Run a shell command locally like the agent ``run_command`` tool: ``/run_command help`` or ``! ls``.
 
-Prompt history is **per lane**: focus the bottom input and press **↑** / **↓** to recall prior lines for that agent.
+Prompt history is **per lane**: focus the bottom box and press **Ctrl+↑** / **Ctrl+↓** to recall prior messages for
+that agent (**↑** / **↓** move inside the editor). **Enter** sends the message (same idea as the single-line input).
+For an extra line inside the box use **Shift+Enter** or **Ctrl+J**, or paste multiline text; content scrolls vertically
+when it does not fit.
 
 While a turn is running, **Ctrl+C** opens a short prompt (**not** the old toast): press **Ctrl+C** again to send an
 interrupt to the worker (best-effort cancel), or press **any other key** to close the prompt and keep waiting.
@@ -92,10 +95,47 @@ try:
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
     from textual.screen import Screen
-    from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
+    from textual.widgets import Footer, Header, OptionList, RichLog, Static, TextArea
     from textual.widgets.option_list import Option
 except ImportError:
     _die_need_tui_extra()
+
+
+def _set_prompt_text(pr: TextArea, s: str) -> None:
+    """Replace prompt text and move the cursor to the end (or home when empty)."""
+    pr.text = s
+    if not s:
+        pr.move_cursor((0, 0))
+        return
+    li = pr.document.line_count - 1
+    pr.move_cursor((li, len(pr.document[li])))
+
+
+class PromptTextArea(TextArea):
+    """Multiline prompt with **Enter to send** (like ``Input``).
+
+    Textual's ``Input`` widget draws only one terminal row—extra CSS height stays blank—so
+    a taller box has to be ``TextArea``. We handle **Enter** here instead of inserting ``\\n``.
+    """
+
+    _NEWLINE_KEYS = frozenset({"shift+enter", "ctrl+j"})
+
+    async def _on_key(self, event: events.Key) -> None:
+        key = event.key
+        if key == "enter":
+            event.stop()
+            event.prevent_default()
+            try:
+                self.app.action_submit_prompt_message()
+            except SkipAction:
+                pass
+            return
+        if key in self._NEWLINE_KEYS:
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+        await super()._on_key(event)
 
 
 def _inject_keyboard_interrupt(thread: threading.Thread) -> bool:
@@ -190,8 +230,9 @@ class AgentTuiApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+c", "interrupt_prompt", "", show=False, priority=True),
-        Binding("up", "prompt_hist_prev", "", show=False, priority=True),
-        Binding("down", "prompt_hist_next", "", show=False, priority=True),
+        # Up/Down are used by the multiline prompt; use Ctrl+arrows for per-lane history.
+        Binding("ctrl+up", "prompt_hist_prev", "", show=False, priority=True),
+        Binding("ctrl+down", "prompt_hist_next", "", show=False, priority=True),
     ]
 
     CSS = """
@@ -265,8 +306,11 @@ class AgentTuiApp(App[None]):
     #agent_list {
         height: 1fr;
     }
+    /* TextArea draws a tall border (~2 rows); outer height must include it or only ~1 text row fits. */
     #prompt {
-        height: 3;
+        height: 5;
+        min-height: 5;
+        max-height: 5;
     }
     """
 
@@ -330,9 +374,16 @@ class AgentTuiApp(App[None]):
                     line = f"{label}" if not model_part else f"{label}\n  {model_part}"
                     opts.append(Option(line, id=f"agent-{i}"))
                 yield OptionList(*opts, id="agent_list")
-        yield Input(
+        yield PromptTextArea(
+            "",
             id="prompt",
-            placeholder="Message (↑↓ history per agent) · /list · /switch · /send · /fork · /kill · /call_python · ! …",
+            placeholder=(
+                "Message · Enter send · Shift+Enter or Ctrl+J newline · Ctrl+↑/↓ history · "
+                "/list · /switch · /send · /fork · /kill · /call_python · ! …"
+            ),
+            show_line_numbers=False,
+            soft_wrap=True,
+            tab_behavior="focus",
         )
         yield Footer()
 
@@ -434,7 +485,7 @@ class AgentTuiApp(App[None]):
         self.exit()
 
     def action_prompt_hist_prev(self) -> None:
-        pr = self.query_one("#prompt", Input)
+        pr = self.query_one("#prompt", TextArea)
         if self.screen.focused is not pr or pr.disabled:
             raise SkipAction()
         lane = self._active_lane
@@ -447,11 +498,10 @@ class AgentTuiApp(App[None]):
         else:
             pos = max(0, pos - 1)
         self._prompt_hist_idx[lane] = pos
-        pr.value = hist[pos]
-        pr.cursor_position = len(pr.value)
+        _set_prompt_text(pr, hist[pos])
 
     def action_prompt_hist_next(self) -> None:
-        pr = self.query_one("#prompt", Input)
+        pr = self.query_one("#prompt", TextArea)
         if self.screen.focused is not pr or pr.disabled:
             raise SkipAction()
         lane = self._active_lane
@@ -462,12 +512,10 @@ class AgentTuiApp(App[None]):
         nxt = pos + 1
         if nxt >= len(hist):
             self._prompt_hist_idx[lane] = None
-            pr.value = ""
-            pr.cursor_position = 0
+            _set_prompt_text(pr, "")
         else:
             self._prompt_hist_idx[lane] = nxt
-            pr.value = hist[nxt]
-            pr.cursor_position = len(pr.value)
+            _set_prompt_text(pr, hist[nxt])
 
     def _sidebar_line_for_agent(self, label: str, session) -> str:
         from agentlib.llm.profile import effective_ollama_model_from_profile
@@ -951,8 +999,8 @@ class AgentTuiApp(App[None]):
     def agent_selected(self, event: OptionList.OptionSelected) -> None:
         self._show_lane(event.option_index)
         self._prompt_hist_idx[self._active_lane] = None
-        pr = self.query_one("#prompt", Input)
-        pr.value = ""
+        pr = self.query_one("#prompt", TextArea)
+        _set_prompt_text(pr, "")
         self._sync_prompt_enabled()
 
     def _emit_for(self, lane: int, ev: dict) -> None:
@@ -1023,7 +1071,7 @@ class AgentTuiApp(App[None]):
         activity.write(Text.from_markup(f"[magenta]{t}[/magenta] {escape(text)}"))
 
     def _sync_prompt_enabled(self) -> None:
-        pr = self.query_one("#prompt", Input)
+        pr = self.query_one("#prompt", TextArea)
         blocked = self._active_lane in self._busy_lanes
         pr.disabled = blocked
         if not blocked:
@@ -1036,10 +1084,13 @@ class AgentTuiApp(App[None]):
             self._busy_lanes.discard(lane)
         self._sync_prompt_enabled()
 
-    @on(Input.Submitted, "#prompt")
-    def submit_prompt(self, event: Input.Submitted) -> None:
-        line = (event.value or "").strip()
-        event.input.value = ""
+    def action_submit_prompt_message(self) -> None:
+        """Send the prompt (invoked when Enter is pressed in ``PromptTextArea``)."""
+        pr = self.query_one("#prompt", TextArea)
+        if self.screen.focused is not pr or pr.disabled:
+            raise SkipAction()
+        line = (pr.text or "").strip()
+        _set_prompt_text(pr, "")
         lane = self._active_lane
         if not line or lane >= len(self._sessions):
             return
