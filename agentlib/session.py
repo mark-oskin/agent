@@ -11,12 +11,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import AbstractSet, Callable, Iterable, Optional
 
+from agentlib.clipboard_io import ClipboardError, clipboard_read_text, clipboard_write_text
 from agentlib.coercion import coerce_verbose_level
 from agentlib.sink import emit_sink_scope, sink_emit, sink_print_compat
 from agentlib.tools.registry import ToolRegistry
 from agentlib.tools.routing import preferred_web_search_tool
 from agentlib.tools.turn_support import resolve_path_under_session
 from agentlib import prompts as agent_prompts
+from agentlib.tui_parse import parse_send_command
 from agentlib.tools import builtins as tool_builtins
 
 from .runtime import ConversationTurnDeps, run_agent_conversation_turn
@@ -27,17 +29,9 @@ from .settings import AgentSettings
 class SessionLineResult:
     output: str = ""
     quit: bool = False
-
-
-def parse_send_command(line: str) -> Optional[tuple[str, str]]:
-    """Parse ``/send AGENT COMMAND...`` → ``(agent_name, command_line)``. Returns ``None`` if invalid."""
-    try:
-        toks = shlex.split((line or "").strip())
-    except ValueError:
-        return None
-    if len(toks) < 3 or toks[0].lower() != "/send":
-        return None
-    return toks[1], shlex.join(toks[2:])
+    # When set, hosts (e.g. agent_tui) place this text into the user's input field instead of
+    # interpreting it as a new REPL line. Ignored unless the runner supports prefilling prompts.
+    prefill_prompt: Optional[str] = None
 
 
 class AgentSession:
@@ -318,8 +312,8 @@ class AgentSession:
 
     def host_ctl(self, op: str, arg: Optional[str] = None) -> dict:
         """
-        Multi-agent host RPC (optional). Used by ``/list``, ``/switch``, ``/last_answer``,
-        ``/last_question``, and ``/call_python`` helpers when a host (e.g. ``agent_tui``) wires
+        Multi-agent host RPC (optional). Used by ``/list``, ``/switch``, ``/last answer|question``,
+        legacy ``/last_*``, and ``/call_python`` helpers when a host (e.g. ``agent_tui``) wires
         ``python_host_command``.
         """
         h = self.python_host_command
@@ -355,29 +349,31 @@ class AgentSession:
         return SessionLineResult()
 
     def _cmd_send_to_agent(self, s: str) -> SessionLineResult:
-        """Forward one line to another agent (async enqueue when ``python_enqueue_line`` is set)."""
+        """Forward one or more lines to another agent (async enqueue when ``python_enqueue_line`` is set)."""
         parsed = parse_send_command(s)
         if parsed is None:
-            sink_print_compat('Usage: /send AGENT COMMAND...')
+            sink_print_compat('Usage: /send AGENT COMMAND…  or  /send AGENT "cmd1,cmd2,…"')
             return SessionLineResult()
-        agent_name, cmd = parsed
+        agent_name, cmds = parsed
         eq = self.python_enqueue_line
         if eq is not None:
-            try:
-                r = eq(agent_name, cmd)
-            except BaseException as e:
-                sink_print_compat(f"/send: {type(e).__name__}: {e}")
-                return SessionLineResult()
-            if isinstance(r, dict) and r.get("ok"):
-                lab = str(r.get("label") or agent_name)
-                if r.get("queued"):
-                    sink_print_compat(f"[queued → {lab}] {cmd}")
+            for cmd in cmds:
+                try:
+                    r = eq(agent_name, cmd)
+                except BaseException as e:
+                    sink_print_compat(f"/send: {type(e).__name__}: {e}")
+                    return SessionLineResult()
+                if isinstance(r, dict) and r.get("ok"):
+                    lab = str(r.get("label") or agent_name)
+                    if r.get("queued"):
+                        sink_print_compat(f"[queued → {lab}] {cmd}")
+                    else:
+                        sink_print_compat(f"[started → {lab}] {cmd}")
+                elif isinstance(r, dict):
+                    sink_print_compat(str(r.get("error") or "/send failed"))
+                    return SessionLineResult()
                 else:
-                    sink_print_compat(f"[started → {lab}] {cmd}")
-            elif isinstance(r, dict):
-                sink_print_compat(str(r.get("error") or "/send failed"))
-            else:
-                sink_print_compat("[send] scheduled.")
+                    sink_print_compat("[send] scheduled.")
             return SessionLineResult()
         dl = self.python_delegate_line
         if dl is None:
@@ -385,29 +381,30 @@ class AgentSession:
                 "/send requires a multi-agent host (e.g. agent_tui.py); enqueue/delegate hook not configured."
             )
             return SessionLineResult()
-        try:
-            res = dl(agent_name, cmd)
-        except BaseException as e:
-            sink_print_compat(f"/send: {type(e).__name__}: {e}")
-            return SessionLineResult()
-        if isinstance(res, dict):
-            if res.get("type") == "command":
-                out = res.get("output") or ""
-                if isinstance(out, str) and out.strip():
-                    sink_print_compat(out.strip())
+        for cmd in cmds:
+            try:
+                res = dl(agent_name, cmd)
+            except BaseException as e:
+                sink_print_compat(f"/send: {type(e).__name__}: {e}")
+                return SessionLineResult()
+            if isinstance(res, dict):
+                if res.get("type") == "command":
+                    out = res.get("output") or ""
+                    if isinstance(out, str) and out.strip():
+                        sink_print_compat(out.strip())
+                    else:
+                        sink_print_compat(f"[sent → {agent_name}] command finished.")
+                elif res.get("type") == "turn":
+                    if res.get("answered"):
+                        ans = res.get("answer")
+                        n = len(ans) if isinstance(ans, str) else 0
+                        sink_print_compat(f"[sent → {agent_name}] turn answered ({n} chars).")
+                    else:
+                        sink_print_compat(f"[sent → {agent_name}] turn finished.")
                 else:
-                    sink_print_compat(f"[sent → {agent_name}] command finished.")
-            elif res.get("type") == "turn":
-                if res.get("answered"):
-                    ans = res.get("answer")
-                    n = len(ans) if isinstance(ans, str) else 0
-                    sink_print_compat(f"[sent → {agent_name}] turn answered ({n} chars).")
-                else:
-                    sink_print_compat(f"[sent → {agent_name}] turn finished.")
+                    sink_print_compat(f"[sent → {agent_name}] done.")
             else:
                 sink_print_compat(f"[sent → {agent_name}] done.")
-        else:
-            sink_print_compat(f"[sent → {agent_name}] done.")
         return SessionLineResult()
 
     def execute_line(self, line: str, *, emit: Optional[Callable[[dict], None]] = None) -> dict:
@@ -445,7 +442,10 @@ class AgentSession:
             # Preserve legacy behavior (prints inside handlers).
             if s0.startswith("/"):
                 res = self._execute_command_line(s0)
-                return {"type": "command", "quit": bool(res.quit), "output": res.output}
+                d: dict = {"type": "command", "quit": bool(res.quit), "output": res.output}
+                if res.prefill_prompt is not None:
+                    d["prefill_prompt"] = res.prefill_prompt
+                return d
             if s0.startswith("!"):
                 res = self._cmd_run_shell_bang(s0)
                 return {"type": "command", "quit": bool(res.quit), "output": res.output}
@@ -467,6 +467,8 @@ class AgentSession:
             if s0.startswith("/"):
                 res = self._execute_command_line(s0)
                 payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
+                if res.prefill_prompt is not None:
+                    payload["prefill_prompt"] = res.prefill_prompt
             elif s0.startswith("!"):
                 res = self._cmd_run_shell_bang(s0)
                 payload = {"type": "command", "quit": bool(res.quit), "output": res.output}
@@ -824,6 +826,8 @@ class AgentSession:
             return self._cmd_settings(s)
         if low.startswith("/source"):
             return self._cmd_source(s)
+        if low.startswith("/context"):
+            return self._cmd_context(s)
         if low.startswith("/load_context"):
             return self._cmd_load_context(s)
         if low.startswith("/save_context"):
@@ -862,14 +866,17 @@ class AgentSession:
                 return SessionLineResult()
             arg = parts[1] if len(parts) > 1 else None
             return self._sink_host_ctl_result(self.host_ctl("last_question", arg))
+        if low == "/last" or low.startswith("/last "):
+            return self._cmd_last(s)
+        if low.startswith("/clipboard"):
+            return self._cmd_clipboard(s)
         if s.startswith("/send"):
             return self._cmd_send_to_agent(s)
         if low in ("/help", "/?"):
             ma = ""
             if self.python_fork_agent is not None:
                 ma = (
-                    "  /fork NAME [\"cmd1,cmd2\"]           Fork lane from history; switch to new lane\n"
-                    "  /fork_background NAME [\"cmd1,cmd2\"]   Fork lane without switching sidebar focus\n"
+                    '  /fork NAME ["cmds"]…  ·  /fork_background NAME ["cmds"]…\n'
                 )
             tui_kill = ""
             if (
@@ -877,38 +884,31 @@ class AgentSession:
                 or self.python_host_command is not None
                 or self.python_enqueue_line is not None
             ):
-                tui_kill = "  /kill NAME                 Close an agent lane by label\n"
+                tui_kill = "  /kill NAME\n"
             host_extras = ""
             if self.python_host_command is not None:
-                host_extras = (
-                    "  /list                       Active agents (* = focused)\n"
-                    "  /switch NAME                Focus agent by label\n"
-                )
+                host_extras = "  /list\n  /switch NAME\n"
             snap_extras = (
-                "  /last_answer [NAME]         Last model answer (this agent or NAME)\n"
-                "  /last_question [NAME]       Last user question sent to the model\n"
+                "  /last answer|question [NAME]   (aliases: /last_answer, /last_question)\n"
+                "  /clipboard copy|copy all|paste\n"
             )
             delegate_extras = ""
             if self.python_enqueue_line is not None or self.python_delegate_line is not None:
                 delegate_extras = (
-                    "  /send NAME CMD...           Run CMD on another agent without blocking this one\n"
+                    "  /send NAME CMD…  ·  "
+                    '/send NAME "cmd1,cmd2,…"\n'
                 )
             sink_print_compat(
-                "Commands:\n"
-                "  /quit                    Exit\n"
-                "  /clear                   Clear in-memory conversation\n"
-                "  /help                    Help\n"
-                "  /usage                   Last local Ollama usage\n"
-                "  /show ...                Show current state (try /show help)\n"
-                "  /skill ...               Skills (try /skill help)\n"
-                "  /while ...               Loops (try /while help)\n"
-                "  /set ...                 Configuration (try /set help)\n"
-                "  /cd <dir>                Change this session's working directory for shell/tools\n"
-                "  /source <file>           Read commands/prompts from file\n"
-                "  /load_context <file>     Replace session messages from JSON\n"
-                "  /save_context <file>     Write session JSON; set auto-save path\n"
-                "  /call_python ...         Run Python in-process (try /call_python help)\n"
-                "  /run_command ...        Run shell command (try /run_command help); shorthand: ! CMD\n"
+                "  /quit · /exit\n"
+                "  /clear\n"
+                "  /help · /?\n"
+                "  /usage · /tokens\n"
+                "  /cd DIR\n"
+                "  /source FILE\n"
+                "  /context load|save FILE   (aliases: /load_context, /save_context)\n"
+                "  /call_python …\n"
+                "  /run_command …\n"
+                "  ! CMD\n"
                 + ma
                 + tui_kill
                 + host_extras
@@ -917,6 +917,111 @@ class AgentSession:
             )
             return SessionLineResult()
         sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
+        return SessionLineResult()
+
+    def _cmd_clipboard(self, s: str) -> SessionLineResult:
+        """`/clipboard copy`, `/clipboard copy all`, `/clipboard paste` (paste returns `prefill_prompt`; host injects into input)."""
+
+        def usage() -> None:
+            sink_print_compat("/clipboard copy | copy all | paste")
+
+        try:
+            parts = shlex.split((s or "").strip())
+        except ValueError as e:
+            sink_print_compat(f"/clipboard: {e}")
+            return SessionLineResult()
+
+        if len(parts) < 2:
+            usage()
+            return SessionLineResult()
+
+        sub = parts[1].lower()
+        if sub == "copy":
+            if len(parts) == 3 and parts[2].lower() == "all":
+                try:
+                    snap = json.dumps(self.messages, indent=2, ensure_ascii=False, default=str)
+                except (TypeError, ValueError) as e:
+                    sink_print_compat(f"/clipboard copy all: serialize error: {e}")
+                    return SessionLineResult()
+                try:
+                    clipboard_write_text(snap)
+                except ClipboardError as e:
+                    sink_print_compat(f"/clipboard: {e}")
+                    return SessionLineResult()
+                sink_print_compat(f"Copied session to clipboard ({len(snap)} characters).")
+                return SessionLineResult()
+            if len(parts) != 2:
+                usage()
+                return SessionLineResult()
+            ans = self.repl_last_assistant_answer
+            if not isinstance(ans, str) or not ans.strip():
+                sink_print_compat("(Nothing to copy: no last assistant answer in this lane yet.)")
+                return SessionLineResult()
+            try:
+                clipboard_write_text(ans)
+            except ClipboardError as e:
+                sink_print_compat(f"/clipboard: {e}")
+                return SessionLineResult()
+            sink_print_compat(f"Copied last answer to clipboard ({len(ans)} characters).")
+            return SessionLineResult()
+
+        if sub == "paste":
+            if len(parts) != 2:
+                usage()
+                return SessionLineResult()
+            try:
+                clip = clipboard_read_text()
+            except ClipboardError as e:
+                sink_print_compat(f"/clipboard: {e}")
+                return SessionLineResult()
+            line = (clip or "").replace("\x00", "").rstrip("\r\n")
+            if not line.strip():
+                sink_print_compat("(Clipboard is empty.)")
+                return SessionLineResult()
+            return SessionLineResult(
+                output=f"Pasted from clipboard ({len(line)} characters) — edit below, press Enter when ready.",
+                prefill_prompt=line,
+            )
+
+        usage()
+        return SessionLineResult()
+
+    def _cmd_context(self, s: str) -> SessionLineResult:
+        try:
+            parts = shlex.split(s.strip())
+        except ValueError as e:
+            sink_print_compat(f"/context: {e}")
+            return SessionLineResult()
+        if len(parts) < 3:
+            sink_print_compat("/context load|save FILE")
+            return SessionLineResult()
+        sub = parts[1].lower()
+        path = " ".join(parts[2:]) if len(parts) > 3 else parts[2]
+        if sub == "load":
+            return self._context_load_path(path)
+        if sub == "save":
+            return self._context_save_path(path)
+        sink_print_compat("/context load|save FILE")
+        return SessionLineResult()
+
+    def _cmd_last(self, s: str) -> SessionLineResult:
+        try:
+            parts = shlex.split(s.strip())
+        except ValueError as e:
+            sink_print_compat(f"/last: {e}")
+            return SessionLineResult()
+        if len(parts) < 2:
+            sink_print_compat("/last answer|question [NAME]")
+            return SessionLineResult()
+        sub = parts[1].lower()
+        arg = parts[2] if len(parts) > 2 else None
+        if len(parts) > 3:
+            arg = " ".join(parts[2:])
+        if sub == "answer":
+            return self._sink_host_ctl_result(self.host_ctl("last_answer", arg))
+        if sub == "question":
+            return self._sink_host_ctl_result(self.host_ctl("last_question", arg))
+        sink_print_compat("/last answer|question [NAME]")
         return SessionLineResult()
 
     def _cmd_source(self, s: str) -> SessionLineResult:
@@ -1052,8 +1157,9 @@ class AgentSession:
 
         ``fork_agent(name[, commands])`` calls ``python_fork_agent`` when configured.
 
-        ``send(agent_name, cmd)`` forwards ``cmd`` to another lane asynchronously when
-        ``python_enqueue_line`` is wired; otherwise falls back to synchronous ``python_delegate_line``.
+        ``send(agent_name, cmd)`` forwards one or more commands (``cmd`` string, or iterable of strings)
+        to another lane asynchronously when ``python_enqueue_line`` is wired; otherwise falls back to
+        synchronous ``python_delegate_line``.
 
         ``list_agents()``, ``switch_agent(name)``, ``last_answer(name=None)``, ``last_question(name=None)``
         call ``session.host_ctl(...)`` when ``python_host_command`` is wired (e.g. ``agent_tui``).
@@ -1073,11 +1179,10 @@ class AgentSession:
                 "  ai(cmd)                       Same as typing ``cmd`` here (LLM or ``/command``).\n"
                 "  ai(cmd, agent_name)           Target another agent when multi-agent hooks exist.\n"
                 "  fork_agent(name [, cmds])     Fork a lane when ``python_fork_agent`` is wired.\n"
-                "  send(name, cmd)               Forward cmd to another agent (async when host supports it).\n"
+                "  send(name, cmd | cmds)       Forward one or several cmds to another agent (async when supported).\n"
                 "  list_agents()                 Snapshots lanes when ``python_host_command`` is wired.\n"
                 "  switch_agent(name)            Focus lane by label (host).\n"
-                "  last_answer([name])           Last model answer for this lane or NAME.\n"
-                "  last_question([name])         Last user question for this lane or NAME.\n"
+                "  last_answer([name]) · last_question([name])   Same as ``/last answer|question`` (host).\n"
                 "  session.host_ctl(op, arg)     Low-level host RPC (same ops as slash commands).\n"
                 "  session                       This AgentSession.\n"
                 "  print(...)                    Routed like REPL output (emit when streaming).\n"
@@ -1132,28 +1237,46 @@ class AgentSession:
             a = (agent_name or "").strip()
             return session.host_ctl("last_question", a if a else None)
 
-        def send(agent_name: str, cmd: str) -> dict:
+        def send(agent_name: str, cmd) -> dict:
             nm = str(agent_name or "").strip()
-            line = (cmd or "").strip()
             if not nm:
                 sink_print_compat("send() requires a non-empty agent name.")
                 return {"type": "command", "quit": False, "output": "bad send"}
-            if not line:
+            cmds: list[str]
+            if isinstance(cmd, str):
+                sline = cmd.strip()
+                cmds = [sline] if sline else []
+            else:
+                try:
+                    cmds = [str(x).strip() for x in cmd if str(x).strip()]
+                except TypeError:
+                    cmds = []
+            if not cmds:
                 sink_print_compat("send() requires a non-empty command.")
                 return {"type": "command", "quit": False, "output": "bad send"}
             eq = session.python_enqueue_line
             if eq is not None:
                 try:
-                    return eq(nm, line)
+                    last_r = None
+                    for line in cmds:
+                        last_r = eq(nm, line)
+                    return last_r if last_r is not None else {"ok": False, "error": "enqueue returned no result"}
                 except BaseException as e:
                     return {"ok": False, "error": f"{type(e).__name__}: {e}"}
             dl = session.python_delegate_line
             if dl is None:
                 sink_print_compat(
-                    "send() requires a multi-agent host (e.g. agent_tui.py); enqueue/delegate not configured."
+                    "send() requires a multi-agent host (e.g. agent_tui.py); enqueue/delegate hook not configured."
                 )
                 return {"type": "command", "quit": False, "output": "delegate unavailable"}
-            return dl(nm, line)
+            try:
+                last = None
+                for line in cmds:
+                    last = dl(nm, line)
+                return last if last is not None else {"type": "command", "quit": False}
+            except BaseException as e:
+                sink_print_compat(f"send(): {type(e).__name__}: {e}")
+                return {"type": "command", "quit": False, "output": "send failed"}
 
         g = {
             "__builtins__": __builtins__,
@@ -1469,41 +1592,55 @@ class AgentSession:
         sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
         return SessionLineResult()
 
-    def _cmd_load_context(self, s: str) -> SessionLineResult:
-        rest = s.split(None, 1)
-        if len(rest) < 2:
-            sink_print_compat("Usage: /load_context <file>")
-            return SessionLineResult()
-        path = rest[1].strip()
+    def _context_load_path(self, path: str) -> SessionLineResult:
+        path = os.path.expanduser((path or "").strip())
         if not path:
-            sink_print_compat("Usage: /load_context <file>")
+            sink_print_compat("/context load FILE (alias: /load_context FILE)")
             return SessionLineResult()
         try:
             loaded = self._load_context_messages(path)
         except (OSError, ValueError, json.JSONDecodeError) as e:
-            sink_print_compat(f"/load_context error: {e}")
+            sink_print_compat(f"Context load error: {e}")
             return SessionLineResult()
         self.messages[:] = loaded
         sink_print_compat(f"Loaded {len(loaded)} message(s) from {path!r}.")
         return SessionLineResult()
 
-    def _cmd_save_context(self, s: str) -> SessionLineResult:
-        rest = s.split(None, 1)
-        if len(rest) < 2:
-            sink_print_compat("Usage: /save_context <file>")
-            return SessionLineResult()
-        path = rest[1].strip()
+    def _context_save_path(self, path: str) -> SessionLineResult:
+        path = os.path.expanduser((path or "").strip())
         if not path:
-            sink_print_compat("Usage: /save_context <file>")
+            sink_print_compat("/context save FILE (alias: /save_context FILE)")
             return SessionLineResult()
         try:
             self._save_context_bundle(path, self.messages, "", None, False)
         except OSError as e:
-            sink_print_compat(f"/save_context error: {e}")
+            sink_print_compat(f"Context save error: {e}")
             return SessionLineResult()
         self.session_save_path = path
-        sink_print_compat(f"Wrote current session to {path!r}; further turns auto-save there.")
+        sink_print_compat(f"Wrote session to {path!r}; further turns auto-save there.")
         return SessionLineResult()
+
+    def _cmd_load_context(self, s: str) -> SessionLineResult:
+        rest = s.split(None, 1)
+        if len(rest) < 2:
+            sink_print_compat("/context load FILE (alias: /load_context FILE)")
+            return SessionLineResult()
+        path = rest[1].strip()
+        if not path:
+            sink_print_compat("/context load FILE (alias: /load_context FILE)")
+            return SessionLineResult()
+        return self._context_load_path(path)
+
+    def _cmd_save_context(self, s: str) -> SessionLineResult:
+        rest = s.split(None, 1)
+        if len(rest) < 2:
+            sink_print_compat("/context save FILE (alias: /save_context FILE)")
+            return SessionLineResult()
+        path = rest[1].strip()
+        if not path:
+            sink_print_compat("/context save FILE (alias: /save_context FILE)")
+            return SessionLineResult()
+        return self._context_save_path(path)
 
     def _cmd_settings(self, s: str) -> SessionLineResult:
         try:

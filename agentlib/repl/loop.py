@@ -41,6 +41,9 @@ def run_interactive_repl_loop(
         out = res.get("output") or ""
         if out:
             print(out)
+        pref = res.get("prefill_prompt")
+        if isinstance(pref, str) and pref.strip():
+            print(pref)
         # For normal turns, `execute_line` returns the answer in the payload.
         ans = res.get("answer")
         if isinstance(ans, str) and ans.strip():

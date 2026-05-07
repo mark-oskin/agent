@@ -193,7 +193,7 @@ def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
     assert "second_opinion enabled" in out
     assert "second_opinion disabled" in out
     assert "Loaded 1 message" in out
-    assert "Wrote current session" in out
+    assert "Wrote session" in out and "auto-save" in out
     data = json.loads(out_file.read_text(encoding="utf-8"))
     assert data["version"] == 1
     assert isinstance(data["messages"], list)
@@ -789,10 +789,8 @@ def test_interactive_help_is_top_level(monkeypatch):
         _app, session = build_test_session(monkeypatch, verbose=0)
         run_session_lines(session, lines)
     out = buf.getvalue()
-    assert "/skill ..." in out
-    assert "/set ..." in out
-    assert "try /skill help" in out.lower()
-    assert "try /set help" in out.lower()
+    assert "/quit" in out
+    assert "/show help" not in out
 
 
 def test_parse_while_repl_tokens_and_judge_bit():

@@ -87,6 +87,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         ans = res.get("answer")
         if isinstance(ans, str) and ans.strip():
             print(ans)
+        pre = res.get("prefill_prompt")
+        if isinstance(pre, str) and pre.strip():
+            print(pre)
     return 0
 
 

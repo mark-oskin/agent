@@ -1,8 +1,10 @@
 from agentlib.tui_parse import (
     format_fork_command_line,
+    format_send_command_line,
     parse_fork_background_command,
     parse_fork_command,
     parse_kill_command,
+    parse_send_command,
 )
 
 
@@ -17,6 +19,25 @@ def test_parse_fork_single_unquoted_tail():
 
 def test_parse_fork_quoted_csv():
     assert parse_fork_command('/fork R "one,two , three"') == ("R", ["one", "two", "three"])
+
+
+def test_parse_fork_comma_inside_single_quotes():
+    """Commas inside '...' are literal; commas outside still split."""
+    assert parse_fork_command('/fork R "\'hello, world\', second"') == ("R", ["hello, world", "second"])
+
+
+def test_parse_fork_backslash_comma_outside_quotes():
+    r""" \, is a literal comma and does not start a new command."""
+    assert parse_fork_command(r'/fork R "a\,b, c "') == ("R", ["a,b", "c"])
+
+
+def test_parse_fork_roundtrip_cmds_with_commas():
+    line = format_fork_command_line("Lane", ["x,y", "z"])
+    assert parse_fork_command(line) == ("Lane", ["x,y", "z"])
+
+
+def test_parse_fork_unclosed_single_quote_invalid():
+    assert parse_fork_command('/fork X "start,\'no close"') is None
 
 
 def test_parse_fork_not_fork():
@@ -40,6 +61,31 @@ def test_format_fork_roundtrip():
     )
     line = format_fork_command_line("Bob Jr", [])
     assert parse_fork_command(line) == ("Bob Jr", [])
+
+
+def test_parse_send_unquoted_multiword():
+    assert parse_send_command("/send Bob hello world") == ("Bob", ["hello world"])
+
+
+def test_parse_send_quoted_csv():
+    assert parse_send_command('/send Planner "one,two , three"') == ("Planner", ["one", "two", "three"])
+
+
+def test_parse_send_comma_inside_single_quotes():
+    assert parse_send_command('/send R "\'hello, world\', second"') == ("R", ["hello, world", "second"])
+
+
+def test_parse_send_empty_inner_invalid():
+    assert parse_send_command('/send Bob ""') is None
+
+
+def test_parse_send_not_send():
+    assert parse_send_command("/fork Bob hi") is None
+
+
+def test_format_send_roundtrip():
+    line = format_send_command_line("Lane", ["x,y", "/help"])
+    assert parse_send_command(line) == ("Lane", ["x,y", "/help"])
 
 
 def test_parse_fork_background_matches_fork_body():

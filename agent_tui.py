@@ -38,14 +38,16 @@ Inspect or jump lanes without running the model::
     /switch Planner
     /send Coder /help                    # runs on Coder without blocking this lane
     /send Planner What is the capital of France?
-    /last_answer
-    /last_answer Coder
-    /last_question Coder
+    /send Worker "/help,/show model"     # comma-separated list in "…"; use '…' or \, inside for literal commas (/fork rules)
+
+    /last answer|question [NAME]   (aliases: /last_answer, /last_question)
 
 ``list_agents()``, ``switch_agent(...)``, ``send(...)``, ``last_answer(...)``, ``last_question(...)`` inside ``/call_python``
 mirror those behaviors for Telegram bridges and scripts.
 
 Run a shell command locally like the agent ``run_command`` tool: ``/run_command help`` or ``! ls``.
+
+Clipboard: ``/clipboard copy|copy all|paste`` (`paste` loads the clipboard into your prompt so you can edit before Enter). Session JSON: ``/context load|save FILE``.
 
 Prompt history is **per lane**: **↑** / **↓** when the cursor is on the **first / last** line recall prior messages (like the CLI);
 otherwise they move inside the editor. **Ctrl+↑** / **Ctrl+↓** always recall (even mid‑multiline). **Enter** sends the message (same idea as the single-line input).
@@ -62,6 +64,16 @@ interrupt to the worker (best-effort cancel), or press **any other key** to clos
 
 from __future__ import annotations
 
+import warnings
+
+# Emitted from urllib3/__init__.py on macOS LibreSSL; filter before anything imports urllib3.
+warnings.filterwarnings(
+    "ignore",
+    message=r"urllib3 v2 only supports OpenSSL.*",
+    category=Warning,
+    module=r"urllib3(\..*)?",
+)
+
 import argparse
 import ctypes
 import json
@@ -74,13 +86,12 @@ import traceback
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from agentlib.session import parse_send_command
-
 from agentlib.tui_parse import (
     format_fork_command_line,
     parse_fork_background_command,
     parse_fork_command,
     parse_kill_command,
+    parse_send_command,
 )
 
 
@@ -694,14 +705,13 @@ class AgentTuiApp(App[None]):
             return
         th = self._lane_worker_threads.get(lane)
         if th is None or not th.is_alive():
-            self._activity_logs[lane].write(
-                Text.from_markup("[yellow](Nothing to interrupt — turn may have finished.)[/yellow]")
+            self._feedback_chat(
+                lane,
+                "[yellow](Nothing to interrupt — turn may have finished.)[/yellow]",
             )
             return
         if not _inject_keyboard_interrupt(th):
-            self._activity_logs[lane].write(
-                Text.from_markup("[yellow]Could not interrupt worker thread.[/yellow]")
-            )
+            self._feedback_chat(lane, "[yellow]Could not interrupt worker thread.[/yellow]")
 
     def action_quit(self) -> None:
         self.exit()
@@ -837,10 +847,9 @@ class AgentTuiApp(App[None]):
         parent_lane = self._active_lane
         parsed = parse_fork_command(line)
         if parsed is None:
-            self._activity_logs[parent_lane].write(
-                Text.from_markup(
-                    "[yellow]/fork NAME[/yellow] or [yellow]/fork NAME \"cmd1,cmd2\"[/yellow]"
-                )
+            self._feedback_chat(
+                parent_lane,
+                '[yellow]/fork NAME[/yellow] or [yellow]/fork NAME "cmd1,cmd2"[/yellow]',
             )
             return
         name, cmds = parsed
@@ -850,11 +859,10 @@ class AgentTuiApp(App[None]):
         parent_lane = self._active_lane
         parsed = parse_fork_background_command(line)
         if parsed is None:
-            self._activity_logs[parent_lane].write(
-                Text.from_markup(
-                    "[yellow]/fork_background NAME[/yellow] or "
-                    "[yellow]/fork_background NAME \"cmd1,cmd2\"[/yellow]"
-                )
+            self._feedback_chat(
+                parent_lane,
+                '[yellow]/fork_background NAME[/yellow] or '
+                '[yellow]/fork_background NAME "cmd1,cmd2"[/yellow]',
             )
             return
         name, cmds = parsed
@@ -953,23 +961,37 @@ class AgentTuiApp(App[None]):
         self._run_line(lane, nxt)
 
     def _handle_send(self, line: str) -> None:
-        act = self._activity_logs[self._active_lane]
+        lane = self._active_lane
         parsed = parse_send_command(line)
         if parsed is None:
-            act.write(Text.from_markup("[yellow]Usage:[/yellow] /send AGENT COMMAND..."))
+            self._feedback_chat(
+                lane,
+                "[yellow]Usage:[/yellow] /send AGENT COMMAND…  ·  "
+                '/send AGENT "cmd1,cmd2,…" (quotes and commas like /fork)',
+            )
             return
-        agent_name, cmd = parsed
-        r = self._enqueue_turn_for_lane(agent_name, cmd)
-        if not r.get("ok"):
-            act.write(Text.from_markup(f"[yellow]{escape(str(r.get('error', '/send failed')))}[/yellow]"))
-            return
-        lab = escape(str(r.get("label", agent_name)))
-        preview = cmd if len(cmd) <= 200 else cmd[:197] + "…"
-        preview_esc = escape(preview)
-        if r.get("queued"):
-            act.write(Text.from_markup(f"[dim]Queued for[/dim] [bold]{lab}[/bold]: [dim]{preview_esc}[/dim]"))
-        else:
-            act.write(Text.from_markup(f"[dim]Started on[/dim] [bold]{lab}[/bold]: [dim]{preview_esc}[/dim]"))
+        agent_name, cmds = parsed
+        for cmd in cmds:
+            r = self._enqueue_turn_for_lane(agent_name, cmd)
+            if not r.get("ok"):
+                self._feedback_chat(
+                    lane,
+                    f"[yellow]{escape(str(r.get('error', '/send failed')))}[/yellow]",
+                )
+                return
+            lab = escape(str(r.get("label", agent_name)))
+            preview = cmd if len(cmd) <= 200 else cmd[:197] + "…"
+            preview_esc = escape(preview)
+            if r.get("queued"):
+                self._feedback_chat(
+                    lane,
+                    f"[dim]Queued for[/dim] [bold]{lab}[/bold]: [dim]{preview_esc}[/dim]",
+                )
+            else:
+                self._feedback_chat(
+                    lane,
+                    f"[dim]Started on[/dim] [bold]{lab}[/bold]: [dim]{preview_esc}[/dim]",
+                )
 
     def _python_host_bridge(self, payload: dict) -> dict:
         """Host hook for ``session.host_ctl(...)`` inside ``/call_python`` (main thread)."""
@@ -1138,37 +1160,39 @@ class AgentTuiApp(App[None]):
 
     def _handle_kill(self, line: str) -> None:
         fb = self._active_lane
-        act = self._activity_logs[fb]
 
         name = parse_kill_command(line)
         if name is None:
-            act.write(Text.from_markup("[yellow]/kill NAME[/yellow] or [yellow]/kill \"Long Name\"[/yellow]"))
+            self._feedback_chat(
+                fb,
+                '[yellow]/kill NAME[/yellow] or [yellow]/kill "Long Name"[/yellow]',
+            )
             return
         matches = self._lanes_matching_name(name)
         if not matches:
-            act.write(Text.from_markup(f"[yellow]No agent named[/yellow] [bold]{escape(name)}[/bold]"))
+            self._feedback_chat(
+                fb,
+                f"[yellow]No agent named[/yellow] [bold]{escape(name)}[/bold]",
+            )
             return
         if len(matches) > 1:
             lanes_s = ", ".join(str(i + 1) for i in matches)
-            act.write(
-                Text.from_markup(
-                    f"[yellow]Ambiguous name[/yellow] [bold]{escape(name)}[/bold] "
-                    f"[dim](lanes {lanes_s}); give forks distinct names[/dim]"
-                )
+            self._feedback_chat(
+                fb,
+                f"[yellow]Ambiguous name[/yellow] [bold]{escape(name)}[/bold] "
+                f"[dim](lanes {lanes_s}); give forks distinct names[/dim]",
             )
             return
         k = matches[0]
         if self._n <= 1:
-            act.write(Text.from_markup("[yellow]Cannot remove the last agent.[/yellow]"))
+            self._feedback_chat(fb, "[yellow]Cannot remove the last agent.[/yellow]")
             return
 
         victim_label = self._lane_labels[k]
         self._kill_lane_at(k)
 
         ack_lane = self._active_lane
-        self._activity_logs[ack_lane].write(
-            Text.from_markup(f"[dim]Killed[/dim] [bold]{escape(victim_label)}[/bold]")
-        )
+        self._feedback_chat(ack_lane, f"[dim]Killed[/dim] [bold]{escape(victim_label)}[/bold]")
 
     def _execute_lines_chain(self, lane: int, lines: List[str]) -> None:
         if not lines:
@@ -1217,6 +1241,10 @@ class AgentTuiApp(App[None]):
         self._active_lane = index
         for i in range(self._n):
             self._lane_verticals[i].set_classes(f"lane-pane{' hidden' if i != index else ''}")
+
+    def _feedback_chat(self, lane: int, markup: str) -> None:
+        """Transient slash / REPL command text in the chat log (same band as ``/show`` via sink)."""
+        self._chat_logs[lane].write(Text.from_markup(markup))
 
     @on(OptionList.OptionSelected, "#agent_list")
     def agent_selected(self, event: OptionList.OptionSelected) -> None:
@@ -1372,7 +1400,7 @@ class AgentTuiApp(App[None]):
     def _turn_cancelled(self, lane: int) -> None:
         """Worker raised KeyboardInterrupt (user confirmed cancel on the interrupt prompt)."""
         self._lane_turn_queues.pop(lane, None)
-        self._activity_logs[lane].write(Text.from_markup("[yellow][Cancelled][/yellow]"))
+        self._feedback_chat(lane, "[yellow][Cancelled][/yellow]")
         self._stream_buf[lane] = ""
         self._stream_widgets[lane].update("")
         self._thinking_buf[lane] = ""
@@ -1393,9 +1421,16 @@ class AgentTuiApp(App[None]):
             if res.get("type") == "command":
                 out = res.get("output") or ""
                 if str(out).strip():
-                    self._activity_logs[lane].write(
-                        Text.from_markup(f"[yellow]{escape(str(out))}[/yellow]")
-                    )
+                    chat.write(Text.from_markup(f"[yellow]{escape(str(out))}[/yellow]"))
+                pre = res.get("prefill_prompt")
+                if (
+                    isinstance(pre, str)
+                    and pre
+                    and lane == self._active_lane
+                ):
+                    pr = self.query_one("#prompt", TextArea)
+                    _set_prompt_text(pr, pre)
+                    pr.focus()
                 return
 
             if res.get("type") == "turn":

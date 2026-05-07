@@ -49,6 +49,19 @@ def test_send_preserves_multiword_command():
     assert calls == [("Bob", "hello world")]
 
 
+def test_send_quoted_splits_multiple_delegate():
+    calls: list[tuple[str, str]] = []
+
+    def dl(agent: str, cmd: str) -> dict:
+        calls.append((agent, cmd))
+        return {"type": "command", "quit": False, "output": ""}
+
+    _, sess = build_embedded_session(verbose=0)
+    sess.python_delegate_line = dl
+    sess.execute_line('/send Bob "/help,/show model"')
+    assert calls == [("Bob", "/help"), ("Bob", "/show model")]
+
+
 def test_send_requires_delegate():
     _, sess = build_embedded_session(verbose=0)
     r = sess.execute_line("/send Bob hi")

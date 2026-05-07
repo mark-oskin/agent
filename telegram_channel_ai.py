@@ -314,6 +314,9 @@ def _execute_line_mirror_to_telegram(
             cmd_out = payload.get("output")
             if isinstance(cmd_out, str) and cmd_out.strip():
                 segments.insert(0, cmd_out.strip())
+            pre = payload.get("prefill_prompt")
+            if isinstance(pre, str) and pre.strip():
+                segments.append(pre.strip())
 
     if not body:
         body = "\n".join(segments).strip()
