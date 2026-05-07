@@ -47,10 +47,13 @@ mirror those behaviors for Telegram bridges and scripts.
 
 Run a shell command locally like the agent ``run_command`` tool: ``/run_command help`` or ``! ls``.
 
-Prompt history is **per lane**: focus the bottom box and press **Ctrl+↑** / **Ctrl+↓** to recall prior messages for
-that agent (**↑** / **↓** move inside the editor). **Enter** sends the message (same idea as the single-line input).
+Prompt history is **per lane**: **↑** / **↓** when the cursor is on the **first / last** line recall prior messages (like the CLI);
+otherwise they move inside the editor. **Ctrl+↑** / **Ctrl+↓** always recall (even mid‑multiline). **Enter** sends the message (same idea as the single-line input).
 For an extra line inside the box use **Shift+Enter** or **Ctrl+J**, or paste multiline text; content scrolls vertically
 when it does not fit.
+
+The **first startup agent** (the initial ``Agent 1`` label unless you passed ``--agent``) loads and appends to the same
+``~/.agent_repl_history`` file as the CLI; other agents/forks only keep in-memory recall for that lane.
 
 While a turn is running, **Ctrl+C** opens a short prompt (**not** the old toast): press **Ctrl+C** again to send an
 interrupt to the worker (best-effort cancel), or press **any other key** to close the prompt and keep waiting.
@@ -61,9 +64,14 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
+import os
+import re
+import subprocess
 import sys
 import threading
 import traceback
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from agentlib.session import parse_send_command
@@ -101,6 +109,155 @@ except ImportError:
     _die_need_tui_extra()
 
 
+# Readline hooks the controlling tty when used in-process and breaks Textual key decoding (^[[A leaks as text).
+
+
+def _decode_readline_history_line(raw: str) -> str:
+    """Decode one `_HiStOrY_V2_` line (GNU readline backslash + octal escapes)."""
+
+    out: List[str] = []
+    i = 0
+    while i < len(raw):
+        if raw[i] == "\\" and i + 1 < len(raw):
+            c = raw[i + 1]
+            if c == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if c == "r":
+                out.append("\r")
+                i += 2
+                continue
+            if c == "t":
+                out.append("\t")
+                i += 2
+                continue
+            if c == "\\":
+                out.append("\\")
+                i += 2
+                continue
+            if c in "01234567":
+                j = i + 1
+                oct_digits = ""
+                while j < len(raw) and len(oct_digits) < 3 and raw[j] in "01234567":
+                    oct_digits += raw[j]
+                    j += 1
+                if oct_digits:
+                    out.append(chr(int(oct_digits, 8)))
+                    i = j
+                    continue
+        out.append(raw[i])
+        i += 1
+    return "".join(out)
+
+
+_REPL_HIST_READ_PY = r"""import readline, sys
+p = sys.argv[1]
+try:
+    readline.read_history_file(p)
+except FileNotFoundError:
+    pass
+for i in range(1, readline.get_history_length() + 1):
+    print(readline.get_history_item(i))
+"""
+_REPL_HIST_APPEND_PY = r"""import json, readline, sys
+path, line = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+if not line:
+    raise SystemExit(0)
+try:
+    readline.read_history_file(path)
+except FileNotFoundError:
+    pass
+readline.add_history(line)
+readline.write_history_file(path)
+"""
+_REPL_HIST_FLUSH_PY = r"""import readline, sys
+p = sys.argv[1]
+try:
+    readline.read_history_file(p)
+except FileNotFoundError:
+    pass
+readline.write_history_file(p)
+"""
+
+
+def _repl_history_read_lines_subprocess(path: str) -> List[str]:
+    """Fallback: load via subprocess readline (often fails on macOS libedit + `_HiStOrY_V2_` files)."""
+    path = os.path.abspath(os.path.expanduser(path))
+    try:
+        out = subprocess.check_output(
+            [sys.executable, "-c", _REPL_HIST_READ_PY, path],
+            text=True,
+            timeout=120,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return []
+    return [ln for ln in out.splitlines()]
+
+
+def _repl_history_read_lines(path: str) -> List[str]:
+    """Load `~/.agent_repl_history` without importing readline in the TUI process.
+
+    GNU **\_HiStOrY\_V2\_** files are used by the CLI; macOS libedit often cannot parse them
+    (`read_history_file` leaves length -1), so we decode the text format directly.
+    """
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return []
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = text.splitlines()
+    if not lines:
+        return []
+    if lines[0].startswith("_HiStOrY_V2"):
+        decoded = [_decode_readline_history_line(raw) for raw in lines[1:] if raw.strip()]
+        if decoded:
+            return decoded
+    # Older/plain files: one entry per line; skip timestamp-only meta lines.
+    ts_line = re.compile(r"^#\d+\s*$")
+    plain: List[str] = []
+    for raw in lines:
+        s = raw.strip("\r\n")
+        if not s.strip():
+            continue
+        if ts_line.match(s.strip()):
+            continue
+        plain.append(s)
+    if plain:
+        return plain
+    return _repl_history_read_lines_subprocess(str(p))
+
+
+def _repl_history_append_line(path: str, line: str) -> None:
+    try:
+        subprocess.run(
+            [sys.executable, "-c", _REPL_HIST_APPEND_PY],
+            input=json.dumps([path, line]).encode("utf-8"),
+            timeout=120,
+            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _repl_history_flush_file(path: str) -> None:
+    try:
+        subprocess.run(
+            [sys.executable, "-c", _REPL_HIST_FLUSH_PY, path],
+            timeout=120,
+            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
 def _set_prompt_text(pr: TextArea, s: str) -> None:
     """Replace prompt text and move the cursor to the end (or home when empty)."""
     pr.text = s
@@ -134,6 +291,25 @@ class PromptTextArea(TextArea):
             event.stop()
             event.prevent_default()
             self.insert("\n")
+            return
+        # Readline-style history when cursor is on the first/last document line.
+        if key == "up" and self.cursor_at_first_line:
+            try:
+                self.app.action_prompt_hist_prev()
+            except SkipAction:
+                await super()._on_key(event)
+            else:
+                event.stop()
+                event.prevent_default()
+            return
+        if key == "down" and self.cursor_at_last_line:
+            try:
+                self.app.action_prompt_hist_next()
+            except SkipAction:
+                await super()._on_key(event)
+            else:
+                event.stop()
+                event.prevent_default()
             return
         await super()._on_key(event)
 
@@ -341,6 +517,8 @@ class AgentTuiApp(App[None]):
         self._prompt_hist_lines: Dict[int, List[str]] = {}
         self._prompt_hist_idx: Dict[int, Optional[int]] = {}
         self._lane_worker_threads: Dict[int, threading.Thread] = {}
+        # Case-folded label of the first `--agent` slot (default "Agent 1"): shares ~/.agent_repl_history with the CLI.
+        self._startup_agent_label_key: str = self._lane_labels[0].casefold().strip()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -378,7 +556,7 @@ class AgentTuiApp(App[None]):
             "",
             id="prompt",
             placeholder=(
-                "Message · Enter send · Shift+Enter or Ctrl+J newline · Ctrl+↑/↓ history · "
+                "Message · Enter send · Shift+Enter or Ctrl+J newline · ↑/↓ history (first/last line) · Ctrl+↑/↓ · "
                 "/list · /switch · /send · /fork · /kill · /call_python · ! …"
             ),
             show_line_numbers=False,
@@ -449,7 +627,51 @@ class AgentTuiApp(App[None]):
             )
             chat.write(Text.from_markup(hint))
 
+        self._hydrate_startup_prompt_history_from_disk()
         self._sync_prompt_enabled()
+
+    def _lane_matches_startup_disk_sync(self, lane: int) -> bool:
+        if lane < 0 or lane >= len(self._lane_labels):
+            return False
+        return self._lane_labels[lane].casefold().strip() == self._startup_agent_label_key
+
+    def _hydrate_startup_prompt_history_from_disk(self) -> None:
+        """Load CLI ``~/.agent_repl_history`` into recall lists for lanes whose label matches startup."""
+        app = self._embed_app
+        if app is None:
+            return
+        lines = _repl_history_read_lines(app.repl_history_path())
+        if not lines:
+            return
+        for lane in range(self._n):
+            if self._lane_matches_startup_disk_sync(lane):
+                self._prompt_hist_lines[lane] = list(lines)
+
+    @staticmethod
+    def _repl_history_one_line(text: str) -> str:
+        """Normalize for GNU readline history (single line)."""
+        return " ".join((text or "").splitlines()).strip()
+
+    def _append_startup_lane_submission_to_disk(self, lane: int, text: str) -> None:
+        if not self._lane_matches_startup_disk_sync(lane):
+            return
+        app = self._embed_app
+        if app is None:
+            return
+        line = self._repl_history_one_line(text)
+        if not line:
+            return
+        _repl_history_append_line(app.repl_history_path(), line)
+
+    def _flush_disk_repl_history(self) -> None:
+        app = self._embed_app
+        if app is None:
+            return
+        _repl_history_flush_file(app.repl_history_path())
+
+    def exit(self, result=None, return_code: int = 0, message=None) -> None:
+        self._flush_disk_repl_history()
+        super().exit(result, return_code=return_code, message=message)
 
     def action_interrupt_prompt(self) -> None:
         """Ctrl+C: while a turn is running, open a prompt; confirm cancel with Ctrl+C again."""
@@ -647,6 +869,7 @@ class AgentTuiApp(App[None]):
         if hist and hist[-1] == text:
             return
         hist.append(text)
+        self._append_startup_lane_submission_to_disk(lane, text)
 
     def _lanes_matching_name(self, name: str) -> List[int]:
         key = name.casefold().strip()
