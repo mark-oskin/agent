@@ -915,7 +915,7 @@ class AgentTuiApp(App[None]):
 
     def _python_delegate_bridge(self, agent_name: str, cmd: str) -> dict:
         """Host hook for ``ai(cmd, agent_name)`` inside ``/call_python``."""
-        from agentlib.sink import emit_sink_scope
+        from agentlib.sink import emit_sink_scope, sink_delegate_capture_append
 
         matches = self._lanes_matching_name((agent_name or "").strip())
         if not matches:
@@ -929,9 +929,21 @@ class AgentTuiApp(App[None]):
             }
         lane_idx = matches[0]
         sess = self._sessions[lane_idx]
-        emit_fn = lambda ev, ln=lane_idx: self._emit_for(ln, ev)
+        captured: List[str] = []
+
+        def emit_fn(ev, ln=lane_idx):
+            self._emit_for(ln, ev)
+            sink_delegate_capture_append(ev, captured)
+
         with emit_sink_scope(emit_fn):
-            return sess.execute_line((cmd or "").strip())
+            res = sess.execute_line((cmd or "").strip())
+
+        if isinstance(res, dict) and res.get("type") == "command":
+            cap = "".join(captured).rstrip()
+            cur = (res.get("output") or "").strip()
+            if cap and not cur:
+                return {**res, "output": cap}
+        return res
 
     def _python_enqueue_bridge(self, agent_name: str, cmd: str) -> dict:
         """Schedule ``execute_line`` on another lane (main thread); same semantics as ``/send``."""

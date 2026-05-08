@@ -61,3 +61,23 @@ def sink_emit(ev: dict) -> None:
         else sys.stdout
     )
     print(text, end=end, file=fil, flush=flush)
+
+
+def sink_delegate_capture_append(ev: dict, buf: list[str]) -> None:
+    """
+    Append sink event text so delegated ``execute_line`` can return it in ``output`` (e.g. ``agent_send`` wait=true).
+
+    Skips ``thinking`` / ``answer`` (assistant turns expose ``answer`` on the result dict).
+    """
+    t = ev.get("type") or "output"
+    if t in ("thinking", "answer"):
+        return
+    text = ev.get("text")
+    if text is None:
+        text = ""
+    elif not isinstance(text, str):
+        text = str(text)
+    end = ev.get("end", "\n")
+    if not isinstance(end, str):
+        end = "\n"
+    buf.append(text + end)

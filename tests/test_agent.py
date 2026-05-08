@@ -208,6 +208,25 @@ def test_execute_line_fork_background_invokes_hook(monkeypatch):
     assert calls == [("Worker", ["hello"])]
 
 
+def test_execute_line_with_emit_sink_captures_slash_help_text(monkeypatch):
+    """Delegating hosts merge this capture into command output (see agent_tui _python_delegate_bridge)."""
+    from agentlib.sink import emit_sink_scope, sink_delegate_capture_append
+
+    _, session = build_test_session(monkeypatch)
+    buf: list[str] = []
+
+    def emit(ev):
+        sink_delegate_capture_append(ev, buf)
+
+    with emit_sink_scope(emit):
+        r = session.execute_line("/help")
+    assert r.get("type") == "command"
+    cap = "".join(buf)
+    assert "/help" in cap or "/quit" in cap
+    merged = (r.get("output") or "").strip() or cap.rstrip()
+    assert "/help" in merged or "quit" in merged.lower()
+
+
 def test_parse_tool_top_level_run_command():
     raw = json.dumps({"action": "run_command", "command": "echo hi"})
     out = parse(raw)
