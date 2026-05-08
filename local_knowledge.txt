@@ -37,7 +37,7 @@ tell application "Mail"
 end tell
 ```
 
-Here's a more indepth example for interacting with Mail:
+Here's a more indepth example for interacting with Mail.  This example retrieves the most recent 5 messages from an account.
 
 ```applescript
 tell application "Mail"                                                                                 
@@ -60,6 +60,55 @@ tell application "Mail"
 end tell                                                                                                
 ```
 
+This AppleScript can retrieve the latest email from your oskin@cs.washington.edu inbox:
+
+```applescript
+tell application "Mail"
+    -- Check if Mail is actually ready
+    if not (exists account "oskin@cs.washington.edu") then
+        return "Account not found."
+    end if
+    
+    set theAccount to account "email@domain.net"
+    set theMailbox to mailbox "INBOX" of theAccount
+    
+    -- Try to get a simple property first to verify connection
+    try
+        set msgCount to count of messages of theMailbox
+        if msgCount is 0 then
+            return "Inbox is empty."
+        end if
+        
+        -- Get the first message
+        set latestMessage to first message of theMailbox
+        
+        -- Get basic properties which usually don't trigger -1741
+        set theSubject to subject of latestMessage
+        set theSender to sender of latestMessage
+        set theDate to date received of latestMessage
+        
+        -- Try to get the text version of the body
+        set theBody to ""
+        try
+            -- Some versions of Mail support 'text' property directly on the message
+            set theBody to text of latestMessage
+        on error
+            try
+                -- Fallback to content
+                set theBody to content of latestMessage
+            on error
+                set theBody to "Body content could not be retrieved due to permission/access restrictions."
+            end try
+        end try
+        
+        return "Subject: " & theSubject & "\nFrom: " & theSender & "\nDate: " & theDate & "\n\n" & theBody
+        
+    on error e
+        return "Error: " & e
+    end try
+end tell
+```
+
 ** How to internact with Notes **
 
 Here is the AppleScript I used to create the TODO list note with proper bullet points:
@@ -79,7 +128,7 @@ tell application "Notes"
     end repeat
     
      -- Create the new note with proper HTML formatting for bullet points
-    set htmlBody to "<ul>\n<li>prep class for monday</li>\n<li>reschedule Marcie</li>\n<li>move boat</li>\n</ul>"
+    set htmlBody to "<ul>\n<li>Breakfast with Wayne</li>\n<li>reschedule Marcie</li>\n<li>Finish agent</li>\n</ul>"
     set newNote to make new note with properties {name:"TODO List", body:htmlBody}
 end tell
 ```
