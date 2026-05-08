@@ -29,6 +29,9 @@ from agentlib.llm.request_options import (
 from .runtime import ConversationTurnDeps, run_agent_conversation_turn
 from .settings import AgentSettings
 
+# Sentinel: `_instruction_for_import` failed (usage printed); caller returns an empty command result.
+_IMPORT_INSTRUCTION_ERROR = object()
+
 
 @dataclass
 class SessionLineResult:
@@ -445,6 +448,39 @@ class AgentSession:
                     self._call_python_pending = raw_line
                     return {"type": "command", "quit": False, "output": ""}
 
+        imp = self._instruction_for_import(s0)
+        if imp is _IMPORT_INSTRUCTION_ERROR:
+            return {"type": "command", "quit": False, "output": ""}
+        if isinstance(imp, str):
+            if emit is None:
+                answered, final_answer = self._execute_user_request(imp)
+                self.repl_last_user_query = imp
+                self.repl_last_assistant_answer = (
+                    final_answer.strip()
+                    if isinstance(final_answer, str) and final_answer.strip()
+                    else None
+                )
+                return {
+                    "type": "turn",
+                    "quit": False,
+                    "answered": bool(answered),
+                    "answer": final_answer,
+                }
+            with emit_sink_scope(emit):
+                answered, final_answer = self._execute_user_request(imp)
+                self.repl_last_user_query = imp
+                self.repl_last_assistant_answer = (
+                    final_answer.strip()
+                    if isinstance(final_answer, str) and final_answer.strip()
+                    else None
+                )
+                return {
+                    "type": "turn",
+                    "quit": False,
+                    "answered": bool(answered),
+                    "answer": final_answer,
+                }
+
         if emit is None:
             # Preserve legacy behavior (prints inside handlers).
             if s0.startswith("/"):
@@ -497,6 +533,33 @@ class AgentSession:
 
     def _today_str(self) -> str:
         return datetime.date.today().strftime("%Y-%m-%d (%A)")
+
+    def _instruction_for_import(self, s: str) -> object:
+        """If line is `/import FILE`, return the synthetic user message; else ``None``. On parse/validation errors, return ``_IMPORT_INSTRUCTION_ERROR`` after printing."""
+        st = (s or "").strip()
+        try:
+            toks = shlex.split(st)
+        except ValueError as e:
+            sink_print_compat(f"/import: {e}")
+            return _IMPORT_INSTRUCTION_ERROR
+        if not toks or toks[0].lower() != "/import":
+            return None
+        if len(toks) < 2:
+            sink_print_compat("Usage: /import <file>")
+            return _IMPORT_INSTRUCTION_ERROR
+        raw = os.path.expanduser(shlex.join(toks[1:]).strip())
+        if not raw:
+            sink_print_compat("Usage: /import <file>")
+            return _IMPORT_INSTRUCTION_ERROR
+        path = self._resolve_session_path(raw)
+        if not os.path.isfile(path):
+            sink_print_compat(f"/import: not a file: {path!r}")
+            return _IMPORT_INSTRUCTION_ERROR
+        display = os.path.normpath(os.path.abspath(path))
+        return (
+            f"The file {display} contains some knowledge that you have learned in the past "
+            "on how to do things.  You should read it and import it into this conversation we are having."
+        )
 
     def _execute_user_request(self, user_query: str) -> tuple[bool, Optional[str]]:
         """One normal REPL turn: append messages and run the agent loop."""
@@ -917,6 +980,7 @@ class AgentSession:
                 "  /usage · /tokens\n"
                 "  /cd DIR\n"
                 "  /source FILE\n"
+                "  /import FILE\n"
                 "  /context load|save FILE   (aliases: /load_context, /save_context)\n"
                 "  /call_python …\n"
                 "  /run_command …\n"

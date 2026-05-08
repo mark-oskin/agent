@@ -639,6 +639,8 @@ class AgentTuiApp(App[None]):
 
         self._hydrate_startup_prompt_history_from_disk()
         self._sync_prompt_enabled()
+        for i in range(self._n):
+            self._refresh_sidebar_lane(i)
 
     def _lane_matches_startup_disk_sync(self, lane: int) -> bool:
         if lane < 0 or lane >= len(self._lane_labels):
@@ -760,6 +762,17 @@ class AgentTuiApp(App[None]):
             assert self._embed_app is not None
             model_part = effective_ollama_model_from_profile(pp, self._embed_app.ollama_model())
         return label if not str(model_part).strip() else f"{label}\n  {model_part}"
+
+    def _refresh_sidebar_lane(self, lane: int) -> None:
+        """Update sidebar option text from ``session.primary_profile`` (e.g. after ``/set`` changes model)."""
+        if lane < 0 or lane >= self._n:
+            return
+        try:
+            ol = self.query_one("#agent_list", OptionList)
+            line = self._sidebar_line_for_agent(self._lane_labels[lane], self._sessions[lane])
+            ol.replace_option_prompt_at_index(lane, line)
+        except Exception:
+            pass
 
     def _mount_lane_widgets(self, idx: int, *, hidden: bool) -> RichLog:
         thinking = Static("", classes="thinking_live", id=f"thinking-{idx}")
@@ -937,6 +950,8 @@ class AgentTuiApp(App[None]):
 
         with emit_sink_scope(emit_fn):
             res = sess.execute_line((cmd or "").strip())
+
+        self.call_from_thread(lambda li=lane_idx: self._refresh_sidebar_lane(li))
 
         if isinstance(res, dict) and res.get("type") == "command":
             cap = "".join(captured).rstrip()
@@ -1478,6 +1493,8 @@ class AgentTuiApp(App[None]):
             if finalize_busy:
                 self._set_lane_busy(lane, False)
                 self._drain_lane_queue(lane)
+            if not res.get("quit") and 0 <= lane < self._n:
+                self._refresh_sidebar_lane(lane)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
