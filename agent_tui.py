@@ -87,7 +87,6 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from agentlib.tui_parse import (
-    format_fork_command_line,
     parse_fork_background_command,
     parse_fork_command,
     parse_kill_command,
@@ -585,13 +584,6 @@ class AgentTuiApp(App[None]):
         ol = self.query_one("#agent_list", OptionList)
         ol.highlighted = 0
 
-        py_kw = dict(
-            python_fork_agent=self._python_fork_bridge,
-            python_delegate_line=self._python_delegate_bridge,
-            python_enqueue_line=self._python_enqueue_bridge,
-            python_host_command=self._python_host_bridge,
-        )
-
         # Wire the lanes plugin tool (agent_send) to the TUI host bridges.
         lanes_tools.set_lanes_host(
             enqueue_line=self._python_enqueue_bridge,
@@ -599,6 +591,13 @@ class AgentTuiApp(App[None]):
         )
         for i, (label, model_part) in enumerate(self._specs):
             prof = LlmProfile(backend="ollama", model=model_part) if model_part.strip() else None
+            py_kw = dict(
+                python_fork_agent=(lambda li=i: lambda name, cmds=None: self._fork_lane_hook(li, name, cmds, background=False))(),
+                python_fork_background_agent=(lambda li=i: lambda name, cmds=None: self._fork_lane_hook(li, name, cmds, background=True))(),
+                python_delegate_line=self._python_delegate_bridge,
+                python_enqueue_line=self._python_enqueue_bridge,
+                python_host_command=self._python_host_bridge,
+            )
             if i == 0:
                 app, sess = build_embedded_session(
                     verbose=int(self._verbose),
@@ -805,6 +804,12 @@ class AgentTuiApp(App[None]):
         parent_sess = self._sessions[parent_lane]
         new_idx = self._n
         new_sess = fork_embedded_session(parent_sess, app=self._embed_app)
+        new_sess.python_fork_agent = lambda name, cmds=None, li=new_idx: self._fork_lane_hook(
+            li, name, cmds, background=False
+        )
+        new_sess.python_fork_background_agent = lambda name, cmds=None, li=new_idx: self._fork_lane_hook(
+            li, name, cmds, background=True
+        )
 
         chat = self._mount_lane_widgets(new_idx, hidden=not switch_to_new)
         ol = self.query_one("#agent_list", OptionList)
@@ -883,18 +888,24 @@ class AgentTuiApp(App[None]):
         key = name.casefold().strip()
         return [i for i, lab in enumerate(self._lane_labels) if lab.casefold().strip() == key]
 
-    def _python_fork_bridge(self, name: str, commands=None) -> dict:
-        """Host hook for ``fork_agent()`` inside ``/call_python`` (runs UI on main thread)."""
+    def _fork_lane_hook(
+        self,
+        parent_lane: int,
+        name: str,
+        commands=None,
+        *,
+        background: bool = False,
+    ) -> dict:
+        """Run fork UI on the Textual thread; parent lane is the session's lane index (not sidebar focus)."""
         cmds = [str(c).strip() for c in (commands or []) if str(c).strip()]
         nm = (name or "").strip()
         if not nm:
-            return {"type": "fork", "ok": False, "error": "fork_agent requires a non-empty name"}
-        line = format_fork_command_line(nm, cmds)
+            return {"type": "fork", "ok": False, "error": "fork requires a non-empty name"}
         box: List[dict] = []
 
         def ui() -> None:
             try:
-                self._handle_fork(line)
+                self._fork_new_lane(nm, cmds, parent_lane, switch_to_new=not background)
                 box.append({"type": "fork", "ok": True})
             except Exception as e:
                 box.append({"type": "fork", "ok": False, "error": str(e)})

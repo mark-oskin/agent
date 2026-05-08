@@ -40,6 +40,7 @@ def fork_embedded_session(parent_session: "AgentSession", *, app):
     session.skills_map = copy.deepcopy(sm) if isinstance(sm, dict) else sm
     session.last_reuse_skill_id = parent_session.last_reuse_skill_id
     session.python_fork_agent = getattr(parent_session, "python_fork_agent", None)
+    session.python_fork_background_agent = getattr(parent_session, "python_fork_background_agent", None)
     session.python_delegate_line = getattr(parent_session, "python_delegate_line", None)
     session.python_enqueue_line = getattr(parent_session, "python_enqueue_line", None)
     session.python_host_command = getattr(parent_session, "python_host_command", None)
@@ -54,6 +55,7 @@ def build_embedded_session(
     primary_profile=None,
     app=None,
     python_fork_agent=None,
+    python_fork_background_agent=None,
     python_delegate_line=None,
     python_host_command=None,
     python_enqueue_line=None,
@@ -70,7 +72,7 @@ def build_embedded_session(
     Slash commands (e.g. `/set ...`, `/run_command ...`, `/call_python ...`) and shell
     shorthand ``! CMD`` work the same way in embedded mode.
 
-    Optional ``python_fork_agent`` / ``python_delegate_line`` / ``python_host_command`` hooks
+    Optional ``python_fork_agent`` / ``python_fork_background_agent`` / ``python_delegate_line`` / ``python_host_command`` hooks
     enable ``/call_python`` helpers (``fork_agent``, ``ai(..., agent_name)``, ``list_agents``, etc.)
     in multi-agent hosts.
 
@@ -279,6 +281,7 @@ def build_embedded_session(
         parse_while_repl_tokens=parse_while_repl_tokens,
         call_while_condition_judge=call_while_judge,
         python_fork_agent=python_fork_agent,
+        python_fork_background_agent=python_fork_background_agent,
         python_delegate_line=python_delegate_line,
         python_host_command=python_host_command,
         python_enqueue_line=python_enqueue_line,

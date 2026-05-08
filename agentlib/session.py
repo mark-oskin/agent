@@ -20,6 +20,11 @@ from agentlib.tools.turn_support import resolve_path_under_session
 from agentlib import prompts as agent_prompts
 from agentlib.tui_parse import parse_send_command
 from agentlib.tools import builtins as tool_builtins
+from agentlib.llm.profile import preserved_request_options
+from agentlib.llm.request_options import (
+    normalize_request_options_pref,
+    parse_request_option_scalar_value,
+)
 
 from .runtime import ConversationTurnDeps, run_agent_conversation_turn
 from .settings import AgentSettings
@@ -104,6 +109,7 @@ class AgentSession:
         parse_while_repl_tokens: Callable[[list[str]], tuple[int, str, list[str]]],
         call_while_condition_judge: Callable[..., int],
         python_fork_agent: Optional[Callable[..., dict]] = None,
+        python_fork_background_agent: Optional[Callable[..., dict]] = None,
         python_delegate_line: Optional[Callable[..., dict]] = None,
         python_host_command: Optional[Callable[[dict], dict]] = None,
         python_enqueue_line: Optional[Callable[[str, str], dict]] = None,
@@ -199,6 +205,7 @@ class AgentSession:
         self._call_python_pending: Optional[str] = None
 
         self.python_fork_agent = python_fork_agent
+        self.python_fork_background_agent = python_fork_background_agent
         self.python_delegate_line = python_delegate_line
         self.python_host_command = python_host_command
         self.python_enqueue_line = python_enqueue_line
@@ -870,17 +877,22 @@ class AgentSession:
             return self._cmd_last(s)
         if low.startswith("/clipboard"):
             return self._cmd_clipboard(s)
+        if low.startswith("/fork_background"):
+            return self._cmd_fork_background(s)
+        if low.startswith("/fork"):
+            return self._cmd_fork(s)
         if s.startswith("/send"):
             return self._cmd_send_to_agent(s)
         if low in ("/help", "/?"):
             ma = ""
-            if self.python_fork_agent is not None:
+            if self.python_fork_agent is not None or self.python_fork_background_agent is not None:
                 ma = (
                     '  /fork NAME ["cmds"]…  ·  /fork_background NAME ["cmds"]…\n'
                 )
             tui_kill = ""
             if (
                 self.python_fork_agent is not None
+                or self.python_fork_background_agent is not None
                 or self.python_host_command is not None
                 or self.python_enqueue_line is not None
             ):
@@ -918,6 +930,64 @@ class AgentSession:
             return SessionLineResult()
         sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
         return SessionLineResult()
+
+    def _cmd_fork(self, s: str) -> SessionLineResult:
+        """`/fork` — same as TUI entry handler; required for agent_send / delegate paths."""
+        from agentlib.tui_parse import parse_fork_command
+
+        hook = self.python_fork_agent
+        if hook is None:
+            sink_print_compat("/fork requires a multi-agent host (e.g. agent_tui.py); fork hook not configured.")
+            return SessionLineResult()
+        parsed = parse_fork_command((s or "").strip())
+        if parsed is None:
+            sink_print_compat('Usage: /fork NAME  or  /fork NAME "cmd1,cmd2,…"')
+            return SessionLineResult()
+        name, cmds = parsed
+        try:
+            r = hook(name, cmds)
+        except Exception as e:
+            sink_print_compat(f"/fork: {type(e).__name__}: {e}")
+            return SessionLineResult()
+        out = ""
+        if isinstance(r, dict):
+            try:
+                out = json.dumps(r, ensure_ascii=False)
+            except (TypeError, ValueError):
+                out = str(r)
+        elif r is not None:
+            out = str(r)
+        return SessionLineResult(output=out)
+
+    def _cmd_fork_background(self, s: str) -> SessionLineResult:
+        """`/fork_background` — same as TUI entry handler; required for agent_send / delegate paths."""
+        from agentlib.tui_parse import parse_fork_background_command
+
+        hook = self.python_fork_background_agent
+        if hook is None:
+            sink_print_compat(
+                "/fork_background requires a multi-agent host (e.g. agent_tui.py); fork hook not configured."
+            )
+            return SessionLineResult()
+        parsed = parse_fork_background_command((s or "").strip())
+        if parsed is None:
+            sink_print_compat('Usage: /fork_background NAME  or  /fork_background NAME "cmd1,cmd2,…"')
+            return SessionLineResult()
+        name, cmds = parsed
+        try:
+            r = hook(name, cmds)
+        except Exception as e:
+            sink_print_compat(f"/fork_background: {type(e).__name__}: {e}")
+            return SessionLineResult()
+        out = ""
+        if isinstance(r, dict):
+            try:
+                out = json.dumps(r, ensure_ascii=False)
+            except (TypeError, ValueError):
+                out = str(r)
+        elif r is not None:
+            out = str(r)
+        return SessionLineResult(output=out)
 
     def _cmd_clipboard(self, s: str) -> SessionLineResult:
         """`/clipboard copy`, `/clipboard copy all`, `/clipboard paste` (paste returns `prefill_prompt`; host injects into input)."""
@@ -1002,6 +1072,112 @@ class AgentSession:
         if sub == "save":
             return self._context_save_path(path)
         sink_print_compat("/context load|save FILE")
+        return SessionLineResult()
+
+    def _cmd_primary_request_options(self, toks: list[str]) -> SessionLineResult:
+        """`/set primary request_options …` — sampling / generation knobs persisted under ``primary_llm.request_options``."""
+        pp = self.primary_profile
+
+        def usage() -> None:
+            sink_print_compat(
+                "Usage:\n"
+                "  /set primary request_options show\n"
+                "  /set primary request_options clear\n"
+                "  /set primary request_options set <name> <value>\n"
+                "  /set primary request_options unset <name>\n"
+                '  /set primary request_options merge \'{"temperature": 0.7}\'\n'
+                "  /set primary request_options replace '{…}'    (whole map)\n\n"
+                "Values for ``set``: numbers, true/false, JSON literals, or plain text.\n"
+                "Ollama: merged into chat ``options``. Hosted: merged into chat/completions body.\n"
+                "Use /set save to persist to ~/.agent.json."
+            )
+
+        sub = "show"
+        if len(toks) >= 4:
+            sub = toks[3].lower()
+
+        ro = pp.request_options
+
+        def ack() -> None:
+            sink_print_compat("Primary request_options updated for this session. Use /set save to persist.")
+
+        if sub in ("help", "-h", "--help"):
+            usage()
+            return SessionLineResult()
+
+        if sub == "show":
+            blob = normalize_request_options_pref(ro)
+            if not blob:
+                sink_print_compat("(Primary request_options is empty.)")
+            else:
+                sink_print_compat(json.dumps(blob, indent=2, sort_keys=True, ensure_ascii=False))
+            return SessionLineResult()
+
+        if sub == "clear":
+            pp.request_options.clear()
+            ack()
+            return SessionLineResult()
+
+        if sub == "unset":
+            if len(toks) < 5:
+                sink_print_compat("Usage: /set primary request_options unset <name>")
+                return SessionLineResult()
+            name = toks[4].strip()
+            ro.pop(name, None)
+            ro.pop(str(name).replace("-", "_"), None)
+            ack()
+            return SessionLineResult()
+
+        if sub == "set":
+            if len(toks) < 6:
+                sink_print_compat("Usage: /set primary request_options set <name> <value>")
+                return SessionLineResult()
+            nk = toks[4].strip()
+            tail = " ".join(toks[5:]).strip()
+            try:
+                ro[nk] = parse_request_option_scalar_value(tail)
+            except Exception as e:
+                sink_print_compat(f"/set primary request_options set: bad value ({e}).")
+                return SessionLineResult()
+            ack()
+            return SessionLineResult()
+
+        if sub in ("merge", "json-merge"):
+            if len(toks) < 5:
+                sink_print_compat('Usage: /set primary request_options merge \'{"temperature": 0.5}\'')
+                return SessionLineResult()
+            blob_text = " ".join(toks[4:]).strip()
+            try:
+                loaded = json.loads(blob_text)
+            except json.JSONDecodeError as e:
+                sink_print_compat(f"/set primary request_options merge: invalid JSON ({e}).")
+                return SessionLineResult()
+            if not isinstance(loaded, dict):
+                sink_print_compat("/set primary request_options merge: JSON must be an object at the root.")
+                return SessionLineResult()
+            norm = normalize_request_options_pref(loaded)
+            pp.request_options = {**pp.request_options, **norm}
+            ack()
+            return SessionLineResult()
+
+        if sub in ("replace", "json-set"):
+            if len(toks) < 5:
+                sink_print_compat('Usage: /set primary request_options replace \'{"temperature": 0.2}\'')
+                return SessionLineResult()
+            blob_text = " ".join(toks[4:]).strip()
+            try:
+                loaded = json.loads(blob_text)
+            except json.JSONDecodeError as e:
+                sink_print_compat(f"/set primary request_options replace: invalid JSON ({e}).")
+                return SessionLineResult()
+            if not isinstance(loaded, dict):
+                sink_print_compat("/set primary request_options replace: JSON must be an object at the root.")
+                return SessionLineResult()
+            pp.request_options = normalize_request_options_pref(loaded)
+            ack()
+            return SessionLineResult()
+
+        usage()
         return SessionLineResult()
 
     def _cmd_last(self, s: str) -> SessionLineResult:
@@ -1665,6 +1841,7 @@ class AgentSession:
                 "  /set thinking ...\n"
                 "  /set ollama|openai|agent show|keys|set|unset\n"
                 "  /set primary llm ollama|hosted …\n"
+                "  /set primary request_options show|set|unset|merge|replace|clear\n"
             )
             return SessionLineResult()
 
@@ -2300,10 +2477,15 @@ class AgentSession:
             sink_print_compat("Unknown /set thinking subcommand. Try: /set thinking show | on | off | level …")
             return SessionLineResult()
 
+        if key == "primary" and len(toks) >= 3 and toks[2].lower() == "request_options":
+            return self._cmd_primary_request_options(toks)
+
         if key == "primary" and len(toks) >= 4 and toks[2].lower() == "llm":
             sub = toks[3].lower()
             if sub == "ollama":
+                kept_ro = preserved_request_options(self.primary_profile)
                 self.primary_profile = self._default_primary_llm_profile()
+                self.primary_profile.request_options = kept_ro
                 sink_print_compat("Primary LLM: local Ollama.")
             elif sub == "hosted":
                 if len(toks) < 6:
@@ -2314,12 +2496,14 @@ class AgentSession:
                     sink_print_compat("base_url must start with http:// or https://")
                     return SessionLineResult()
                 keyval = toks[6] if len(toks) > 6 else ""
+                kept_ro = preserved_request_options(self.primary_profile)
                 self.primary_profile = self._LlmProfile(
                     backend="hosted",
                     base_url=bu,
                     model=mod,
                     api_key=keyval,
                 )
+                self.primary_profile.request_options = kept_ro
                 if not (keyval or "").strip():
                     sink_print_compat("Note: api_key is not set; hosted primary calls will fail until it is.")
                 sink_print_compat(

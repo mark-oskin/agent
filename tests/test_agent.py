@@ -22,7 +22,7 @@ from agentlib.skills.loader import expand_skill_artifacts, load_skills_from_dir,
 from agentlib.tools.progress import tool_progress_message_with_settings
 from agentlib.tools.registry import ToolRegistry
 from agentlib.tools import turn_support
-from tests.harness import build_test_app, run_main
+from tests.harness import build_test_app, build_test_session, run_main
 from agentlib.settings import AgentSettings
 
 
@@ -178,12 +178,64 @@ def test_parse_content_promoted_to_answer():
     assert "content" not in out
 
 
+def test_execute_line_fork_invokes_hook(monkeypatch):
+    """`/fork` must work via execute_line (e.g. agent_send), not only when the TUI intercepts typing."""
+    _, session = build_test_session(monkeypatch)
+    calls = []
+
+    def fork_hook(name, cmds=None):
+        calls.append((name, list(cmds or [])))
+        return {"type": "fork", "ok": True}
+
+    session.python_fork_agent = fork_hook
+    r = session.execute_line('/fork LaneZ "a,b"')
+    assert r.get("type") == "command"
+    assert calls == [("LaneZ", ["a", "b"])]
+    assert "ok" in (r.get("output") or "").lower()
+
+
+def test_execute_line_fork_background_invokes_hook(monkeypatch):
+    _, session = build_test_session(monkeypatch)
+    calls = []
+
+    def bg_hook(name, cmds=None):
+        calls.append((name, list(cmds or [])))
+        return {"type": "fork", "ok": True}
+
+    session.python_fork_background_agent = bg_hook
+    r = session.execute_line("/fork_background Worker hello")
+    assert r.get("type") == "command"
+    assert calls == [("Worker", ["hello"])]
+
+
 def test_parse_tool_top_level_run_command():
     raw = json.dumps({"action": "run_command", "command": "echo hi"})
     out = parse(raw)
     assert out["action"] == "tool_call"
     assert out["tool"] == "run_command"
     assert "echo hi" in out["parameters"].get("command", "")
+
+
+def test_parse_tool_top_level_run_applescript_script():
+    raw = json.dumps({"action": "run_applescript", "script": 'tell application "Mail" to return 1'})
+    out = parse(raw)
+    assert out["action"] == "tool_call"
+    assert out["tool"] == "run_applescript"
+    assert "Mail" in out["parameters"].get("script", "")
+
+
+def test_parse_run_applescript_fallback_when_outer_json_invalid():
+    """Recover script when json.loads fails but ``"script": "…"`` is parseable by the string scanner."""
+    inner = 'tell application "Mail" to get subject of message 1 of inbox'
+    raw = (
+        '{"action":"run_applescript","parameters":{"script":"'
+        + inner.replace("\\", "\\\\").replace('"', '\\"')
+        + '"},EXTRA_BAD'
+    )
+    out = parse(raw)
+    assert out["action"] == "tool_call"
+    assert out["tool"] == "run_applescript"
+    assert inner in out["parameters"].get("script", "")
 
 
 def test_parse_use_git_top_level_op_and_worktree():
