@@ -34,6 +34,7 @@ _AGENT_TOP_LEVEL_PARAM_KEYS = frozenset(
         "max",
         "num_results",
         "limit",
+        "script",
     }
 )
 
@@ -212,6 +213,80 @@ def fallback_extract_answer_field(raw: str) -> Optional[str]:
     return None
 
 
+def _extract_json_string_field(raw: str, field: str) -> Optional[str]:
+    """
+    Scan for ``"field": "`` and read a JSON double-quoted string body with escape handling
+    (same rules as ``fallback_extract_answer_field``). Returns None if not found or unterminated.
+    """
+    text = normalize_unicode_json_quotes(raw.strip())
+    pat = re.compile(r'"' + re.escape(field) + r'"\s*:\s*"')
+    m = pat.search(text)
+    if not m:
+        return None
+    i = m.end()
+    buf: list[str] = []
+    escape = False
+    while i < len(text):
+        c = text[i]
+        if escape:
+            escape = False
+            if c == "n":
+                buf.append("\n")
+            elif c == "r":
+                buf.append("\r")
+            elif c == "t":
+                buf.append("\t")
+            elif c == '"':
+                buf.append('"')
+            elif c == "\\":
+                buf.append("\\")
+            elif c == "/":
+                buf.append("/")
+            elif c == "f":
+                buf.append("\f")
+            elif c == "b":
+                buf.append("\b")
+            elif c == "u" and i + 4 < len(text):
+                hex_part = text[i + 1 : i + 5]
+                if len(hex_part) == 4 and all(ch in "0123456789abcdefABCDEF" for ch in hex_part):
+                    buf.append(chr(int(hex_part, 16)))
+                    i += 4
+                else:
+                    buf.append("\\")
+                    buf.append(c)
+            else:
+                buf.append("\\")
+                buf.append(c)
+            i += 1
+            continue
+        if c == "\\":
+            escape = True
+            i += 1
+            continue
+        if c == '"':
+            return "".join(buf)
+        buf.append(c)
+        i += 1
+    return None
+
+
+def fallback_extract_run_applescript_field(raw: str) -> Optional[dict]:
+    """
+    When JSON is invalid but the model clearly intended ``run_applescript``, recover ``script``
+    from a ``"script": "…"`` span (handles broken outer JSON if the script string itself is well-formed).
+    """
+    text = normalize_unicode_json_quotes(raw.strip())
+    if not (
+        re.search(r'"action"\s*:\s*"run_applescript"', text)
+        or re.search(r'"tool"\s*:\s*"run_applescript"', text)
+    ):
+        return None
+    extracted = _extract_json_string_field(text, "script")
+    if extracted is None or not extracted.strip():
+        return None
+    return {"action": "tool_call", "tool": "run_applescript", "parameters": {"script": extracted}}
+
+
 def try_json_loads_object(s: str):
     """Parse a JSON object string; apply light repairs for common model mistakes."""
     if not s or not s.strip():
@@ -249,6 +324,10 @@ def try_json_loads_object(s: str):
     if extracted is not None and extracted.strip():
         return {"action": "answer", "answer": extracted}
 
+    apple = fallback_extract_run_applescript_field(s)
+    if apple is not None:
+        return apple
+
     return None
 
 
@@ -273,7 +352,14 @@ def best_agent_dict_from_text(text: str, known_tools: FrozenSet[str]) -> Optiona
         has_action = 1 if action else 0
         known_tool = 1 if tool in known_tools else 0
         tool_call_shape = 1 if action == "tool_call" and tool in known_tools else 0
-        return (tool_call_shape, known_tool, has_action)
+        script_ok = 0
+        if tool == "run_applescript":
+            p = d.get("parameters")
+            if isinstance(p, dict) and str(p.get("script", "")).strip():
+                script_ok = 1
+            elif str(d.get("script", "")).strip():
+                script_ok = 1
+        return (tool_call_shape + script_ok, known_tool, has_action)
 
     candidates.sort(key=score, reverse=True)
     return candidates[0]
@@ -505,6 +591,10 @@ def normalize_agent_dict(d: dict, deps: AgentJsonDeps) -> dict:
             for alt in ("cmd", "shell", "line"):
                 if alt in out and out[alt] is not None:
                     params.setdefault("command", out[alt])
+        elif tool_name == "run_applescript":
+            for alt in ("applescript", "code", "source", "text", "body"):
+                if alt in out and out[alt] is not None:
+                    params.setdefault("script", out[alt])
         elif tool_name == "use_git":
             for alt in ("operation", "git_op", "subcommand", "sub_cmd"):
                 if alt in out and out[alt] is not None:
@@ -543,6 +633,11 @@ def normalize_agent_dict(d: dict, deps: AgentJsonDeps) -> dict:
                 "files",
                 "file",
                 "file_paths",
+                "applescript",
+                "code",
+                "source",
+                "text",
+                "body",
             }
         )
         for k in list(out.keys()):
@@ -559,7 +654,7 @@ def parse_agent_json(resp_text, deps: AgentJsonDeps) -> dict:
     """Parse model output into a dict. Handles markdown fences, partial JSON, and plain text."""
     if resp_text is None or (isinstance(resp_text, str) and not resp_text.strip()):
         return {"action": "answer", "answer": "No response from model."}
-    text = resp_text.strip()
+    text = resp_text.strip().lstrip("\ufeff")
     # Strip ```json ... ``` fences if present
     fence = re.match(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", text, re.DOTALL | re.IGNORECASE)
     if fence:
@@ -595,6 +690,10 @@ def parse_agent_json(resp_text, deps: AgentJsonDeps) -> dict:
                 return normalize_agent_dict(parsed, deps)
         except ValueError:
             continue
+
+    fb_apple = fallback_extract_run_applescript_field(text)
+    if fb_apple is not None:
+        return normalize_agent_dict(fb_apple, deps)
 
     # Last resort: treat as a direct answer (general Q&A without valid JSON)
     return normalize_agent_dict({"action": "answer", "answer": text}, deps)

@@ -11,7 +11,7 @@ When the user asks for information about their calendar (make an appointment, wh
 
 When you create calendar events, you have to tell Calendar the exact start and times.  Here's an example script you can base your work on:
 
-
+```applescript
 set theStartDate to (current date) + (1 * days)
 set hours of theStartDate to 15
 set minutes of theStartDate to 0
@@ -23,16 +23,170 @@ tell application "Calendar"
         make new event with properties {summary:"Important Meeting!", start date:theStartDate, end date:theEndDate}
     end tell
 end tell
+```
 
 ** How to interact with Email **
 
 When the user asks you to interact with Email know that they use Mac OS X's default Mail app.  You can talk to it with AppleScript using the run_applescript tool.  Here is an example script to get the subject line of the mail at the top of their inbox:
 
+```applescript
 tell application "Mail"
     set firstMessage to first message of inbox
     set subjectLine to subject of firstMessage
     return subjectLine
 end tell
+```
+
+Here's a more indepth example for interacting with Mail:
+
+```applescript
+tell application "Mail"                                                                                 
+    set msgList to {}
+    set msgCount to 0
+    try
+        tell mailbox "INBOX" of account "myname@account.net"
+            set msgCount to count of messages
+            repeat with i from 1 to 5
+                if i <= msgCount then
+                    set m to item i of messages
+                    set s to subject of m
+                    set d to date received of m
+                    set end of msgList to "Subject: " & s & ", Date: " & d
+                end if
+            end repeat
+        end tell
+        end try
+    return "Count: " & msgCount & " Messages: " & msgList
+end tell                                                                                                
+```
+
+** How to internact with Notes **
+
+Here is the AppleScript I used to create the TODO list note with proper bullet points:
+
+To interact with notes you send properly formatted HTML.  Here's an example that creates a TODO list.
+
+```applescript
+tell application "Notes"
+     -- Find the first note named "TODO List" and delete it
+    set theAccount to account 1
+    set allNotes to every note of theAccount
+    repeat with i from (count of allNotes) to 1 by -1
+        set thisNote to item i of allNotes
+        if name of thisNote is "TODO List" then
+            delete thisNote
+        end if
+    end repeat
+    
+     -- Create the new note with proper HTML formatting for bullet points
+    set htmlBody to "<ul>\n<li>prep class for monday</li>\n<li>reschedule Marcie</li>\n<li>move boat</li>\n</ul>"
+    set newNote to make new note with properties {name:"TODO List", body:htmlBody}
+end tell
+```
+
+And here is a script that shows how one adds an entry to an existing note:
+
+Here is the AppleScript I used to add "Make dinner" to the "TODO List" note:
+
+```applescript
+tell application "Notes"
+    set theAccount to account "iCloud"
+    set allNotes to every note of theAccount
+    set targetNote to missing value
+    repeat with i from 1 to count of allNotes
+        set thisNote to item i of allNotes
+        if name of thisNote is "TODO List" then
+            set targetNote to thisNote
+            exit repeat
+        end if
+    end repeat
+    
+    if targetNote is missing value then
+        error "TODO List note not found"
+    end if
+    
+    set currentBody to body of targetNote
+    
+    set AppleScript's text item delimiters to "</ul>"
+    set bodyParts to text items of currentBody
+    set AppleScript's text item delimiters to ""
+    set newBody to (item 1 of bodyParts) & "<li>Make dinner</li>\n</ul>"
+    
+    set body of targetNote to newBody
+end tell
+```
+
+** How to interact with Reminders **
+
+To show what Reminder lists are available:
+
+```applescript
+tell application "Reminders"
+    set listNames to {}
+    repeat with theList in lists
+        set end of listNames to name of theList
+    end repeat
+    return listNames
+end tell
+```
+
+To add an entry to a reminder list:
+
+```applescript
+tell application "Reminders"
+    set theList to list "Work Items"
+    make new reminder in theList with properties {name:"write lecture for monday"}
+end tell
+```
+
+To list items in a Reminder list:
+
+```applescript
+tell application "Reminders"
+    set theList to list "Work Items"
+    set itemNames to {}
+    repeat with theReminder in theList
+        set end of itemNames to name of theReminder
+    end repeat
+    return itemNames
+end tell
+```
+
+To check off a reminder:
+
+```applescript
+tell application "Reminders"
+    set theList to list "Work Items"
+    repeat with theReminder in theList
+        if name of theReminder is "attend talk" then
+            set completed of theReminder to true
+            exit repeat
+        end if
+    end repeat
+end tell
+```
+
+** To interact with iTunes **
+
+Here is the AppleScript I used to list the playlists in the Music app:
+
+```applescript
+tell application "Music"
+    set playlistNames to name of every playlist
+    return playlistNames
+end tell
+```
+
+To play a playlist
+
+```applescript
+tell application "Music"
+    set myPlaylist to playlist "Mixtape"
+    play myPlaylist
+end tell
+```
+
+For more details on applescript, this link is the language reference: https://developer.apple.com/library/archive/documentation/AppleScript/Conceptual/AppleScriptLangGuide/introduction/ASLR_intro.html
 
 ** How to run the C compiler **
 

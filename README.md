@@ -61,6 +61,7 @@ When this package is published to an index, you will also be able to run `uv too
 | One-shot | `./agent.py "…"` · or **`agent` "…"` |
 | Help | `./agent.py --help` · or **`agent --help`** |
 | List tools and on/off state | `./agent.py --list-tools` · or **`agent --list-tools`** |
+| Multi-agent TUI | Install the **tui** extra, then `uv run --extra tui python agent_tui.py` (see **Multi-agent Textual UI** below) |
 
 ## CLI options (summary)
 
@@ -79,6 +80,32 @@ When this package is published to an index, you will also be able to run `uv too
 
 Run `./agent.py --help` for the full text.
 
+## Multi-agent Textual UI (`agent_tui.py`)
+
+Side-by-side agents in the terminal: pick a lane in the sidebar, type in the shared prompt, stream thinking and tool output separately from the transcript.
+
+**Requires** the Textual stack (not installed by default):
+
+```bash
+uv sync --extra tui
+uv run --extra tui python agent_tui.py
+uv run --extra tui python agent_tui.py --agent Planner:llama3.2:latest --agent Coder:qwen2.5-coder:latest
+```
+
+Repeat **`--agent LABEL` or `--agent LABEL:MODEL`** for more lanes. Omit **`:MODEL`** to use your default primary model from prefs.
+
+| Command | Purpose |
+|---------|---------|
+| **`/list`** · **`/switch NAME`** | Inspect agents and focus another lane |
+| **`/fork NAME ["cmd1,cmd2,…"]`** | New lane; optional quoted list runs initial commands (commas split; use `'…'` or **`\,`** inside the quotes for a literal comma—the same rules as **`/fork help`**) |
+| **`/fork_background …`** | Same as **`/fork`** but keep the current lane focused |
+| **`/kill NAME`** | Remove a lane by display name (**one** lane must stay) |
+| **`/send AGENT WORDS…`** | Run one prompt or slash line on another lane without blocking this one |
+| **`/send AGENT "a,b"`** | Run **several** lines on another lane (`a` then `b`); inner quoting matches **`/fork`** (single-quoted fragments, **`\,`** for literal commas) |
+| **`/clipboard`** | **`copy`** last assistant reply · **`copy all`** session JSON · **`paste`** loads the OS clipboard into the **prompt for editing** (nothing runs until you press Enter) |
+
+In the TUI, normal slash-command help and confirmations appear in the **main transcript** (with your **You/**assistant messages), so they stay visually separate from the tool/thinking strip.
+
 ## Configuration
 
 - **Default file:** `~/.agent.json` (versioned schema; the agent migrates/reads what it understands).
@@ -89,10 +116,10 @@ Run `./agent.py --help` for the full text.
 
 | Command | Purpose |
 |---------|---------|
-| `/help` | Command list |
+| `/help` | Command list (many topics also support **`/topic help`**, e.g. **`/set help`**) |
 | `/quit` | Exit |
 | `/clear` | Clear in-memory messages (and the stored skill for `/skill reuse`) |
-| `/models` | List local Ollama models (`/api/tags`) |
+| `/show models` | List local Ollama models (`/api/tags`; alias **`/show local_models`**) |
 | `/usage` | Show last Ollama prompt/completion usage from `/api/chat` |
 | `/show model` | Current **primary** LLM (Ollama or hosted) |
 | `/show reviewer` | Current **second-opinion** reviewer model |
@@ -102,6 +129,9 @@ Run `./agent.py --help` for the full text.
 | `/skill auto <request>` | Ask the model to pick a skill, then run it (may be multi-step). |
 | `/skill reuse <request>` | Follow-up using the same skill as the last `/skill` command (no re-selection). |
 | `/settings …` | Model routing, tools, toolsets, thinking, system prompt, templates, context manager, `save`, etc. |
+| `/clipboard copy` · `/clipboard copy all` · `/clipboard paste` | Clipboard: last answer, full session JSON, or load clipboard **into your next input** without auto-running (**paste** echoes in the stdin REPL; **`agent_tui`** puts text in the prompt box) |
+
+**Multi-agent hooks** (**`/send`** and related) need a UI that wires enqueue/delegate (e.g. **`agent_tui.py`**); in a plain stdin REPL they print a setup hint instead of forwarding.
 
 At `verbose=0`, startup is minimal (`Interactive mode. Type /help for commands.`). Use `/settings verbose 1` or `2` for a richer startup banner and tool logging.
 

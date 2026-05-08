@@ -89,7 +89,13 @@ When adding or modifying commands:
 - Ensure they remain discoverable via `/help`
 - Add or update tests under `tests/test_to_100.py`
 
-## Embedding API (`import agent`)
+### Multi-agent TUI (`agent_tui.py`)
+
+- **Shortcuts** (`/send`, `/fork`, `/fork_background`, `/kill`) bypass the normal REPL runner and schedule host actions; transient feedback goes to **`_chat_logs`** (same transcript band as streamed slash output), not **`_activity_logs`** (thinking/tool telemetry).
+- **Parsing** shares **`agentlib/tui_parse`** with the CLI: **`parse_fork_command`**, **`parse_send_command`** (comma-split inside optional `"..."`, with **`'…'`** and **`\,`** escapes), **`format_fork_command_line`**, **`format_send_command_line`**.
+- **`/clipboard paste`** returns **`prefill_prompt`** on **`SessionLineResult`**; **`agent_tui`** injects into **`#prompt`**, **`repl/loop`** prints the snippet once for stdin users.
+
+### Embedding API (`import agent`)
 
 Temporarily removed. `agent.py` is CLI/REPL-only for now.
 

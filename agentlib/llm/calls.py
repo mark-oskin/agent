@@ -7,6 +7,10 @@ import requests
 from requests.exceptions import HTTPError
 
 from agentlib.sink import sink_emit
+from agentlib.llm.request_options import (
+    merge_hosted_request_options,
+    merge_ollama_options_payload,
+)
 
 
 _THINK_FALLBACK_WARNING = (
@@ -146,8 +150,12 @@ def call_llm_json_content(
             "model": getattr(prof, "model", ""),
             "messages": messages,
             "stream": False,
-            "temperature": 0.2,
         }
+        merge_hosted_request_options(
+            body,
+            getattr(prof, "request_options", None) or {},
+            default_temperature=0.2,
+        )
         _emit_full_llm_prompts_if_verbose(
             messages,
             verbose=verbose,
@@ -178,6 +186,7 @@ def call_llm_json_content(
         "format": "json",
         "think": False,
     }
+    merge_ollama_options_payload(payload, getattr(prof, "request_options", None) or {})
     _emit_full_llm_prompts_if_verbose(messages, verbose=verbose, backend="ollama", model=ollama_model, format_json=True)
     try:
 
@@ -219,6 +228,7 @@ def call_hosted_agent_chat(
     verbose: int,
     message_to_agent_json_text: Callable[[dict, Optional[AbstractSet[str]]], str],
     verbose_emit_final_agent_readable: Callable[[str], None],
+    request_options: Optional[dict] = None,
 ) -> str:
     """Hosted primary agent: same JSON contract as Ollama /api/chat + format json."""
     key = (api_key or "").strip()
@@ -231,8 +241,8 @@ def call_hosted_agent_chat(
         "model": model,
         "messages": messages,
         "stream": False,
-        "temperature": 0.3,
     }
+    merge_hosted_request_options(body, request_options or {}, default_temperature=0.3)
     _emit_full_llm_prompts_if_verbose(messages, verbose=verbose, backend="hosted", model=model, format_json=False)
     try:
         r = requests.post(url, json=body, headers=headers, timeout=600)
@@ -285,6 +295,7 @@ def call_ollama_chat(
             verbose=verbose,
             message_to_agent_json_text=message_to_agent_json_text,
             verbose_emit_final_agent_readable=verbose_emit_final_agent_readable,
+            request_options=dict(getattr(prof, "request_options", None) or {}),
         )
 
     base = (ollama_base_url or "").rstrip("/")
@@ -296,6 +307,7 @@ def call_ollama_chat(
         "format": "json",
         "think": ollama_think_value,
     }
+    merge_ollama_options_payload(payload, getattr(prof, "request_options", None) or {})
     _emit_full_llm_prompts_if_verbose(messages, verbose=verbose, backend="ollama", model=ollama_model, format_json=True)
     stream_llm = verbose >= 2
 
