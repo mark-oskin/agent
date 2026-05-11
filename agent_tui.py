@@ -960,13 +960,17 @@ class AgentTuiApp(App[None]):
         with emit_sink_scope(emit_fn):
             res = sess.execute_line((cmd or "").strip())
 
-        self.call_from_thread(lambda li=lane_idx: self._refresh_sidebar_lane(li))
-
         if isinstance(res, dict) and res.get("type") == "command":
             cap = "".join(captured).rstrip()
             cur = (res.get("output") or "").strip()
             if cap and not cur:
-                return {**res, "output": cap}
+                res = {**res, "output": cap}
+
+        # Delegate bypasses _run_line → _turn_done; still append final assistant / command
+        # output to this lane's transcript (same as _apply_turn_result after a normal turn).
+        self.call_from_thread(
+            lambda li=lane_idx, r=res: self._apply_turn_result(li, r, finalize_busy=False)
+        )
         return res
 
     def _python_enqueue_bridge(self, agent_name: str, cmd: str) -> dict:
