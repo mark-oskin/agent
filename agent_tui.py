@@ -500,8 +500,17 @@ class AgentTuiApp(App[None]):
     }
     """
 
-    def __init__(self, *, verbose: int = 0, agent_specs: Optional[List[str]] = None) -> None:
+    def __init__(
+        self,
+        *,
+        verbose: int = 0,
+        agent_specs: Optional[List[str]] = None,
+        debug_llm_log_path: Optional[str] = None,
+    ) -> None:
         super().__init__()
+        from agentlib.debug_llm_log import set_debug_llm_log_path
+
+        set_debug_llm_log_path(debug_llm_log_path)
         self._verbose = verbose
         raw = agent_specs if agent_specs else []
         self._specs: List[Tuple[str, str]] = [_parse_agent_spec(x) for x in raw]
@@ -1501,6 +1510,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Multi-agent TUI (embedded sessions + streaming emit).")
     p.add_argument("-v", "--verbose", action="count", default=0)
     p.add_argument(
+        "--debug_log",
+        "--debug-log",
+        dest="debug_llm_log",
+        metavar="FILE",
+        default=None,
+        help="Append full LLM request JSON (verbose-3 style) to FILE; no extra TUI output.",
+    )
+    p.add_argument(
         "--agent",
         action="append",
         dest="agents",
@@ -1508,7 +1525,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Agent slot (repeat). Examples: Planner:llama3.2:latest or Research",
     )
     args = p.parse_args(argv)
-    AgentTuiApp(verbose=int(args.verbose), agent_specs=args.agents).run()
+    AgentTuiApp(
+        verbose=int(args.verbose),
+        agent_specs=args.agents,
+        debug_llm_log_path=args.debug_llm_log,
+    ).run()
     return 0
 
 

@@ -45,6 +45,7 @@ class CliParseResult:
     cloud_ai_flag_set: bool
     load_context_path: Optional[str]
     save_context_path: Optional[str]
+    debug_llm_log_path: Optional[str]
     enabled_tools: Set[str]
     primary_profile: Any
     reviewer_hosted_profile: Any
@@ -72,6 +73,14 @@ def parse_main_argv(
     format_unknown_tool_hint: Callable[[str], str],
     format_settings_tools_list: Callable[[Set[str]], str],
 ) -> CliParseResult:
+    verbose_flag_set = False
+    second_opinion_flag_set = False
+    cloud_ai_flag_set = False
+    query_parts: List[str] = []
+    load_context_path: Optional[str] = None
+    prompt_template_selected: Optional[str] = None
+    debug_llm_log_path: Optional[str] = None
+
     def stop_with_error(msg: str) -> CliParseResult:
         # Preserve historical behavior: most CLI parse errors are printed to stdout
         # so tests (and scripting) see them in the captured output.
@@ -85,6 +94,7 @@ def parse_main_argv(
             cloud_ai_flag_set=cloud_ai_flag_set,
             load_context_path=load_context_path,
             save_context_path=save_context_path,
+            debug_llm_log_path=debug_llm_log_path,
             enabled_tools=enabled_tools,
             primary_profile=primary_profile,
             reviewer_hosted_profile=reviewer_hosted_profile,
@@ -93,13 +103,6 @@ def parse_main_argv(
             query_parts=query_parts,
             help_requested=True,
         )
-
-    verbose_flag_set = False
-    second_opinion_flag_set = False
-    cloud_ai_flag_set = False
-    query_parts: List[str] = []
-    load_context_path: Optional[str] = None
-    prompt_template_selected: Optional[str] = None
 
     i = 0
     while i < len(argv):
@@ -116,6 +119,7 @@ def parse_main_argv(
                 cloud_ai_flag_set=cloud_ai_flag_set,
                 load_context_path=load_context_path,
                 save_context_path=save_context_path,
+                debug_llm_log_path=debug_llm_log_path,
                 enabled_tools=enabled_tools,
                 primary_profile=primary_profile,
                 reviewer_hosted_profile=reviewer_hosted_profile,
@@ -169,6 +173,7 @@ def parse_main_argv(
                 cloud_ai_flag_set=cloud_ai_flag_set,
                 load_context_path=load_context_path,
                 save_context_path=save_context_path,
+                debug_llm_log_path=debug_llm_log_path,
                 enabled_tools=enabled_tools,
                 primary_profile=primary_profile,
                 reviewer_hosted_profile=reviewer_hosted_profile,
@@ -214,6 +219,19 @@ def parse_main_argv(
             prompt_template_selected = str(argv[i + 1]).strip()
             i += 2
             continue
+        if fa == "debug-log" or fa.startswith("debug-log="):
+            if fa.startswith("debug-log="):
+                dlog = str(a).split("=", 1)[1].strip()
+                i += 1
+            else:
+                if i + 1 >= len(argv):
+                    return stop_with_error("Error: --debug_log requires a file path.")
+                dlog = str(argv[i + 1]).strip()
+                i += 2
+            if not dlog:
+                return stop_with_error("Error: --debug_log file path must be non-empty.")
+            debug_llm_log_path = dlog
+            continue
         query_parts.append(str(a))
         i += 1
 
@@ -226,6 +244,7 @@ def parse_main_argv(
         cloud_ai_flag_set=cloud_ai_flag_set,
         load_context_path=load_context_path,
         save_context_path=save_context_path,
+        debug_llm_log_path=debug_llm_log_path,
         enabled_tools=enabled_tools,
         primary_profile=primary_profile,
         reviewer_hosted_profile=reviewer_hosted_profile,

@@ -34,6 +34,7 @@ import requests
 from agentlib import AgentSettings, agent_json, prefs, prompt_templates_io, prompts, routing, routing_followups
 from agentlib.coercion import coerce_verbose_level, scalar_to_int, scalar_to_str
 from agentlib.context.compaction import maybe_compact_context_window, summarize_conversation_for_context
+from agentlib.debug_llm_log import set_debug_llm_log_path
 from agentlib.context.io import load_context_messages, save_context_bundle
 from agentlib.deliverables import (
     answer_missing_written_body,
@@ -670,6 +671,8 @@ class AgentApp:
             "  --model NAME             Override the primary model (Ollama model tag or hosted model name).\n"
             "  --prompt-template NAME   Select a prompt template (default: coding).\n"
             "  --verbose [0|1|2|3]      Verbosity (default comes from prefs). With no value sets 2.\n"
+            "  --debug_log FILE         Append full LLM request payloads (same as verbose 3) to FILE only;\n"
+            "                           does not add that dump to normal console/TUI output.\n"
             "  --second-opinion         Enable second opinion reviewer for this run.\n"
             "  --cloud-ai               Enable hosted/cloud AI usage for this run.\n"
             "  --load-context PATH      Load a context bundle before asking your question (one-shot only).\n"
@@ -1009,6 +1012,8 @@ class AgentApp:
         if parsed.help_requested:
             return
 
+        set_debug_llm_log_path(parsed.debug_llm_log_path)
+
         verbose = parsed.verbose
         second_opinion_enabled = parsed.second_opinion_enabled
         cloud_ai_enabled = parsed.cloud_ai_enabled
@@ -1170,6 +1175,8 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
     )
     if parsed.help_requested:
         return
+
+    set_debug_llm_log_path(parsed.debug_llm_log_path)
 
     verbose = parsed.verbose
     verbose_flag_set = parsed.verbose_flag_set
