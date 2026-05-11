@@ -26,26 +26,3 @@ def test_cli_verbose_3_consumes_level_and_starts_repl_mode():
     )
     assert parsed.verbose == 3
     assert parsed.query_parts == []
-
-
-def test_cli_debug_log_consumes_path():
-    parsed = parse_main_argv(
-        ["--debug_log=/tmp/llm-debug.log", "hello"],
-        verbose=0,
-        second_opinion_enabled=False,
-        cloud_ai_enabled=False,
-        save_context_path=None,
-        enabled_tools=set(),
-        primary_profile=default_primary_llm_profile(),
-        reviewer_hosted_profile=None,
-        reviewer_ollama_model=None,
-        strip_leading_dashes_flag=lambda s: (s or "").lstrip("-").lower().replace("_", "-"),
-        print_cli_help=lambda: None,
-        apply_cli_primary_model=lambda name, prof: prof,
-        normalize_tool_name=lambda s: None,
-        format_unknown_tool_hint=lambda s: s,
-        format_settings_tools_list=lambda tools: "",
-    )
-    assert parsed.debug_llm_log_path == "/tmp/llm-debug.log"
-    assert parsed.query_parts == ["hello"]
-
