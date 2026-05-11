@@ -54,6 +54,9 @@ def test_verbose_3_emits_full_prompts(monkeypatch):
         def iter_lines(self, decode_unicode=True):
             yield self._line
 
+        def iter_content(self, chunk_size=65536, decode_unicode=False):
+            yield self._line.encode("utf-8")
+
     agent_line = json.dumps(
         {"message": {"content": '{"action":"answer","answer":"ok"}'}, "done": True}
     )

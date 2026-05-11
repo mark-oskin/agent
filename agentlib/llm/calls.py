@@ -7,6 +7,7 @@ import requests
 from requests.exceptions import HTTPError
 
 from agentlib.sink import sink_emit
+from agentlib.llm import streaming as llm_streaming
 from agentlib.llm.request_options import (
     merge_hosted_request_options,
     merge_ollama_options_payload,
@@ -20,18 +21,25 @@ _THINK_FALLBACK_WARNING = (
 def _emit_full_llm_prompts_if_verbose(messages: list, *, verbose: int, backend: str, model: str, format_json: bool) -> None:
     """
     Verbose level 3: emit the exact prompts (messages list) sent to the LLM.
+
+    If ``--debug_log`` set a path via :mod:`agentlib.debug_llm_log`, the same dump is
+    appended to that file only (no console/TUI spam). Otherwise ``verbose >= 3`` uses
+    ``sink_emit`` as before.
     """
-    if int(verbose) < 3:
+    from agentlib.debug_llm_log import append_llm_prompt_log, debug_llm_log_enabled
+
+    to_file = debug_llm_log_enabled()
+    to_sink = int(verbose) >= 3 and not to_file
+    if not to_file and not to_sink:
         return
     try:
         header = f"[*] LLM request prompts (backend={backend}, model={model!r}, format_json={bool(format_json)}):"
-        sink_emit({"type": "output", "text": header})
-        sink_emit(
-            {
-                "type": "output",
-                "text": json.dumps(messages, ensure_ascii=False, indent=2),
-            }
-        )
+        body = json.dumps(messages, ensure_ascii=False, indent=2)
+        if to_file:
+            append_llm_prompt_log(header + "\n" + body + "\n")
+        if to_sink:
+            sink_emit({"type": "output", "text": header})
+            sink_emit({"type": "output", "text": body})
     except Exception:
         # Never fail the model call due to verbose printing.
         return
@@ -72,7 +80,8 @@ def call_ollama_plaintext(
                     with requests.post(url, json=body, stream=True, timeout=600) as r:
                         r.raise_for_status()
                         msg, usage, _ = merge_stream_message_chunks(
-                            r.iter_lines(decode_unicode=True), stream_chunks=False
+                            llm_streaming.iter_ollama_ndjson_lines_from_response(r),
+                            stream_chunks=False,
                         )
                     return (msg.get("content") or "").strip(), usage
                 r = requests.post(url, json=body, timeout=600)
@@ -196,7 +205,8 @@ def call_llm_json_content(
                 with requests.post(url, json=body, stream=True, timeout=300) as r:
                     r.raise_for_status()
                     msg, usage, _ = merge_stream_message_chunks(
-                        r.iter_lines(decode_unicode=True), stream_chunks=verbose >= 2
+                        llm_streaming.iter_ollama_ndjson_lines_from_response(r),
+                        stream_chunks=verbose >= 2,
                     )
             else:
                 r = requests.post(url, json=body, timeout=300)
@@ -319,7 +329,8 @@ def call_ollama_chat(
                     with requests.post(url, json=body, stream=True, timeout=600) as r:
                         r.raise_for_status()
                         msg, usage, streamed = merge_stream_message_chunks(
-                            r.iter_lines(decode_unicode=True), stream_chunks=stream_llm
+                            llm_streaming.iter_ollama_ndjson_lines_from_response(r),
+                            stream_chunks=stream_llm,
                         )
                     if ollama_debug:
                         sink_emit({"type": "debug", "text": f"[DEBUG] Ollama merged message: {msg!r}"})

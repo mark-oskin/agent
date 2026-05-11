@@ -67,6 +67,9 @@ class _StreamResp:
     def iter_lines(self, decode_unicode=True):
         yield self._line
 
+    def iter_content(self, chunk_size=65536, decode_unicode=False):
+        yield self._line.encode("utf-8")
+
 
 def test_call_ollama_chat_retries_without_think_on_400(monkeypatch):
     from agentlib.llm import calls as calls_mod

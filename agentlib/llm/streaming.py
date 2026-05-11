@@ -2,10 +2,42 @@
 
 from __future__ import annotations
 
+import codecs
 import json
-from typing import Callable, Optional, Tuple
+from typing import Callable, Iterator, Optional, Tuple
 
 from agentlib.sink import sink_emit
+
+
+def iter_ollama_ndjson_lines_from_response(response) -> Iterator[str]:
+    """
+    Yield complete newline-delimited JSON lines from a streamed Ollama ``/api/chat`` body.
+
+    Unlike ``Response.iter_lines``, this reassembles UTF-8 across arbitrary TCP chunk
+    boundaries (multi-byte characters and NDJSON records are not split incorrectly)
+    and yields the last record even when the server closes without a trailing newline.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    buf = ""
+    for chunk in response.iter_content(chunk_size=65536, decode_unicode=False):
+        if not chunk:
+            continue
+        if not isinstance(chunk, bytes):
+            chunk = bytes(chunk)
+        buf += decoder.decode(chunk, final=False)
+        while True:
+            idx = buf.find("\n")
+            if idx < 0:
+                break
+            raw_line = buf[:idx]
+            buf = buf[idx + 1 :]
+            line = raw_line.rstrip("\r").strip()
+            if line:
+                yield line
+    buf += decoder.decode(b"", final=True)
+    tail = buf.rstrip("\r\n").strip()
+    if tail:
+        yield tail
 
 
 def merge_tool_arguments_delta(old_a, new_a):
@@ -99,12 +131,20 @@ def merge_stream_message_chunks(
     show_thinking = agent_stream_thinking_enabled()
     thinking_started = False
     done_thinking_banner_printed = False
+    saw_done = False
     for line in lines_iter:
         if not line:
             continue
         try:
             data = json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            preview = line if len(line) <= 240 else line[:240] + "…"
+            sink_emit(
+                {
+                    "type": "warning",
+                    "text": f"Ollama stream line ignored (invalid JSON): {e}; line ({len(line)} chars): {preview}",
+                }
+            )
             continue
         msg = data.get("message") or {}
         if msg.get("content"):
@@ -127,10 +167,19 @@ def merge_stream_message_chunks(
         if msg.get("tool_calls"):
             tool_calls = merge_partial_tool_calls(tool_calls, msg["tool_calls"])
         if data.get("done"):
+            saw_done = True
             u = ollama_usage_from_chat_response_fn(data)
             if u:
                 usage = u
             break
+    if not saw_done:
+        sink_emit(
+            {
+                "type": "warning",
+                "text": "Ollama stream ended without a terminal chunk with done:true; "
+                "the HTTP body was fully read but the protocol sequence may be incomplete.",
+            }
+        )
     if tool_calls is not None:
         acc["tool_calls"] = tool_calls
     return acc, usage, streamed_content

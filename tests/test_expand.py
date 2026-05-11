@@ -165,6 +165,71 @@ def test_merge_stream_message_chunks_verbose_streams_content(capsys):
     assert msg["content"] == "hello"
 
 
+def test_merge_stream_message_chunks_warns_if_stream_lacks_done_true(monkeypatch):
+    emitted: list[str] = []
+
+    def cap(ev: dict) -> None:
+        if (ev.get("type") or "") == "warning":
+            emitted.append(str(ev.get("text") or ""))
+
+    monkeypatch.setattr(llm_streaming, "sink_emit", cap)
+    lines = [json.dumps({"message": {"content": "partial"}, "done": False})]
+    msg, usage, streamed = llm_streaming.merge_stream_message_chunks(
+        iter(lines),
+        agent_stream_thinking_enabled=lambda: False,
+    )
+    assert msg["content"] == "partial"
+    assert any("done:true" in t for t in emitted)
+
+
+def test_merge_stream_message_chunks_warns_on_invalid_json_line(monkeypatch):
+    emitted: list[str] = []
+
+    def cap(ev: dict) -> None:
+        if (ev.get("type") or "") == "warning":
+            emitted.append(str(ev.get("text") or ""))
+
+    monkeypatch.setattr(llm_streaming, "sink_emit", cap)
+    good = json.dumps({"message": {"content": "x"}, "done": False})
+    final = json.dumps({"message": {"content": "y"}, "done": True})
+    lines = ["not-json", good, final]
+    msg, usage, streamed = llm_streaming.merge_stream_message_chunks(
+        iter(lines),
+        agent_stream_thinking_enabled=lambda: False,
+    )
+    assert msg["content"] == "xy"
+    assert any("invalid JSON" in t for t in emitted)
+    assert not any("without a terminal chunk" in t for t in emitted)
+
+
+class _ChunkedBody:
+    def __init__(self, parts: list[bytes]):
+        self._parts = parts
+
+    def iter_content(self, chunk_size=65536, decode_unicode=False):
+        assert decode_unicode is False
+        yield from self._parts
+
+
+def test_iter_ollama_ndjson_lines_splits_arbitrary_byte_chunks():
+    payload = '{"message":{"content":"€"},"done":true}'
+    raw = payload.encode("utf-8")
+    euro = "€".encode("utf-8")
+    cut = raw.index(euro) + 1  # first chunk ends after 0xE2; remainder completes U+20AC.
+    parts = [raw[:cut], raw[cut:]]
+    lines = list(llm_streaming.iter_ollama_ndjson_lines_from_response(_ChunkedBody(parts)))
+    assert len(lines) == 1
+    data = json.loads(lines[0])
+    assert data["message"]["content"] == "€"
+    assert data["done"] is True
+
+
+def test_iter_ollama_ndjson_lines_emits_last_record_without_trailing_newline():
+    raw = b'{"a":1}\n{"b":2}'
+    lines = list(llm_streaming.iter_ollama_ndjson_lines_from_response(_ChunkedBody([raw])))
+    assert [json.loads(x) for x in lines] == [{"a": 1}, {"b": 2}]
+
+
 def test_ollama_generation_tok_per_sec_uses_eval_duration():
     u = {"eval_count": 100, "eval_duration": 2_000_000_000}
     assert abs(llm_usage.ollama_eval_generation_tok_per_sec(u) - 50.0) < 1e-9
