@@ -590,7 +590,7 @@ class AgentApp:
             search_web_fetch_top=lambda query, params=None: tool_builtins.search_web_fetch_top(
                 query, params=params, settings=self.settings
             ),
-            fetch_page=tool_builtins.fetch_page,
+            fetch_page=lambda p: tool_builtins.fetch_page(p, settings=self.settings),
             run_command=tool_builtins.run_command,
             use_git=tool_builtins.use_git,
             write_file=tool_builtins.write_file,
@@ -695,7 +695,8 @@ class AgentApp:
             "  max_agent_steps (30)           Max model iterations when web verification is off.\n"
             "  max_agent_steps_web (15)       Max model iterations when web verification is required.\n"
             "  max_tool_calls_web (15)        Max tool executions under web verification.\n"
-            "  max_fetch_page_web (15)        Max fetch_page calls under web verification.\n"
+            "  max_fetch_page_web (15)        Max fetch_page URL fetches under web verification.\n"
+            "  fetch_page_pdf_to_text (true)  Extract text from PDF responses in fetch_page (default on).\n"
         )
 
     @staticmethod

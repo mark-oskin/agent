@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import AbstractSet, Any, Optional, Tuple
 
+from agentlib.agent_json import consume_last_json_parse_note
 from agentlib.sink import sink_emit
 from agentlib.tools import turn_support
 from agentlib.tools.routing import preferred_web_search_tool
@@ -180,6 +181,9 @@ def run_agent_conversation_turn(
             messages, primary_profile, et, verbose=verbose
         )
         response_data = deps.parse_agent_json(response_text)
+        note = consume_last_json_parse_note()
+        if note:
+            sink_emit({"type": "warning", "text": note})
         action = response_data.get("action")
         if action == "answer":
             rt = (response_text or "").strip()
@@ -432,6 +436,9 @@ def run_agent_conversation_turn(
                 if extracted:
                     try:
                         recovered = deps.parse_agent_json(extracted)
+                        n2 = consume_last_json_parse_note()
+                        if n2:
+                            sink_emit({"type": "warning", "text": n2})
                     except Exception:
                         recovered = None
                     if isinstance(recovered, dict) and recovered.get("action") == "answer":
@@ -510,13 +517,19 @@ def run_agent_conversation_turn(
                     )
                     policy_blocked = True
                 if not policy_blocked and tool == "fetch_page":
-                    fetch_pages_executed += 1
-                    if web_required and fetch_pages_executed > fetch_limit:
+                    u_list = turn_support.normalize_fetch_urls(
+                        params if isinstance(params, dict) else {},
+                        scalar_to_str_fn=deps.scalar_to_str,
+                    )
+                    n_fetch = len(u_list) if u_list else 1
+                    if web_required and fetch_pages_executed + n_fetch > fetch_limit:
                         result = (
-                            f"Tool error: web verification budget exceeded ({fetch_limit} fetch_page calls). "
+                            f"Tool error: web verification budget exceeded ({fetch_limit} fetch_page URL fetches). "
                             "Stop and explain the verification failure."
                         )
                         policy_blocked = True
+                    else:
+                        fetch_pages_executed += n_fetch
                 if policy_blocked:
                     pass
                 elif tool in known and tool not in et:
@@ -532,7 +545,7 @@ def run_agent_conversation_turn(
                         elif tool == "search_web_fetch_top":
                             result = deps.search_web_fetch_top(params.get("query"), params=params)
                         elif tool == "fetch_page":
-                            result = deps.fetch_page(params.get("url"))
+                            result = deps.fetch_page(params)
                         elif tool == "run_command":
                             cmd = deps.scalar_to_str(params.get("command"), "")
                             if web_required and re.search(r"\b(curl|wget)\b", cmd):
@@ -633,7 +646,7 @@ def run_agent_conversation_turn(
                         elif tool == "search_web_fetch_top":
                             result = deps.search_web_fetch_top(params.get("query"), params=params)
                         elif tool == "fetch_page":
-                            result = deps.fetch_page(params.get("url"))
+                            result = deps.fetch_page(params)
                         note = "[After one user-confirmed corrected retry]\n"
                         if isinstance(result, str) and not result.startswith(
                             "[After one user-confirmed corrected retry]"

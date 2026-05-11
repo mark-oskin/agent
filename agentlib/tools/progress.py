@@ -25,6 +25,9 @@ def tool_progress_message(tool: str, params: dict, *, search_backend_banner: str
         n = p.get("fetch_top_n") if p.get("fetch_top_n") is not None else 10
         return f"Tool: search_web_fetch_top {banner_bit}query={_clip(p.get('query'))!r} fetch_top_n={_clip(n)!r}"
     if t == "fetch_page":
+        ulist = p.get("urls")
+        if isinstance(ulist, list) and ulist:
+            return f"Tool: fetch_page urls={_clip(ulist)!r}"
         return f"Tool: fetch_page url={_clip(p.get('url'))!r}"
     if t == "read_file":
         return f"Tool: read_file path={_clip(p.get('path'))!r}"

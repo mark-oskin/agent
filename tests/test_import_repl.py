@@ -5,6 +5,24 @@ import os
 from agentlib.embedding import build_embedded_session
 
 
+def test_non_import_line_with_bad_quoting_is_not_shlex_split(monkeypatch, capsys):
+    """Long prompts with unbalanced ``"`` must not hit ``shlex`` or masquerade as ``/import`` errors."""
+    calls: list[str] = []
+
+    def stub(user_query: str):
+        calls.append(user_query)
+        return True, "stubbed"
+
+    _, sess = build_embedded_session(verbose=0)
+    monkeypatch.setattr(sess, "_execute_user_request", stub)
+
+    bad = 'Summarize this text: He said "hello'
+    r = sess.execute_line(bad)
+    assert r["type"] == "turn"
+    assert calls == [bad]
+    assert "/import:" not in capsys.readouterr().out
+
+
 def test_import_usage(capsys):
     _, sess = build_embedded_session(verbose=0)
     r = sess.execute_line("/import")

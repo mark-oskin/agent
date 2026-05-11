@@ -7,6 +7,22 @@ import re
 from dataclasses import dataclass
 from typing import AbstractSet, Callable, FrozenSet, Optional
 
+_PARSE_RECOVERY_NOTE: Optional[str] = None
+
+
+def consume_last_json_parse_note() -> Optional[str]:
+    """Return and clear the last JSON parse recovery/diagnostic message, if any."""
+    global _PARSE_RECOVERY_NOTE
+    n = _PARSE_RECOVERY_NOTE
+    _PARSE_RECOVERY_NOTE = None
+    return n
+
+
+def _record_parse_recovery(note: str) -> None:
+    global _PARSE_RECOVERY_NOTE
+    _PARSE_RECOVERY_NOTE = note
+
+
 _AGENT_TOP_LEVEL_PARAM_KEYS = frozenset(
     {
         "query",
@@ -213,10 +229,13 @@ def fallback_extract_answer_field(raw: str) -> Optional[str]:
     return None
 
 
-def _extract_json_string_field(raw: str, field: str) -> Optional[str]:
+def _extract_json_string_field(
+    raw: str, field: str, *, allow_unterminated: bool = False
+) -> Optional[str]:
     """
     Scan for ``"field": "`` and read a JSON double-quoted string body with escape handling
-    (same rules as ``fallback_extract_answer_field``). Returns None if not found or unterminated.
+    (same rules as ``fallback_extract_answer_field``). Returns None if not found or unterminated,
+    unless ``allow_unterminated`` is True (then returns the partial string at EOF).
     """
     text = normalize_unicode_json_quotes(raw.strip())
     pat = re.compile(r'"' + re.escape(field) + r'"\s*:\s*"')
@@ -267,6 +286,8 @@ def _extract_json_string_field(raw: str, field: str) -> Optional[str]:
             return "".join(buf)
         buf.append(c)
         i += 1
+    if allow_unterminated and buf:
+        return "".join(buf)
     return None
 
 
@@ -284,7 +305,33 @@ def fallback_extract_run_applescript_field(raw: str) -> Optional[dict]:
     extracted = _extract_json_string_field(text, "script")
     if extracted is None or not extracted.strip():
         return None
+    _record_parse_recovery(
+        "Recovered run_applescript from malformed JSON (script extracted via string scanner)."
+    )
     return {"action": "tool_call", "tool": "run_applescript", "parameters": {"script": extracted}}
+
+
+def fallback_extract_write_file_field(raw: str) -> Optional[dict]:
+    """
+    When JSON is invalid or truncated mid-string, recover ``write_file`` by scanning for
+    ``path`` and ``content`` string fields (content may be unterminated at EOF).
+    """
+    text = normalize_unicode_json_quotes(raw.strip())
+    if not (
+        re.search(r'"action"\s*:\s*"write_file"', text)
+        or re.search(r'"tool"\s*:\s*"write_file"', text)
+    ):
+        return None
+    path = _extract_json_string_field(text, "path", allow_unterminated=False)
+    if path is None or not str(path).strip():
+        return None
+    content = _extract_json_string_field(text, "content", allow_unterminated=True)
+    if content is None:
+        return None
+    _record_parse_recovery(
+        "Recovered write_file from malformed or truncated JSON (file body may be incomplete if output was cut off)."
+    )
+    return {"action": "tool_call", "tool": "write_file", "parameters": {"path": path, "content": content}}
 
 
 def try_json_loads_object(s: str):
@@ -319,6 +366,10 @@ def try_json_loads_object(s: str):
                     return v
             except json.JSONDecodeError:
                 continue
+
+    wf = fallback_extract_write_file_field(s)
+    if wf is not None:
+        return wf
 
     extracted = fallback_extract_answer_field(normalize_unicode_json_quotes(s))
     if extracted is not None and extracted.strip():
@@ -652,6 +703,8 @@ def normalize_agent_dict(d: dict, deps: AgentJsonDeps) -> dict:
 
 def parse_agent_json(resp_text, deps: AgentJsonDeps) -> dict:
     """Parse model output into a dict. Handles markdown fences, partial JSON, and plain text."""
+    global _PARSE_RECOVERY_NOTE
+    _PARSE_RECOVERY_NOTE = None
     if resp_text is None or (isinstance(resp_text, str) and not resp_text.strip()):
         return {"action": "answer", "answer": "No response from model."}
     text = resp_text.strip().lstrip("\ufeff")
@@ -696,4 +749,8 @@ def parse_agent_json(resp_text, deps: AgentJsonDeps) -> dict:
         return normalize_agent_dict(fb_apple, deps)
 
     # Last resort: treat as a direct answer (general Q&A without valid JSON)
+    if text.strip().startswith("{"):
+        _record_parse_recovery(
+            "Could not parse model output as JSON; treating the response as a plain-text answer."
+        )
     return normalize_agent_dict({"action": "answer", "answer": text}, deps)

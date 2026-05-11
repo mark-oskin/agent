@@ -13,6 +13,7 @@ import sys
 from contextlib import redirect_stdout
 
 import pytest
+import requests
 
 from agentlib import agent_json
 from agentlib.agent_json import AgentJsonDeps
@@ -21,6 +22,7 @@ from agentlib.tools import turn_support
 from agentlib.tools.registry import ToolRegistry
 from agentlib.tools.websearch import enrich_search_query_for_present_day, first_url_in_text
 from tests.harness import build_test_app, build_test_session, j, run_main, run_session_lines
+from agentlib.llm.profile import LlmProfile
 from agentlib.settings import AgentSettings
 
 WEB = "[Web results]\nLink: https://a.example/x\nTitle: t\nSnippet: s\n"
@@ -834,6 +836,47 @@ def test_interactive_show_models_lists_local_ollama_models(monkeypatch):
     out = buf.getvalue()
     assert "qwen3.6:latest" in out
     assert "laguna-xs.2:latest" in out
+
+
+def test_interactive_show_model_info_calls_ollama_api_show(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_post(url, json=None, timeout=None, **kwargs):  # noqa: ARG001
+        calls.append((url, dict(json or {})))
+
+        class R:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"modelfile": "FROM dummy", "license": "mit"}
+
+        return R()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    lines = ["/show model my-m:latest info", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        session.primary_profile = LlmProfile(backend="ollama")
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "/api/show" in calls[0][0]
+    assert calls[0][1].get("name") == "my-m:latest"
+    assert "modelfile" in out and "FROM dummy" in out
+
+
+def test_interactive_show_model_info_rejects_hosted_primary(monkeypatch):
+    lines = ["/show model x:latest info", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        session.primary_profile = LlmProfile(
+            backend="hosted", base_url="https://api.example/v1", model="gpt-4o-mini"
+        )
+        run_session_lines(session, lines)
+    out = buf.getvalue().lower()
+    assert "not ollama" in out or "local ollama" in out
 
 
 def test_interactive_source_reads_and_executes_lines(tmp_path, monkeypatch):

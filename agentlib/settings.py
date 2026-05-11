@@ -49,6 +49,8 @@ DEFAULT_SETTINGS: dict = {
         "max_agent_steps_web": 15,
         "max_tool_calls_web": 15,
         "max_fetch_page_web": 15,
+        # When True (default), PDF responses from fetch_page are converted to extracted text for the LLM.
+        "fetch_page_pdf_to_text": True,
     },
 }
 

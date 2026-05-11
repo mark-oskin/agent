@@ -69,7 +69,10 @@ CORE_TOOL_PROMPT_DOCS: dict[str, str] = {
         "search_web_fetch_top — parameters.query (non-empty string); optional parameters.max_results (1–30) and "
         "parameters.fetch_top_n (1–10, default 10). Returns web results plus fetched excerpts."
     ),
-    "fetch_page": "fetch_page — parameters.url (string, full http/https URL to fetch).",
+    "fetch_page": (
+        "fetch_page — parameters.url (string) and/or parameters.urls (array of http/https URLs); "
+        "multiple URLs return combined text (batch limit applies)."
+    ),
     "run_command": "run_command — parameters.command (string, shell command to run).",
     "use_git": (
         "use_git — parameters.op (string: status|log|diff|add|commit|push|pull|branch), "
@@ -275,7 +278,7 @@ def describe_tool_call_contract(tool_id: str) -> str:
     core = {
         "search_web": "parameters.query (string); optional max_results (1–30). Returns: formatted web results string.",
         "search_web_fetch_top": "parameters.query (string); optional max_results (1–30), fetch_top_n (1–10). Returns: web results plus fetched excerpts (string).",
-        "fetch_page": "parameters.url (http/https URL). Returns: fetched page text (string).",
+        "fetch_page": "parameters.url (http/https URL) and/or parameters.urls (array). Returns: fetched page text (PDFs as extracted text when enabled).",
         "run_command": "parameters.command (shell command). Returns: STDOUT/STDERR string.",
         "use_git": "parameters.op plus additional fields (status|log|diff|add|commit|push|pull|branch). Returns: git output string.",
         "write_file": "parameters.path, parameters.content. Returns: success/error string.",

@@ -257,6 +257,41 @@ def test_parse_run_applescript_fallback_when_outer_json_invalid():
     assert inner in out["parameters"].get("script", "")
 
 
+def test_parse_write_file_fallback_when_json_truncated_mid_content():
+    """Recover write_file when output ends inside the ``content`` string (truncated stream)."""
+    path = "/tmp/out_trunc.txt"
+    body = 'print("hello")\n# no closing quote or braces for json'
+    raw = (
+        '{"action":"write_file","parameters":{"path":"'
+        + path.replace("\\", "\\\\").replace('"', '\\"')
+        + '","content":"'
+        + body.replace("\\", "\\\\").replace('"', '\\"')
+    )
+    agent_json.consume_last_json_parse_note()
+    out = parse(raw)
+    assert out["action"] == "tool_call"
+    assert out["tool"] == "write_file"
+    assert out["parameters"]["path"] == path
+    assert out["parameters"]["content"] == body
+    note = agent_json.consume_last_json_parse_note()
+    assert note is not None and "write_file" in note.lower()
+
+
+def test_parse_plain_text_answer_does_not_set_recovery_note():
+    agent_json.consume_last_json_parse_note()
+    out = parse("Just say hello.")
+    assert out["action"] == "answer"
+    assert agent_json.consume_last_json_parse_note() is None
+
+
+def test_parse_unusable_json_sets_recovery_note():
+    agent_json.consume_last_json_parse_note()
+    out = parse("{ not valid json")
+    assert out["action"] == "answer"
+    note = agent_json.consume_last_json_parse_note()
+    assert note is not None and "plain-text" in note.lower()
+
+
 def test_parse_use_git_top_level_op_and_worktree():
     raw = json.dumps(
         {
@@ -973,6 +1008,7 @@ def test_fetch_page_prefix_contains_urls(monkeypatch):
         status_code = 200
         url = "https://example.com/there"
         text = "<html><body>Hi</body></html>"
+        content = b""
 
         def raise_for_status(self):
             return None
@@ -1003,6 +1039,7 @@ def test_fetch_page_prefers_readability_article_body(monkeypatch):
         status_code = 200
         url = "https://example.com/story"
         text = html
+        content = b""
 
         def raise_for_status(self):
             return None
@@ -1013,6 +1050,55 @@ def test_fetch_page_prefers_readability_article_body(monkeypatch):
     out = tool_builtins.fetch_page("https://example.com/story")
     assert "Unique body sentence for readability test." in out
     assert "Title: Article Title" in out
+
+
+def test_normalize_fetch_urls_order_and_dedupe():
+    from agentlib.tools.turn_support import normalize_fetch_urls
+
+    u = normalize_fetch_urls(
+        {"urls": ["https://a/x", "https://b"], "url": "https://c"},
+        scalar_to_str_fn=lambda x, d="": str(x or d),
+    )
+    assert u == ["https://a/x", "https://b", "https://c"]
+    u2 = normalize_fetch_urls(
+        {"urls": ["https://a/x"], "url": "https://a/x"},
+        scalar_to_str_fn=lambda x, d="": str(x or d),
+    )
+    assert u2 == ["https://a/x"]
+
+
+def test_fetch_page_rejects_too_many_urls():
+    from agentlib.tools import builtins as tool_builtins
+
+    urls = [f"https://example.com/{i}" for i in range(30)]
+    out = tool_builtins.fetch_page({"urls": urls})
+    assert "Fetch error:" in out
+    assert "25" in out
+
+
+def test_fetch_page_pdf_prefixed_extracted_text(monkeypatch):
+    import requests
+
+    class RespPdf:
+        status_code = 200
+        url = "https://example.com/doc.pdf"
+        text = ""
+        content = b"%PDF-1.4 fake"
+        headers = {"Content-Type": "application/pdf"}
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(requests, "get", lambda url, **kwargs: RespPdf())
+    monkeypatch.setattr(
+        "agentlib.tools.builtins._pdf_bytes_to_text",
+        lambda _data: "Hello from fake PDF",
+    )
+    from agentlib.tools import builtins as tool_builtins
+
+    out = tool_builtins.fetch_page("https://example.com/doc.pdf", settings=None)
+    assert "Content-Type: PDF (extracted text)" in out
+    assert "Hello from fake PDF" in out
 
 
 def test_user_wants_written_deliverable_true():

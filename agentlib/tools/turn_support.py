@@ -16,6 +16,42 @@ TOOL_RECOVERY_TOOLS = frozenset(
 )
 
 
+def normalize_fetch_urls(params: dict, *, scalar_to_str_fn=scalar_to_str, dedupe: bool = True) -> list[str]:
+    """
+    Ordered URL list from ``parameters.urls`` (list), then ``parameters.url`` (string or list).
+
+    Used by fetch_page budgeting and execution.
+    """
+    if not isinstance(params, dict):
+        return []
+    st = scalar_to_str_fn
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def push(u: str) -> None:
+        u = (u or "").strip()
+        if not u:
+            return
+        key = u.casefold()
+        if dedupe:
+            if key in seen:
+                return
+            seen.add(key)
+        out.append(u)
+
+    raw_urls = params.get("urls")
+    if isinstance(raw_urls, list):
+        for item in raw_urls:
+            push(st(item, ""))
+    uone = params.get("url")
+    if isinstance(uone, list):
+        for item in uone:
+            push(st(item, ""))
+    elif uone is not None:
+        push(st(uone, ""))
+    return out
+
+
 def merge_tool_param_aliases(tool: str, params: dict, *, scalar_to_str_fn=scalar_to_str) -> dict:
     """Map alternate parameter names models use into the keys our tools expect."""
     p = dict(params) if isinstance(params, dict) else {}
@@ -29,7 +65,9 @@ def merge_tool_param_aliases(tool: str, params: dict, *, scalar_to_str_fn=scalar
                     p.pop(alt, None)
                     break
     elif tool == "fetch_page":
-        if not st(p.get("url"), "").strip():
+        has_urls = isinstance(p.get("urls"), list) and len(p.get("urls") or []) > 0
+        has_single = bool(st(p.get("url"), "").strip())
+        if not has_urls and not has_single:
             for alt in ("href", "link", "uri"):
                 t = st(p.get(alt), "").strip()
                 if t:
@@ -437,8 +475,8 @@ def suggest_tool_recovery_params(
         "For call_python, parameters.code must be syntactically valid Python (string). "
         "For search_web and search_web_fetch_top, parameters.query must be a different, non-empty search string than before "
         "(e.g. shorter, alternate keywords, add a year, or a site/product name). "
-        "For fetch_page, parameters.url must be a different full http(s) URL (not the same as before): "
-        "e.g. official site, different path, or a URL from search results."
+        "For fetch_page, parameters.url or parameters.urls must differ (different http(s) URL(s)) from before: "
+        "e.g. official site, different path, or URLs from search results."
     )
     prompt = (
         "A tool run failed or returned no usable data inside an autonomous agent. Read the error, "

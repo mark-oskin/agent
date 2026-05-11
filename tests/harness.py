@@ -305,7 +305,22 @@ def run_main(
             lambda query, params=None, settings=None: stub_search_web_fetch_top(query),
         )
     if stub_fetch_page is not None:
-        monkeypatch.setattr(tool_builtins, "fetch_page", lambda url: stub_fetch_page(url))
+        from agentlib.coercion import scalar_to_str as _scalar_to_str
+        from agentlib.tools import turn_support as _turn_support
+
+        def _stub_fetch(url_or_params, settings=None):  # noqa: ARG001
+            if isinstance(url_or_params, dict):
+                urls = _turn_support.normalize_fetch_urls(
+                    url_or_params, scalar_to_str_fn=_scalar_to_str
+                )
+                if not urls:
+                    return stub_fetch_page("")
+                if len(urls) == 1:
+                    return stub_fetch_page(urls[0])
+                return "\n\n---\n\n".join(stub_fetch_page(u) for u in urls)
+            return stub_fetch_page(url_or_params or "")
+
+        monkeypatch.setattr(tool_builtins, "fetch_page", _stub_fetch)
     if stub_write_file is not None:
         monkeypatch.setattr(tool_builtins, "write_file", lambda path, content: stub_write_file(path, content))
     if stub_read_file is not None:

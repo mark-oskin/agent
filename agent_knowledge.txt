@@ -1,0 +1,169 @@
+# To use this file, write this into the agent discussion:
+#
+# The file "agent_knowledge.txt" contains concise instructions for writing Python that drives this agent from inside a session. Read it before proposing automation scripts.
+
+## Basics
+Load the "README.md" file and learn more about the agent.
+
+## Where driver scripts run
+
+Scripts that control the agent must run **inside** an interactive agent session via **`/call_python`** (path to a `.py` file or `-c` code). Only then are these names defined:
+
+| Name | Role |
+|------|------|
+| **`ai(line)`** | Same as the user typing `line` (normal prompt **or** a slash command like `/show models`). Returns a **dict** (see below). |
+| **`session`** | The live **`AgentSession`** — same object the REPL uses. |
+| **`print`** | Routed like REPL output (visible to the user / host). |
+
+Optional when the host wires them (e.g. multi-agent TUI): **`ai(line, agent_name)`**, **`send`**, **`fork_agent`**, **`list_agents`**, **`switch_agent`**, **`last_answer`**, **`last_question`**, **`session.host_ctl(...)`**. If missing, code must degrade gracefully.
+
+Do **not** assume driver scripts work when run as plain `python script.py` from the shell — **`ai` / `session` will not exist** unless you inject them yourself for tests.
+
+### Injected names — do not import them
+
+**`ai`**, **`session`**, and the optional hooks above are provided by the **`/call_python`** host into the execution globals. There is **no** PyPI package or local module named **`ai`** to **`from ai import ai`**. Do **not** add fake imports that sometimes “work” only because the host already injected **`ai`** after the import failed. In scripts meant for **`/call_python`**, call **`ai(...)`** and use **`session`** directly (after confirming **`/call_python`** is how the script is run).
+
+## `ai(...)` is not a substitute for user-supplied parameters
+
+When a **human** must choose a value (subject, path, mode, API key filename, etc.), obtain it via **`sys.argv`**, **environment variables**, or a **config file** under **`session.session_cwd`**. Do **not** use **`ai("Please tell me your …")`** or similar as a stand-in for asking the person: that sends a prompt to the **model**, which may invent, generalize, or answer meta-instructions—not reliably pass through the end user’s intent. The same rule applies to “ask the user” in comments: implement **`argv` / file / env**, not another **`ai()`** turn.
+
+## Script arguments (`sys.argv`)
+
+Use **`/call_python path/to/script.py ARG1 ARG2 ...`**. The script path is **`sys.argv[0]`**; remaining tokens are **`sys.argv[1:]`** (same contract as running Python from the shell). Prefer this for names, paths, or flags instead of interactive prompts.
+
+For the **main human-chosen input** (label, path, job name, etc.), read **`sys.argv`** first and **fail fast** with a **usage** message if missing—do not replace that with an **`ai()`** “interview.” Example:
+
+```python
+import sys
+
+def primary_arg() -> str:
+    s = " ".join(sys.argv[1:]).strip()
+    if not s:
+        print("Usage: /call_python my_driver.py <arguments...>")
+        raise SystemExit(1)
+    return s
+```
+
+## Avoid `input()` and naive stdin reads
+
+**`input()`** (and blocking reads from **`sys.stdin`**) are **unreliable** under `/call_python`: the host may not feed keystrokes to the process stdin (GUI/TUI), so you may see **`EOFError`**, empty reads, or a **hang**. Prefer **`sys.argv`**, **environment variables**, or a **small config file** next to the session cwd. Reading lines from a **file** (batch jobs) is fine; relying on **interactive stdin** inside the REPL is awkward—see **`foreach_line.py`** and prefer **`-f`** when piping input.
+
+## Web search and tools
+
+Natural-language text passed to **`ai("please search the web for …")`** is **ordinary chat** unless the model actually emits tool calls. It does **not** by itself guarantee **`search_web`**, **`fetch_page`**, or any tool runs. For grounded research, align prompts with how this agent requests tools (**JSON tool shapes**, README tool names) or use slash commands that perform search when appropriate.
+
+## Return value of `ai(...)`
+
+Inspect the dict:
+
+- **`type`** `"turn"` — LLM step finished. Final text often in **`answer`**. **`quit`** may be true after `/quit`.
+- **`type`** `"command"` — A slash command ran; human-readable text often in **`output`**.
+- **`type`** `"noop"` — Empty input.
+
+Use **`dict.get`** on **`answer`** / **`output`**; hosts may add fields—avoid assuming only one shape. If you must stringify, **`str(resp)`** is a last resort for debugging only.
+
+Example:
+
+```python
+r = ai("Summarize: hello world in one sentence.")
+if r.get("type") == "turn" and r.get("answer"):
+    print(r["answer"])
+```
+
+Slash command:
+
+```python
+r = ai("/show models")
+if r.get("type") == "command" and r.get("output"):
+    print(r["output"])
+```
+
+## `ai()` does not create files on disk by itself
+
+Instruction text in a prompt like “save the result to **`Data.txt`**” or “write the plan to a file” does **not** guarantee a file exists after **`ai(...)`** returns. A typical turn delivers **text** in **`answer`** (and tools may or may not have run in the **host**). The **driver** should not **`open("Data.txt")`** unless **this** script (or a confirmed tool run) **wrote** that path. To persist model output, **parse** **`answer`**, then **`open(path, "w", encoding="utf-8")`** (or line-split and write) from the **driver**; or take an input path from **`argv`** and read it. Treat “the model was told to save” as **not** the same as “the file is there.”
+
+## `answer` vs tools like **`write_file`** (avoid double-writes)
+
+On a **`type`** **`"turn"`**, the dict’s **`answer`** field is the model’s **final chat text** (explanation, markdown, sometimes a code fence). It is **not** a guaranteed copy of what was written to disk.
+
+If the model **did** emit a tool call (e.g. **`write_file`**), the **host** runs that tool and the **bytes on disk** are whatever **`write_file`** sent—often the **canonical** artifact. The **`answer`** may be a short confirmation, duplicate content, or **different** from the file (truncated, paraphrased, or wrapped in prose).
+
+**Anti-pattern:** Prompt: “save the code to **`slide_3.py`**” (model calls **`write_file`**) **and** driver: **`open("slide_3.py", "w").write(resp["answer"])`**. The second step **overwrites** the tool’s file with **`answer`**, which may strip fences, add chat, or corrupt the script.
+
+**Pick one persistence strategy per path:**
+
+1. **Driver-owned file:** Prompt asks for content **only in **`answer`** (or a fenced block)**; **do not** ask the model to **`write_file`** that same path. The driver **parses** **`answer`** and **`open(..., "w")`** once.
+
+2. **Tool-owned file:** Prompt asks the model to **`write_file`** that path. After **`ai(...)`**, **do not** **`open(same_path, "w").write(answer)`**. If the driver needs the body, **`open(same_path, "r", encoding="utf-8").read()`** after the turn (or use a **different** path for a driver-generated copy).
+
+Never assume “**`answer`** == file contents” when **`write_file`** may have run on the same path.
+
+## Paths and working directory
+
+Resolve files relative to the session’s cwd: **`session.session_cwd`** (user may **`/cd`** first). Example:
+
+```python
+import os
+root = session.session_cwd or os.getcwd()
+path = os.path.join(root, "items.txt")
+```
+
+## Simple examples
+
+**One prompt, print the model’s answer:**
+
+```python
+r = ai("Reply with the word ok only.")
+if r.get("type") == "turn":
+    print(r.get("answer", ""))
+```
+
+**Batch lines from a file (same idea as `foreach_line.py`):**
+
+```python
+import os
+p = os.path.join(session.session_cwd or ".", "lines.txt")
+with open(p, encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        r = ai(f"Translate to French: {line}")
+        if r.get("type") == "turn":
+            print(r.get("answer", ""))
+```
+
+**Clear history before each line (independent turns):**
+
+```python
+def clear():
+    session.messages.clear()
+    session.last_reuse_skill_id = None
+    session.repl_last_user_query = None
+    session.repl_last_assistant_answer = None
+
+# for each new prompt: clear(); then ai(...)
+```
+
+## Patterns
+
+**Batch lines (like `foreach_line.py`):** open a file (or stdin), for each non-empty line build a prompt, call **`ai(formatted_line)`**, print or forward results; optionally clear **`session.messages`** between iterations to mimic **`/clear`** if each line must be independent.
+
+**Long-running bridge (like `telegram_channel_ai.py`):** loop forever (or until interrupt): receive external events → build a string → **`session.execute_line(...)`** or **`ai(...)`** → optionally POST/copy results elsewhere. Use **`requests`** or stdlib only; document required **environment variables**. Block carefully: in TUI, one busy lane holds the turn until the loop exits.
+
+**Multi-step generators:** each **`ai(...)`** call costs time and tokens—write **checkpoints** (plan files, per-step artifacts) so a failed or interrupted run still leaves useful output on disk. Use **`session.session_cwd` (or `os.path.join(root, …)`)** for every path you create so outputs follow **`/cd`**.
+
+**Clearing `session.messages`:** Optional **`session.messages.clear()`** (and related fields) gives **independent** turns, but it **removes** prior dialogue. Do not clear at the start of a phase that still **depends** on context from the previous phase unless you **re-embed** that context in the next prompt (e.g. file contents, summary).
+
+**Merging model-generated code into one program:** Pasting many full scripts (each with its own imports, top-level statements, and **`if __name__ == "__main__"`**) into one file or inside one function **usually breaks** (indentation, duplicate symbols, wrong flow). Instead, fix a **small contract** and stick to it: e.g. every generated chunk defines **one** function with a **fixed name and signature** the driver calls in order, or each chunk is a **separate module** the driver **imports** (no string concatenation of whole files). The **driver** should own **one** top-level flow (create the shared object once, call the hooks, save). If you output a single merged file for the user to run later, that file should be **syntactically valid** and follow the same contract—**not** a stack of independent programs. A merged file that **only defines** helpers but whose **`__main__`** (or entry block) **never calls** them has **no effect**—the entry point must **invoke** each generated function (or equivalent) in order after building shared state.
+
+**Validating generated `.py` files (optional but helpful):** before treating a model-written file as done, **`compile(source, path, "exec")`** or **`ast.parse(source)`** in the driver catches many syntax errors early; keep the error message in **`print`** for the user.
+
+**Generated code safety:** Treat merged model output as **untrusted code**. Prefer writing a **file** and asking the user to run it in their environment; do **`not`** **`exec`** / **`eval`** that blob inside the driver unless the user explicitly accepts the risk.
+
+**Script entry:** files executed via **`/call_python path/to/script.py`** should end with a conventional main guard so they run when loaded, e.g.:
+
+```python
+if __name__ in ("__main__", "__call_python__"):
+    raise SystemExit(main())
+```

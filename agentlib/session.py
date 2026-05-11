@@ -11,6 +11,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import AbstractSet, Callable, Iterable, Optional
 
+import requests
+
 from agentlib.clipboard_io import ClipboardError, clipboard_read_text, clipboard_write_text
 from agentlib.coercion import coerce_verbose_level
 from agentlib.sink import emit_sink_scope, sink_emit, sink_print_compat
@@ -20,6 +22,7 @@ from agentlib.tools.turn_support import resolve_path_under_session
 from agentlib import prompts as agent_prompts
 from agentlib.tui_parse import parse_send_command
 from agentlib.tools import builtins as tool_builtins
+from agentlib.llm.discovery import fetch_ollama_model_show
 from agentlib.llm.profile import preserved_request_options
 from agentlib.llm.request_options import (
     normalize_request_options_pref,
@@ -537,6 +540,13 @@ class AgentSession:
     def _instruction_for_import(self, s: str) -> object:
         """If line is `/import FILE`, return the synthetic user message; else ``None``. On parse/validation errors, return ``_IMPORT_INSTRUCTION_ERROR`` after printing."""
         st = (s or "").strip()
+        # Only shell-split strings that are actually `/import` commands. Running
+        # ``shlex.split`` on arbitrary long prompts (e.g. from ``ai(...)``) breaks on
+        # unbalanced quotes and was mis-reported as ``/import: No closing quotation``.
+        parts = st.split(None, 1)
+        first = parts[0].lower() if parts else ""
+        if first != "/import":
+            return None
         try:
             toks = shlex.split(st)
         except ValueError as e:
@@ -1582,14 +1592,41 @@ class AgentSession:
         if len(toks) < 2 or toks[1].lower() in ("help", "-h", "--help"):
             sink_print_compat(
                 "Usage:\n"
-                "  /show model      Primary LLM in use (Ollama or hosted)\n"
-                "  /show models     Local Ollama models available on this machine\n"
-                "  /show reviewer   Second-opinion reviewer model\n"
+                "  /show model                 Primary LLM in use (Ollama or hosted)\n"
+                "  /show model <name> info     Ollama model details (POST /api/show; local Ollama only)\n"
+                "  /show models                Local Ollama models available on this machine\n"
+                "  /show reviewer              Second-opinion reviewer model\n"
                 "\n"
                 "Settings that already have a show line: /set tools, /set context show, "
                 "/set thinking show, /set system_prompt show, /set prompt_template show, "
                 "/set ollama|openai|agent show"
             )
+            return SessionLineResult()
+        if (
+            len(toks) >= 4
+            and toks[1].lower() == "model"
+            and toks[-1].lower() == "info"
+        ):
+            model_name = " ".join(toks[2:-1]).strip()
+            if not model_name:
+                sink_print_compat("Usage: /show model <model-name> info")
+                return SessionLineResult()
+            if getattr(self.primary_profile, "backend", "") != "ollama":
+                sink_print_compat(
+                    "/show model <name> info only works with local Ollama "
+                    "(primary LLM is not ollama; use /set primary llm ollama …)."
+                )
+                return SessionLineResult()
+            base = (self.settings.get_str(("ollama", "host"), "") or "").strip().rstrip("/")
+            if not base:
+                base = "http://localhost:11434"
+            try:
+                data = fetch_ollama_model_show(
+                    base, model_name, http_post=requests.post, timeout=60
+                )
+                sink_print_compat(json.dumps(data, ensure_ascii=False, indent=2))
+            except Exception as e:
+                sink_print_compat(f"/show model … info error: {e}")
             return SessionLineResult()
         sub = toks[1].lower().replace("-", "_")
         if sub in ("models", "local_models"):
@@ -1608,7 +1645,9 @@ class AgentSession:
                 + self._format_session_reviewer_line(self.reviewer_hosted_profile, self.reviewer_ollama_model)
             )
             return SessionLineResult()
-        sink_print_compat("Unknown /show topic. Try: /show model, /show models, or /show reviewer")
+        sink_print_compat(
+            "Unknown /show topic. Try: /show model, /show model <name> info, /show models, or /show reviewer"
+        )
         return SessionLineResult()
 
     def _cmd_while(self, s: str) -> SessionLineResult:

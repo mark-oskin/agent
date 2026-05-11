@@ -4,6 +4,8 @@ This project is intentionally a **single-file CLI agent** (`agent.py`) plus data
 
 If you change behavior, update **both** `README.md` and this file.
 
+**`agent_knowledge.txt`** (repository root) is a short, human/LLM-facing note on writing Python that runs **inside** `/call_python` and uses injected **`ai` / `session`** (same idea as `foreach_line.py`, `telegram_channel_ai.py`). It is listed in **`MANIFEST.in`** so source distributions include it. Update it when `/call_python` globals or return shapes change.
+
 ## Architecture overview
 
 At a high level the agent runs a loop:

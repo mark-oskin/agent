@@ -1,3 +1,4 @@
 # Keep sdists lean (wheel already excludes these via package discovery).
+include agent_knowledge.txt
 recursive-exclude tests *
 recursive-exclude subtest *

@@ -7,11 +7,16 @@ import os
 import re
 import subprocess
 import time
-from typing import Optional
+import io
+from typing import Any, Optional, Union
 
 import requests
 
+from agentlib.tools.turn_support import normalize_fetch_urls
 from agentlib.tools.websearch import readability_excerpt_from_html
+
+FETCH_PAGE_MAX_URLS_PER_CALL = 25
+FETCH_PAGE_BODY_TEXT_MAX = 8000
 
 
 def _scalar_to_str(x, default: str) -> str:
@@ -182,7 +187,47 @@ def run_command(command, cwd: Optional[str] = None):
         return f"Command error: {e}"
 
 
-def fetch_page(url):
+def _settings_get_bool(settings: Any, group: str, key: str, default: bool) -> bool:
+    if settings is None:
+        return default
+    try:
+        return bool(settings.get_bool((group, key), default=default))  # type: ignore[attr-defined]
+    except Exception:
+        return default
+
+
+def _response_looks_like_pdf(resp: requests.Response, body: bytes) -> bool:
+    ct = ""
+    try:
+        hdr = getattr(resp, "headers", None)
+        if hdr is not None:
+            ct = (hdr.get("Content-Type") or "").lower()
+    except Exception:
+        ct = ""
+    if "application/pdf" in ct:
+        return True
+    sample = body[:8]
+    return sample.startswith(b"%PDF")
+
+
+def _pdf_bytes_to_text(data: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return "(PDF text extraction unavailable: pypdf is not installed.)"
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        parts: list[str] = []
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                parts.append(t)
+        return "\n\n".join(parts).strip()
+    except Exception as e:
+        return f"(Could not parse PDF: {e})"
+
+
+def _fetch_single_page(url: str, *, settings: Any = None) -> str:
     url = _scalar_to_str(url, "").strip()
     if not url:
         return "Fetch error: empty url string."
@@ -220,12 +265,31 @@ def fetch_page(url):
                 "Do not use run_command with curl."
             )
         final_url = resp.url
-        raw_html = resp.text or ""
+        raw_bytes = getattr(resp, "content", b"") or b""
         prefix = f"Fetched URL: {url}\nFinal URL: {final_url}\n\n"
         if attempt == 1:
             prefix = "[After automatic retry] " + prefix
+
+        if _response_looks_like_pdf(resp, raw_bytes):
+            if _settings_get_bool(settings, "agent", "fetch_page_pdf_to_text", True):
+                pdf_text = _pdf_bytes_to_text(raw_bytes)
+                if not pdf_text.strip():
+                    pdf_text = (
+                        "(No extractable text from this PDF; it may be image-only or encrypted.)"
+                    )
+                else:
+                    if len(pdf_text) > FETCH_PAGE_BODY_TEXT_MAX:
+                        pdf_text = pdf_text[:FETCH_PAGE_BODY_TEXT_MAX].rstrip() + "\n\n[Text truncated…]"
+                return prefix + "Content-Type: PDF (extracted text)\n\n" + pdf_text
+            return (
+                prefix
+                + "Content-Type: PDF (binary). Text extraction is disabled "
+                "(agent.fetch_page_pdf_to_text=false). Enable it to receive extracted text.\n"
+            )
+
+        raw_html = resp.text or ""
         title, excerpt = readability_excerpt_from_html(
-            raw_html, url=final_url, max_chars=8000
+            raw_html, url=final_url, max_chars=FETCH_PAGE_BODY_TEXT_MAX
         )
         excerpt = (excerpt or "").strip()
         if excerpt:
@@ -240,6 +304,46 @@ def fetch_page(url):
     if last_exc is not None:
         return f"Fetch error: {last_exc}"
     return f"Fetch error: could not retrieve {url!r} after retry."
+
+
+def fetch_page(url_or_params: Union[str, dict, None] = None, *, settings: Any = None) -> str:
+    """
+    Fetch one or more http(s) URLs.
+
+    - Pass a string URL (single fetch; used by search_web helpers).
+    - Pass a parameters dict with ``url`` and/or ``urls`` (non-empty strings).
+    """
+    urls: list[str]
+    if isinstance(url_or_params, str):
+        u = url_or_params.strip()
+        urls = [u] if u else []
+    elif isinstance(url_or_params, dict):
+        urls = normalize_fetch_urls(url_or_params, scalar_to_str_fn=_scalar_to_str)
+    elif url_or_params is None:
+        urls = []
+    else:
+        urls = []
+
+    if not urls:
+        return (
+            "Fetch error: no URL given. "
+            "Provide parameters.url (string) or parameters.urls (non-empty array of http/https URLs)."
+        )
+    if len(urls) > FETCH_PAGE_MAX_URLS_PER_CALL:
+        return (
+            f"Fetch error: at most {FETCH_PAGE_MAX_URLS_PER_CALL} URLs per fetch_page call "
+            f"(got {len(urls)}). Split into multiple tool calls."
+        )
+
+    parts_out: list[str] = []
+    for i, u in enumerate(urls, start=1):
+        block = _fetch_single_page(u, settings=settings)
+        if len(urls) > 1:
+            header = f"=== Page {i}/{len(urls)} ===\n"
+            parts_out.append(header + block)
+        else:
+            parts_out.append(block)
+    return "\n\n---\n\n".join(parts_out)
 
 
 def use_git(params) -> str:
@@ -350,21 +454,27 @@ def use_git(params) -> str:
 def search_web(query, params: Optional[dict] = None, *, settings=None) -> str:
     from . import websearch
 
+    def _fp(u: str) -> str:
+        return fetch_page(u, settings=settings)
+
     return websearch.search_web(
         str(query or ""),
         params=params,
         settings=settings,
-        fetch_page=fetch_page,
+        fetch_page=_fp,
     )
 
 
 def search_web_fetch_top(query, params: Optional[dict] = None, *, settings=None) -> str:
     from . import websearch
 
+    def _fp(u: str) -> str:
+        return fetch_page(u, settings=settings)
+
     return websearch.search_web_fetch_top(
         str(query or ""),
         params=params,
         settings=settings,
-        fetch_page=fetch_page,
+        fetch_page=_fp,
     )
 
