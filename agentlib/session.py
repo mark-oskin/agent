@@ -991,7 +991,7 @@ class AgentSession:
                 "  /cd DIR\n"
                 "  /source FILE\n"
                 "  /import FILE\n"
-                "  /context load|save FILE   (aliases: /load_context, /save_context)\n"
+                "  /context load|save|start_log FILE   (aliases: /load_context, /save_context)\n"
                 "  /call_python …\n"
                 "  /run_command …\n"
                 "  ! CMD\n"
@@ -1137,15 +1137,17 @@ class AgentSession:
             sink_print_compat(f"/context: {e}")
             return SessionLineResult()
         if len(parts) < 3:
-            sink_print_compat("/context load|save FILE")
+            sink_print_compat("/context load|save|start_log FILE")
             return SessionLineResult()
         sub = parts[1].lower()
         path = " ".join(parts[2:]) if len(parts) > 3 else parts[2]
         if sub == "load":
             return self._context_load_path(path)
         if sub == "save":
-            return self._context_save_path(path)
-        sink_print_compat("/context load|save FILE")
+            return self._context_snapshot_save_path(path)
+        if sub == "start_log":
+            return self._context_start_log_path(path)
+        sink_print_compat("/context load|save|start_log FILE")
         return SessionLineResult()
 
     def _cmd_primary_request_options(self, toks: list[str]) -> SessionLineResult:
@@ -1885,7 +1887,8 @@ class AgentSession:
         sink_print_compat(f"Loaded {len(loaded)} message(s) from {path!r}.")
         return SessionLineResult()
 
-    def _context_save_path(self, path: str) -> SessionLineResult:
+    def _context_snapshot_save_path(self, path: str) -> SessionLineResult:
+        """Write the current transcript once; does not enable per-turn auto-save."""
         path = os.path.expanduser((path or "").strip())
         if not path:
             sink_print_compat("/context save FILE (alias: /save_context FILE)")
@@ -1894,6 +1897,20 @@ class AgentSession:
             self._save_context_bundle(path, self.messages, "", None, False)
         except OSError as e:
             sink_print_compat(f"Context save error: {e}")
+            return SessionLineResult()
+        sink_print_compat(f"Wrote context snapshot to {path!r}.")
+        return SessionLineResult()
+
+    def _context_start_log_path(self, path: str) -> SessionLineResult:
+        """Write the current transcript and append to this file after each normal REPL turn."""
+        path = os.path.expanduser((path or "").strip())
+        if not path:
+            sink_print_compat("/context start_log FILE")
+            return SessionLineResult()
+        try:
+            self._save_context_bundle(path, self.messages, "", None, False)
+        except OSError as e:
+            sink_print_compat(f"Context start_log error: {e}")
             return SessionLineResult()
         self.session_save_path = path
         sink_print_compat(f"Wrote session to {path!r}; further turns auto-save there.")
@@ -1913,13 +1930,13 @@ class AgentSession:
     def _cmd_save_context(self, s: str) -> SessionLineResult:
         rest = s.split(None, 1)
         if len(rest) < 2:
-            sink_print_compat("/context save FILE (alias: /save_context FILE)")
+            sink_print_compat("/save_context FILE  (one snapshot; use /context start_log for auto-save)")
             return SessionLineResult()
         path = rest[1].strip()
         if not path:
-            sink_print_compat("/context save FILE (alias: /save_context FILE)")
+            sink_print_compat("/save_context FILE  (one snapshot; use /context start_log for auto-save)")
             return SessionLineResult()
-        return self._context_save_path(path)
+        return self._context_snapshot_save_path(path)
 
     def _cmd_settings(self, s: str) -> SessionLineResult:
         try:

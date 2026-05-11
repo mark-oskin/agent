@@ -13,7 +13,7 @@ def fork_embedded_session(parent_session: "AgentSession", *, app):
     ``AgentSession`` that shares ``app`` (registry, prefs-backed wiring).
 
     The child's ``session_save_path`` is cleared so forks do not overwrite the parent's
-    context save file.
+    context auto-save file (``/context start_log``).
     """
     _, session = build_embedded_session(
         verbose=int(parent_session.verbose),

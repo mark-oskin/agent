@@ -195,10 +195,28 @@ def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
     assert "second_opinion enabled" in out
     assert "second_opinion disabled" in out
     assert "Loaded 1 message" in out
-    assert "Wrote session" in out and "auto-save" in out
+    assert "Wrote context snapshot" in out
+    assert "auto-save" not in out
     data = json.loads(out_file.read_text(encoding="utf-8"))
     assert data["version"] == 1
     assert isinstance(data["messages"], list)
+
+
+def test_context_save_vs_start_log_repl_messages(tmp_path, monkeypatch):
+    snap = tmp_path / "snap.json"
+    log = tmp_path / "log.json"
+    lines = [
+        f"/context save {snap}",
+        f"/context start_log {log}",
+        "/quit",
+    ]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "Wrote context snapshot" in out
+    assert "Wrote session" in out and "auto-save" in out
 
 
 def test_interactive_settings_verbose_toggle(monkeypatch):
