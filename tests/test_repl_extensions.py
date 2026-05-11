@@ -52,3 +52,21 @@ def test_repl_unload_when_empty(monkeypatch):
         _app, session = build_test_session(monkeypatch, verbose=0)
         run_session_lines(session, lines)
     assert "No REPL extensions loaded" in buf.getvalue()
+
+
+def test_repl_extension_register_help_shown_in_slash_help(monkeypatch):
+    simple = FIXTURES / "repl_ext_simple.py"
+    lines = [
+        f"/load {simple}",
+        "/help",
+        "/unload",
+        "/help",
+        "/quit",
+    ]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "Loaded extensions (/load):" in out
+    assert "/ext_ok" in out

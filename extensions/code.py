@@ -10,26 +10,62 @@ Lane labels (case-insensitive): designer, coder, reviewer, tester — created vi
 
 Boot and per-step prompts include workspace (``session_cwd``), scope/rubric guidance, and a shared
 ``---PIPELINE---`` verdict block; ``SUMMARY`` may span multiple lines (newlines preserved when parsed).
+
+Pipeline loop limits default from ``agentlib.settings.DEFAULT_SETTINGS["extensions"]["code_pipeline"]``;
+override at runtime with ``/set extensions code_pipeline set code_test_max 8`` (then ``/set save``).
 """
 
 from __future__ import annotations
 
 import re
 import threading
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 from agentlib.repl_extensions import ReplExtensionRegistry
-from agentlib.tui_parse import format_fork_command_line
 from agentlib.session import SessionLineResult
+from agentlib.settings import DEFAULT_SETTINGS
 from agentlib.sink import sink_print_compat
+from agentlib.tui_parse import format_fork_command_line
 
-# --- Tunables -----------------------------------------------------------------
+# Prefs id under ``settings.extensions`` (see ``/set extensions``).
+EXTENSION_SETTINGS_ID = "code_pipeline"
 
-DESIGN_REVIEW_MAX = 5
-CODE_TEST_MAX = 5
-INNER_ROUND_MAX = 3
-PARSE_FAIL_MAX = 10
-USER_ASK_MAX_LEN = 8000
+
+class _PipelineLimits(NamedTuple):
+    design_review_max: int
+    code_test_max: int
+    inner_round_max: int
+    parse_fail_max: int
+    user_ask_max_len: int
+
+
+def _pipeline_limits(session) -> _PipelineLimits:
+    root = (DEFAULT_SETTINGS.get("extensions") or {}).get(EXTENSION_SETTINGS_ID) or {}
+    st = getattr(session, "settings", None)
+    sub: dict = {}
+    if st is not None:
+        raw = st.get(("extensions", EXTENSION_SETTINGS_ID))
+        if isinstance(raw, dict):
+            sub = raw
+
+    def _int(key: str, fallback: int, *, minimum: int = 1) -> int:
+        v = sub.get(key, root.get(key, fallback))
+        try:
+            n = int(str(v).strip(), 10)
+        except Exception:
+            try:
+                n = int(root.get(key, fallback), 10)
+            except Exception:
+                n = int(fallback)
+        return max(minimum, n)
+
+    return _PipelineLimits(
+        design_review_max=_int("design_review_max", 5),
+        code_test_max=_int("code_test_max", 5),
+        inner_round_max=_int("inner_round_max", 3),
+        parse_fail_max=_int("parse_fail_max", 10),
+        user_ask_max_len=_int("user_ask_max_len", 8000, minimum=256),
+    )
 
 # --- Verdict block ------------------------------------------------------------
 
@@ -114,11 +150,12 @@ def _parse_or_retry(
     *,
     parse_fails: list,
     stage: str,
+    lim: _PipelineLimits,
 ) -> Tuple[bool, str]:
-    """Run up to INNER_ROUND_MAX delegate rounds until a verdict parses."""
+    """Run up to ``lim.inner_round_max`` delegate rounds until a verdict parses."""
     last_text = ""
-    for i in range(INNER_ROUND_MAX):
-        attempt = f"{i + 1}/{INNER_ROUND_MAX}" if INNER_ROUND_MAX > 1 else "1/1"
+    for i in range(lim.inner_round_max):
+        attempt = f"{i + 1}/{lim.inner_round_max}" if lim.inner_round_max > 1 else "1/1"
         _msg(f"→ {role}: {stage} (delegate {attempt}; parse issues so far: {parse_fails[0]}) …")
         last_text = _delegate(session, role, build_prompt(last_text))
         parsed = parse_pipeline_verdict(last_text)
@@ -130,10 +167,10 @@ def _parse_or_retry(
             return parsed
         parse_fails[0] += 1
         _msg(
-            f"← {role}: no valid ---PIPELINE--- block (parse issues: {parse_fails[0]}/{PARSE_FAIL_MAX}); "
+            f"← {role}: no valid ---PIPELINE--- block (parse issues: {parse_fails[0]}/{lim.parse_fail_max}); "
             f"will retry if attempts remain."
         )
-        if parse_fails[0] >= PARSE_FAIL_MAX:
+        if parse_fails[0] >= lim.parse_fail_max:
             break
     return False, (last_text or "")[:2000]
 
@@ -239,11 +276,13 @@ def _run_pipeline(session, user_ask: str) -> str:
     if session.python_delegate_line is None:
         return "[code] python_delegate_line is not set. Run under agent_tui.py."
 
+    lim = _pipeline_limits(session)
+
     ask = " ".join(user_ask.split()).strip()
     if not ask:
         return "[code] Usage: /code <description of the feature or change>"
-    if len(ask) > USER_ASK_MAX_LEN:
-        ask = ask[:USER_ASK_MAX_LEN] + "\n…(truncated)"
+    if len(ask) > lim.user_ask_max_len:
+        ask = ask[: lim.user_ask_max_len] + "\n…(truncated)"
 
     parse_fails = [0]
     design_review_cycles = 0
@@ -257,8 +296,8 @@ def _run_pipeline(session, user_ask: str) -> str:
 
     _msg(
         "Starting pipeline (blocking: each line waits for that lane to finish). "
-        f"Flow: designer plan → coder ↔ reviewer⇄designer (max {DESIGN_REVIEW_MAX} review rounds) → tester; "
-        f"tester FAIL re-enters coder (max {CODE_TEST_MAX} test cycles)."
+        f"Flow: designer plan → coder ↔ reviewer⇄designer (max {lim.design_review_max} review rounds) → tester; "
+        f"tester FAIL re-enters coder (max {lim.code_test_max} test cycles)."
     )
 
     def designer_prompt_initial(_: str) -> str:
@@ -276,20 +315,21 @@ def _run_pipeline(session, user_ask: str) -> str:
         designer_prompt_initial,
         parse_fails=parse_fails,
         stage="initial plan from user request",
+        lim=lim,
     )
     if not ok:
         return f"[code] designer could not produce a passing plan (or parse failed). Last excerpt:\n{designer_summary[:1500]}"
 
     _msg("Initial designer plan accepted (VERDICT: PASS). Entering implement/review loop.")
 
-    while code_test_cycles < CODE_TEST_MAX:
+    while code_test_cycles < lim.code_test_max:
         reviewer_pass = False
         _msg(
-            f"— Test cycle {code_test_cycles + 1}/{CODE_TEST_MAX} "
+            f"— Test cycle {code_test_cycles + 1}/{lim.code_test_max} "
             f"(tester failures so far: {code_test_cycles}; design/review rounds used: {design_review_cycles})."
         )
 
-        while design_review_cycles < DESIGN_REVIEW_MAX:
+        while design_review_cycles < lim.design_review_max:
 
             def coder_prompt(_: str) -> str:
                 chunks = [
@@ -315,7 +355,7 @@ def _run_pipeline(session, user_ask: str) -> str:
             if tester_feedback.strip():
                 c_stage += " (incorporating tester feedback)"
             ok_c, coder_summary = _parse_or_retry(
-                session, "coder", coder_prompt, parse_fails=parse_fails, stage=c_stage
+                session, "coder", coder_prompt, parse_fails=parse_fails, stage=c_stage, lim=lim
             )
             if not ok_c:
                 return f"[code] coder blocked or failed verdict.\n{coder_summary[:1500]}"
@@ -335,7 +375,12 @@ def _run_pipeline(session, user_ask: str) -> str:
                 )
 
             ok_r, reviewer_summary = _parse_or_retry(
-                session, "reviewer", reviewer_prompt, parse_fails=parse_fails, stage="review implementation vs design"
+                session,
+                "reviewer",
+                reviewer_prompt,
+                parse_fails=parse_fails,
+                stage="review implementation vs design",
+                lim=lim,
             )
             if ok_r:
                 reviewer_pass = True
@@ -343,10 +388,12 @@ def _run_pipeline(session, user_ask: str) -> str:
                 break
 
             design_review_cycles += 1
-            _msg(f"Reviewer FAIL — asking designer to revise (review round {design_review_cycles}/{DESIGN_REVIEW_MAX}).")
-            if design_review_cycles >= DESIGN_REVIEW_MAX:
+            _msg(
+                f"Reviewer FAIL — asking designer to revise (review round {design_review_cycles}/{lim.design_review_max})."
+            )
+            if design_review_cycles >= lim.design_review_max:
                 return (
-                    f"[code] reviewer/design loop exceeded {DESIGN_REVIEW_MAX} cycles.\n"
+                    f"[code] reviewer/design loop exceeded {lim.design_review_max} cycles.\n"
                     f"Last review summary:\n{reviewer_summary[:1200]}"
                 )
 
@@ -368,6 +415,7 @@ def _run_pipeline(session, user_ask: str) -> str:
                 redesign_prompt,
                 parse_fails=parse_fails,
                 stage="revise plan after reviewer feedback",
+                lim=lim,
             )
             if not ok_d2:
                 return f"[code] designer could not recover after review FAIL.\n{designer_summary[:1500]}"
@@ -390,7 +438,12 @@ def _run_pipeline(session, user_ask: str) -> str:
             )
 
         ok_t, tester_summary = _parse_or_retry(
-            session, "tester", tester_prompt, parse_fails=parse_fails, stage="run tests / report"
+            session,
+            "tester",
+            tester_prompt,
+            parse_fails=parse_fails,
+            stage="run tests / report",
+            lim=lim,
         )
         if ok_t:
             design_snip = designer_summary if len(designer_summary) <= 500 else designer_summary[:500] + "…"
@@ -401,16 +454,18 @@ def _run_pipeline(session, user_ask: str) -> str:
             )
 
         code_test_cycles += 1
-        _msg(f"Tester FAIL — scheduling another coder pass (tester failures now: {code_test_cycles}/{CODE_TEST_MAX}).")
-        if code_test_cycles >= CODE_TEST_MAX:
+        _msg(
+            f"Tester FAIL — scheduling another coder pass (tester failures now: {code_test_cycles}/{lim.code_test_max})."
+        )
+        if code_test_cycles >= lim.code_test_max:
             return (
-                f"[code] test/code loop exceeded {CODE_TEST_MAX} cycles.\n"
+                f"[code] test/code loop exceeded {lim.code_test_max} cycles.\n"
                 f"Last tester output:\n{tester_summary[:1500]}"
             )
         tester_feedback = tester_summary
         design_review_cycles = 0
 
-    return f"[code] aborted after {CODE_TEST_MAX} test/code cycles (outer guard)."
+    return f"[code] aborted after {lim.code_test_max} test/code cycles (outer guard)."
 
 
 def _cmd_code(session, rest: str) -> SessionLineResult:
@@ -426,5 +481,9 @@ def _cmd_code(session, rest: str) -> SessionLineResult:
 
 
 def register_repl(session, registry: ReplExtensionRegistry):
+    registry.register_help(
+        "/code <description> — run the multi-lane pipeline (designer → coder ↔ reviewer → tester) "
+        "via /fork_background lanes. Limits: /set extensions code_pipeline show"
+    )
     registry.register_command("code", _cmd_code)
     return list(_POST_LOAD_LINES)

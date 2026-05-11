@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import sys
 import traceback
@@ -35,12 +36,15 @@ from .repl_extensions import MAX_REPL_POST_LOAD_DEPTH, ReplExtensionRegistry
 from .runtime import ConversationTurnDeps, run_agent_conversation_turn
 from .settings import AgentSettings
 
+_EXTENSION_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
 
 @dataclass(frozen=True)
 class _LoadedReplExtension:
     module_name: str
     path: str
     command_keys: tuple[str, ...]
+    help_chunks: tuple[str, ...] = ()
 
 # Sentinel: `_instruction_for_import` failed (usage printed); caller returns an empty command result.
 _IMPORT_INSTRUCTION_ERROR = object()
@@ -896,6 +900,23 @@ class AgentSession:
     def _repl_register_extension_command(self, key: str, handler: Callable[..., SessionLineResult]) -> None:
         self._repl_extension_commands[key.lower()] = handler
 
+    def _repl_extension_help_text(self) -> str:
+        """Extra ``/help`` lines from loaded REPL extensions (see :meth:`ReplExtensionRegistry.register_help`)."""
+        chunks: list[str] = []
+        for rec in self._repl_extensions_loaded:
+            for c in rec.help_chunks:
+                if isinstance(c, str) and c.strip():
+                    chunks.append(c.strip())
+        if not chunks:
+            return ""
+        lines = ["  Loaded extensions (/load):"]
+        for chunk in chunks:
+            for raw in chunk.splitlines():
+                ln = raw.strip()
+                if ln:
+                    lines.append("  " + ln)
+        return "\n".join(lines) + "\n"
+
     def _repl_unwind_extension_commands(self, keys: tuple[str, ...]) -> None:
         for k in keys:
             self._repl_extension_commands.pop(k, None)
@@ -959,7 +980,8 @@ class AgentSession:
             sink_print_compat(
                 "/load FILE.py\n\n"
                 "Load a Python file that defines ``register_repl(session, registry)``.\n"
-                "The registry can ``register_command('name', handler)`` for ``/name`` lines.\n"
+                "The registry can ``register_command('name', handler)`` for ``/name`` lines, and "
+                "``register_help('…')`` to append lines to ``/help``.\n"
                 "Return ``None``, a single str, or a list of str lines to run via ``execute_line`` after loading.\n"
                 "Use ``/unload`` to drop all loaded extensions."
             )
@@ -1012,7 +1034,10 @@ class AgentSession:
             sink_print_compat("/load: register_repl must return None, str, or list[str].")
             return SessionLineResult()
         keys = tuple(dict.fromkeys(reg.command_keys()))
-        self._repl_extensions_loaded.append(_LoadedReplExtension(module_name, str(path), keys))
+        help_chunks = reg.help_chunks()
+        self._repl_extensions_loaded.append(
+            _LoadedReplExtension(module_name, str(path), keys, help_chunks=help_chunks)
+        )
         sink_print_compat(f"/load: registered extension from {str(path)!r} ({len(keys)} command(s)).")
         if post_lines:
             self._repl_run_post_load_lines(post_lines)
@@ -1149,6 +1174,7 @@ class AgentSession:
                     "  /send NAME CMD…  ·  "
                     '/send NAME "cmd1,cmd2,…"\n'
                 )
+            ext_help = self._repl_extension_help_text()
             sink_print_compat(
                 "  /quit · /exit\n"
                 "  /clear\n"
@@ -1167,6 +1193,7 @@ class AgentSession:
                 + host_extras
                 + snap_extras
                 + delegate_extras
+                + ext_help
             )
             return SessionLineResult()
         ext_res = self._try_dispatch_repl_extension(s)
@@ -2108,6 +2135,71 @@ class AgentSession:
             return SessionLineResult()
         return self._context_snapshot_save_path(path)
 
+    def _cmd_set_extensions(self, toks: list) -> SessionLineResult:
+        """``/set extensions …`` — JSON-ish bag for REPL extensions (see ``DEFAULT_SETTINGS['extensions']``)."""
+        if len(toks) < 3:
+            sink_print_compat(
+                "Usage:\n"
+                "  /set extensions show\n"
+                "  /set extensions <id> show\n"
+                "  /set extensions <id> set <key> <value>\n"
+                "  /set extensions <id> unset <key>\n"
+                "Example: /set extensions code_pipeline set code_test_max 8\n"
+                "Shipped keys (code_pipeline): design_review_max, code_test_max, inner_round_max, "
+                "parse_fail_max, user_ask_max_len\n"
+                "Use /set save to persist."
+            )
+            return SessionLineResult()
+        a = toks[2].lower()
+        if a in ("help", "-h", "--help"):
+            sink_print_compat(
+                "Extension settings live under ~/.agent.json in an ``extensions`` object: each "
+                "``<id>`` maps to string/number/bool fields. The shipped ``extensions/code.py`` pipeline "
+                "reads ``code_pipeline``.\n"
+                "Commands: ``/set extensions show``, ``/set extensions code_pipeline show``, "
+                "``… set <key> <value>``, ``… unset <key>``."
+            )
+            return SessionLineResult()
+        if a in ("show", "list"):
+            sink_print_compat(self.settings.extensions_show_all())
+            return SessionLineResult()
+        ext_id = a
+        if not _EXTENSION_ID_RE.match(ext_id):
+            sink_print_compat(
+                f"/set extensions: invalid extension id {ext_id!r} "
+                "(start with a letter; then letters, digits, underscore; max 64 chars)."
+            )
+            return SessionLineResult()
+        if len(toks) < 4:
+            sink_print_compat("Usage: /set extensions <id> show | set <key> <value> | unset <key>")
+            return SessionLineResult()
+        op = toks[3].lower()
+        if op in ("show", "list"):
+            sink_print_compat(self.settings.extensions_show_id(ext_id))
+            return SessionLineResult()
+        if op == "set":
+            if len(toks) < 6:
+                sink_print_compat("Usage: /set extensions <id> set <key> <value>")
+                return SessionLineResult()
+            raw_key = toks[4]
+            val = " ".join(toks[5:])
+            try:
+                sink_print_compat(self.settings.extensions_set_kv(ext_id, raw_key, val))
+            except ValueError as e:
+                sink_print_compat(f"/set extensions: {e}")
+            return SessionLineResult()
+        if op in ("unset", "delete", "clear"):
+            if len(toks) < 5:
+                sink_print_compat("Usage: /set extensions <id> unset <key>")
+                return SessionLineResult()
+            try:
+                sink_print_compat(self.settings.extensions_unset_key(ext_id, toks[4]))
+            except ValueError as e:
+                sink_print_compat(f"/set extensions: {e}")
+            return SessionLineResult()
+        sink_print_compat("Unknown /set extensions subcommand. Try: show | set | unset")
+        return SessionLineResult()
+
     def _cmd_settings(self, s: str) -> SessionLineResult:
         try:
             toks = shlex.split(s)
@@ -2132,8 +2224,12 @@ class AgentSession:
                 "  /set ollama|openai|agent show|keys|set|unset\n"
                 "  /set primary llm ollama|hosted …\n"
                 "  /set primary request_options show|set|unset|merge|replace|clear\n"
+                "  /set extensions show | /set extensions <id> show | set | unset …\n"
             )
             return SessionLineResult()
+
+        if key == "extensions":
+            return self._cmd_set_extensions(toks)
 
         # group-backed settings
         if key in ("ollama", "openai", "agent"):

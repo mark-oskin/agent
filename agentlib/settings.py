@@ -52,6 +52,16 @@ DEFAULT_SETTINGS: dict = {
         # When True (default), PDF responses from fetch_page are converted to extracted text for the LLM.
         "fetch_page_pdf_to_text": True,
     },
+    # Third-party / REPL extension options: each key is an extension id (e.g. code_pipeline); value is a JSON object.
+    "extensions": {
+        "code_pipeline": {
+            "design_review_max": 5,
+            "code_test_max": 5,
+            "inner_round_max": 3,
+            "parse_fail_max": 10,
+            "user_ask_max_len": 8000,
+        },
+    },
 }
 
 
@@ -80,7 +90,7 @@ class AgentSettings:
     def as_groups_dict(self) -> dict:
         """Return a JSON-serializable dict containing only settings groups."""
         out: dict = {}
-        for grp in ("ollama", "openai", "agent"):
+        for grp in ("ollama", "openai", "agent", "extensions"):
             cur = self._data.get(grp)
             out[grp] = dict(cur) if isinstance(cur, dict) else {}
         return out
@@ -104,7 +114,144 @@ class AgentSettings:
                 delta[k] = v
             if delta:
                 out[grp] = delta
+        ext_out = self._extensions_delta_vs_defaults()
+        if ext_out:
+            out["extensions"] = ext_out
         return out
+
+    def _extensions_defaults_root(self) -> dict:
+        d = DEFAULT_SETTINGS.get("extensions")
+        return d if isinstance(d, dict) else {}
+
+    def _extensions_delta_vs_defaults(self) -> dict:
+        root_defs = self._extensions_defaults_root()
+        cur_root = self._data.get("extensions")
+        if not isinstance(cur_root, dict):
+            return {}
+        ext_out: dict = {}
+        for ext_id, cur_sub in cur_root.items():
+            if not isinstance(cur_sub, dict):
+                continue
+            def_sub = root_defs.get(ext_id)
+            if not isinstance(def_sub, dict):
+                def_sub = {}
+            sub_delta: dict = {}
+            for k, v in cur_sub.items():
+                if def_sub.get(k) != v:
+                    sub_delta[k] = v
+            if sub_delta:
+                ext_out[str(ext_id)] = sub_delta
+        return ext_out
+
+    def extensions_merge_from_prefs(self, blob: dict) -> None:
+        """Merge prefs ``extensions`` into ``_data`` (shallow per extension id)."""
+        if not isinstance(blob, dict):
+            return
+        root = self._data.get("extensions")
+        if not isinstance(root, dict):
+            root = {}
+        else:
+            root = json.loads(json.dumps(root))
+        defs_root = self._extensions_defaults_root()
+        for eid, def_sub in defs_root.items():
+            if eid not in root and isinstance(def_sub, dict):
+                root[eid] = dict(def_sub)
+        for eid, sub in blob.items():
+            if not isinstance(sub, dict):
+                continue
+            eid_s = str(eid).strip()
+            if not eid_s:
+                continue
+            base = root.get(eid_s)
+            if not isinstance(base, dict):
+                d0 = defs_root.get(eid_s)
+                base = dict(d0) if isinstance(d0, dict) else {}
+            else:
+                base = dict(base)
+            base.update(sub)
+            root[eid_s] = base
+        self._data["extensions"] = root
+
+    def extensions_show_all(self) -> str:
+        cur = self._data.get("extensions")
+        if not isinstance(cur, dict):
+            cur = {}
+        return json.dumps(cur, indent=2, ensure_ascii=False, sort_keys=True)
+
+    def extensions_show_id(self, ext_id: str) -> str:
+        cur = self._data.get("extensions")
+        if not isinstance(cur, dict):
+            cur = {}
+        sub = cur.get(ext_id)
+        if not isinstance(sub, dict):
+            sub = {}
+        return json.dumps(sub, indent=2, ensure_ascii=False, sort_keys=True)
+
+    def _coerce_extension_value(self, raw_value: str, ext_id: str, key: str) -> Any:
+        defs_sub = self._extensions_defaults_root().get(ext_id)
+        text = (raw_value or "").strip()
+        if isinstance(defs_sub, dict) and key in defs_sub:
+            dv = defs_sub[key]
+            if isinstance(dv, bool):
+                return text.lower() in ("1", "true", "yes", "y", "on")
+            if isinstance(dv, int) and not isinstance(dv, bool):
+                return int(float(text)) if text else 0
+            if isinstance(dv, float):
+                return float(text) if text else 0.0
+            return text
+        if text.lower() in ("1", "true", "yes", "y", "on"):
+            return True
+        if text.lower() in ("0", "false", "no", "n", "off"):
+            return False
+        try:
+            if text and all(c in "-0123456789" for c in text.lstrip("-")):
+                return int(text, 10)
+        except Exception:
+            pass
+        try:
+            return float(text)
+        except Exception:
+            return text
+
+    def extensions_set_kv(self, ext_id: str, raw_key: str, raw_value: str) -> str:
+        key = (raw_key or "").strip().lower().replace("-", "_")
+        if not key:
+            raise ValueError("empty key")
+        root = self._data.get("extensions")
+        if not isinstance(root, dict):
+            root = {}
+        sub = root.get(ext_id)
+        if not isinstance(sub, dict):
+            sub = {}
+        else:
+            sub = dict(sub)
+        sub[key] = self._coerce_extension_value(raw_value, ext_id, key)
+        root = dict(root)
+        root[ext_id] = sub
+        self._data["extensions"] = root
+        return f"extensions.{ext_id}.{key} set. Use /set save to persist."
+
+    def extensions_unset_key(self, ext_id: str, raw_key: str) -> str:
+        key = (raw_key or "").strip().lower().replace("-", "_")
+        if not key:
+            raise ValueError("empty key")
+        root = self._data.get("extensions")
+        if not isinstance(root, dict):
+            root = {}
+        sub = root.get(ext_id)
+        if not isinstance(sub, dict):
+            sub = {}
+        else:
+            sub = dict(sub)
+        defs_sub = self._extensions_defaults_root().get(ext_id)
+        if isinstance(defs_sub, dict) and key in defs_sub:
+            sub[key] = defs_sub[key]
+        else:
+            sub.pop(key, None)
+        root = dict(root)
+        root[ext_id] = sub
+        self._data["extensions"] = root
+        return f"extensions.{ext_id}.{key} reset. Use /set save to persist."
 
     def get(self, path: Tuple[str, str]) -> Any:
         grp, key = path
@@ -260,4 +407,8 @@ class AgentSettings:
             and prefs["ollama_second_opinion_model"].strip()
         ):
             self.set(("ollama", "second_opinion_model"), prefs["ollama_second_opinion_model"].strip())
+
+        ext_prefs = prefs.get("extensions")
+        if isinstance(ext_prefs, dict):
+            self.extensions_merge_from_prefs(ext_prefs)
 

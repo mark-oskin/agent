@@ -24,9 +24,24 @@ class ReplExtensionRegistry:
         self.session = session
         self.script_path = script_path
         self._keys: List[str] = []
+        self._help_chunks: List[str] = []
 
     def command_keys(self) -> tuple[str, ...]:
         return tuple(self._keys)
+
+    def help_chunks(self) -> tuple[str, ...]:
+        """Paragraphs passed to :meth:`register_help` for this load (shown after core ``/help``)."""
+        return tuple(self._help_chunks)
+
+    def register_help(self, text: str) -> None:
+        """
+        Append free-form help for this extension (shown after the built-in ``/help`` list).
+
+        Use plain lines without a leading indent; each ``register_help`` call is one block.
+        """
+        t = (text or "").strip()
+        if t:
+            self._help_chunks.append(t)
 
     def register_command(self, name: str, handler: Callable[..., Any]) -> None:
         """Register ``/foo`` (``name`` may be ``foo`` or ``/foo``). Handler receives ``(session, rest)``."""

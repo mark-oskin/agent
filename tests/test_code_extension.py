@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agentlib.settings import AgentSettings
 from agentlib.tui_parse import parse_fork_background_command
 
 _EXT = Path(__file__).resolve().parent.parent / "extensions" / "code.py"
@@ -65,6 +66,18 @@ def test_post_load_fork_lines_parse_as_single_command(code_ext):
         name, cmds = r
         assert name in ("designer", "coder", "reviewer", "tester")
         assert len(cmds) == 1, (name, len(cmds))
+
+
+def test_pipeline_limits_reads_extensions_prefs(code_ext):
+    class _S:
+        settings: AgentSettings
+
+    s = _S()
+    s.settings = AgentSettings.defaults()
+    s.settings.extensions_set_kv("code_pipeline", "code_test_max", "2")
+    lim = code_ext._pipeline_limits(s)
+    assert lim.code_test_max == 2
+    assert lim.design_review_max >= 1
 
 
 def test_parse_pipeline_verdict_preserves_multiline_summary(code_ext):
