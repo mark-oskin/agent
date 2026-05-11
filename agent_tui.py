@@ -47,7 +47,7 @@ mirror those behaviors for Telegram bridges and scripts.
 
 Run a shell command locally like the agent ``run_command`` tool: ``/run_command help`` or ``! ls``.
 
-Clipboard: ``/clipboard copy|copy all|paste`` (`paste` loads the clipboard into your prompt so you can edit before Enter). Session JSON: ``/context load|save|start_log FILE`` (``/save_context`` is a one-shot snapshot; ``start_log`` enables auto-save after each turn).
+Clipboard: ``/clipboard copy|copy all|paste`` (`paste` loads the clipboard into your prompt so you can edit before Enter). Session JSON: ``/context load|save|start_log FILE`` (``/save_context`` is a one-shot snapshot; ``start_log`` enables auto-save after each turn). Extensions: ``/load FILE.py`` (``register_repl``), ``/unload``, ``/extensions``.
 
 Prompt history is **per lane**: **↑** / **↓** when the cursor is on the **first / last** line recall prior messages (like the CLI);
 otherwise they move inside the editor. **Ctrl+↑** / **Ctrl+↓** always recall (even mid‑multiline). **Enter** sends the message (same idea as the single-line input).

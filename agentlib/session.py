@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import datetime
+import hashlib
+import importlib.util
 import json
 import os
 import shlex
@@ -29,8 +31,16 @@ from agentlib.llm.request_options import (
     parse_request_option_scalar_value,
 )
 
+from .repl_extensions import MAX_REPL_POST_LOAD_DEPTH, ReplExtensionRegistry
 from .runtime import ConversationTurnDeps, run_agent_conversation_turn
 from .settings import AgentSettings
+
+
+@dataclass(frozen=True)
+class _LoadedReplExtension:
+    module_name: str
+    path: str
+    command_keys: tuple[str, ...]
 
 # Sentinel: `_instruction_for_import` failed (usage printed); caller returns an empty command result.
 _IMPORT_INSTRUCTION_ERROR = object()
@@ -209,6 +219,10 @@ class AgentSession:
         self._call_while_condition_judge = call_while_condition_judge
         # Multi-line /call_python support (buffer until closing quote).
         self._call_python_pending: Optional[str] = None
+        # REPL extensions from ``/load`` (see ``agentlib.repl_extensions``).
+        self._repl_extension_commands: dict[str, Callable[..., SessionLineResult]] = {}
+        self._repl_extensions_loaded: list[_LoadedReplExtension] = []
+        self._repl_post_load_depth = 0
 
         self.python_fork_agent = python_fork_agent
         self.python_fork_background_agent = python_fork_background_agent
@@ -879,6 +893,152 @@ class AgentSession:
             max_fetch_page_web=mfpw,
         )
 
+    def _repl_register_extension_command(self, key: str, handler: Callable[..., SessionLineResult]) -> None:
+        self._repl_extension_commands[key.lower()] = handler
+
+    def _repl_unwind_extension_commands(self, keys: tuple[str, ...]) -> None:
+        for k in keys:
+            self._repl_extension_commands.pop(k, None)
+
+    def _repl_unload_all_extensions(self) -> None:
+        seen: set[str] = set()
+        for rec in reversed(self._repl_extensions_loaded):
+            if rec.module_name not in seen:
+                sys.modules.pop(rec.module_name, None)
+                seen.add(rec.module_name)
+        self._repl_extensions_loaded.clear()
+        self._repl_extension_commands.clear()
+
+    def _repl_run_post_load_lines(self, lines: list[str]) -> None:
+        self._repl_post_load_depth += 1
+        try:
+            if self._repl_post_load_depth > MAX_REPL_POST_LOAD_DEPTH:
+                sink_print_compat(
+                    f"/load: post-load nesting exceeded ({MAX_REPL_POST_LOAD_DEPTH}); skipping further post-load lines."
+                )
+                return
+            for raw in lines:
+                ln = (raw or "").strip()
+                if not ln:
+                    continue
+                self.execute_line(ln)
+        finally:
+            self._repl_post_load_depth -= 1
+
+    def _try_dispatch_repl_extension(self, s: str) -> Optional[SessionLineResult]:
+        if not self._repl_extension_commands:
+            return None
+        try:
+            parts = shlex.split(s.strip())
+        except ValueError:
+            return None
+        if not parts:
+            return None
+        key = parts[0].lower()
+        handler = self._repl_extension_commands.get(key)
+        if handler is None:
+            return None
+        rest = s.strip()
+        if len(parts[0]) <= len(rest):
+            rest = rest[len(parts[0]) :].lstrip()
+        else:
+            rest = ""
+        try:
+            return handler(self, rest)
+        except BaseException:
+            sink_print_compat(traceback.format_exc())
+            return SessionLineResult()
+
+    def _cmd_repl_load(self, s: str) -> SessionLineResult:
+        try:
+            parts = shlex.split(s.strip())
+        except ValueError as e:
+            sink_print_compat(f"/load: {e}")
+            return SessionLineResult()
+        if len(parts) < 2:
+            sink_print_compat(
+                "/load FILE.py\n\n"
+                "Load a Python file that defines ``register_repl(session, registry)``.\n"
+                "The registry can ``register_command('name', handler)`` for ``/name`` lines.\n"
+                "Return ``None``, a single str, or a list of str lines to run via ``execute_line`` after loading.\n"
+                "Use ``/unload`` to drop all loaded extensions."
+            )
+            return SessionLineResult()
+        path_raw = shlex.join(parts[1:]) if len(parts) > 2 else parts[1]
+        path = Path(self._resolve_session_path(path_raw)).resolve()
+        if not path.is_file():
+            sink_print_compat(f"/load: not a file: {path}")
+            return SessionLineResult()
+        digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+        module_name = f"repl_ext_{digest}"
+        if module_name in sys.modules:
+            del sys.modules[module_name]
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        if spec is None or spec.loader is None:
+            sink_print_compat(f"/load: could not load spec for {path!r}")
+            return SessionLineResult()
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(module_name, None)
+            sink_print_compat(traceback.format_exc())
+            return SessionLineResult()
+        register_fn = getattr(mod, "register_repl", None)
+        if not callable(register_fn):
+            sys.modules.pop(module_name, None)
+            sink_print_compat(
+                f"/load: module {path.name!r} has no callable ``register_repl(session, registry)``."
+            )
+            return SessionLineResult()
+        reg = ReplExtensionRegistry(session=self, script_path=str(path))
+        try:
+            post = register_fn(self, reg)
+        except BaseException:
+            self._repl_unwind_extension_commands(tuple(dict.fromkeys(reg.command_keys())))
+            sys.modules.pop(module_name, None)
+            sink_print_compat(traceback.format_exc())
+            return SessionLineResult()
+        if post is None:
+            post_lines: list[str] = []
+        elif isinstance(post, str):
+            post_lines = [post] if post.strip() else []
+        elif isinstance(post, (list, tuple)):
+            post_lines = [str(x) for x in post if str(x).strip()]
+        else:
+            self._repl_unwind_extension_commands(reg.command_keys())
+            sys.modules.pop(module_name, None)
+            sink_print_compat("/load: register_repl must return None, str, or list[str].")
+            return SessionLineResult()
+        keys = tuple(dict.fromkeys(reg.command_keys()))
+        self._repl_extensions_loaded.append(_LoadedReplExtension(module_name, str(path), keys))
+        sink_print_compat(f"/load: registered extension from {str(path)!r} ({len(keys)} command(s)).")
+        if post_lines:
+            self._repl_run_post_load_lines(post_lines)
+        return SessionLineResult()
+
+    def _cmd_repl_unload(self, s: str) -> SessionLineResult:
+        parts = shlex.split(s.strip())
+        if len(parts) > 1:
+            sink_print_compat("Usage: /unload")
+            return SessionLineResult()
+        if not self._repl_extensions_loaded:
+            sink_print_compat("(No REPL extensions loaded.)")
+            return SessionLineResult()
+        self._repl_unload_all_extensions()
+        sink_print_compat("Unloaded all REPL extensions.")
+        return SessionLineResult()
+
+    def _cmd_repl_extensions(self, s: str) -> SessionLineResult:
+        if not self._repl_extensions_loaded:
+            sink_print_compat("(No REPL extensions loaded.)")
+            return SessionLineResult()
+        for rec in self._repl_extensions_loaded:
+            keys = ", ".join(rec.command_keys) if rec.command_keys else "(no slash commands)"
+            sink_print_compat(f"  {rec.path}  →  {keys}")
+        return SessionLineResult()
+
     def _execute_command_line(self, s: str) -> SessionLineResult:
         low = s.lower()
         cmd = (low.split(None, 1)[0] if low.strip() else "")
@@ -912,6 +1072,12 @@ class AgentSession:
             return self._cmd_load_context(s)
         if low.startswith("/save_context"):
             return self._cmd_save_context(s)
+        if cmd == "/unload":
+            return self._cmd_repl_unload(s)
+        if cmd == "/load":
+            return self._cmd_repl_load(s)
+        if cmd == "/extensions":
+            return self._cmd_repl_extensions(s)
         if cmd in ("/cd", "/chdir"):
             return self._cmd_cd(s)
         if low.startswith("/run_command"):
@@ -992,6 +1158,7 @@ class AgentSession:
                 "  /source FILE\n"
                 "  /import FILE\n"
                 "  /context load|save|start_log FILE   (aliases: /load_context, /save_context)\n"
+                "  /load FILE.py  ·  /unload  ·  /extensions   (REPL extension modules)\n"
                 "  /call_python …\n"
                 "  /run_command …\n"
                 "  ! CMD\n"
@@ -1002,6 +1169,9 @@ class AgentSession:
                 + delegate_extras
             )
             return SessionLineResult()
+        ext_res = self._try_dispatch_repl_extension(s)
+        if ext_res is not None:
+            return ext_res
         sink_print_compat(f"Unknown command {s.split()[0]!r}. Try /help.")
         return SessionLineResult()
 

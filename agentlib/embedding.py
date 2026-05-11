@@ -69,8 +69,8 @@ def build_embedded_session(
       session.execute_line("...")              # normal
       session.execute_line("...", emit=emit)   # typed events stream as they occur
 
-    Slash commands (e.g. `/set ...`, `/run_command ...`, `/call_python ...`) and shell
-    shorthand ``! CMD`` work the same way in embedded mode.
+    Slash commands (e.g. `/set ...`, `/run_command ...`, `/call_python ...`, ``/load`` / ``/unload``)
+    and shell shorthand ``! CMD`` work the same way in embedded mode.
 
     Optional ``python_fork_agent`` / ``python_fork_background_agent`` / ``python_delegate_line`` / ``python_host_command`` hooks
     enable ``/call_python`` helpers (``fork_agent``, ``ai(..., agent_name)``, ``list_agents``, etc.)
