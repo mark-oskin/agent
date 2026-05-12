@@ -951,14 +951,22 @@ class AgentTuiApp(App[None]):
             }
         lane_idx = matches[0]
         sess = self._sessions[lane_idx]
+        cmd_stripped = (cmd or "").strip()
+        # Match _run_line: show the user message in this lane's chat before the model runs. Delegate
+        # used to call execute_line alone, so the transcript stayed blank until the assistant reply.
+        self.call_from_thread(self._prepare_turn_ui, lane_idx, cmd_stripped)
+        self.call_from_thread(self._set_lane_busy, lane_idx, True)
         captured: List[str] = []
 
         def emit_fn(ev, ln=lane_idx):
             self._emit_for(ln, ev)
             sink_delegate_capture_append(ev, captured)
 
-        with emit_sink_scope(emit_fn):
-            res = sess.execute_line((cmd or "").strip())
+        try:
+            with emit_sink_scope(emit_fn):
+                res = sess.execute_line(cmd_stripped)
+        finally:
+            self.call_from_thread(self._set_lane_busy, lane_idx, False)
 
         if isinstance(res, dict) and res.get("type") == "command":
             cap = "".join(captured).rstrip()

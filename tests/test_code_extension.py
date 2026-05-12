@@ -109,6 +109,9 @@ def test_parse_or_retry_nudges_when_substantial_reply_has_no_verdict(code_ext):
         calls.append(cmd)
         if len(calls) == 1:
             assert "ORCHESTRATION" not in cmd
+            assert cmd.startswith("Always end with exactly one block")
+            assert "────────\n\nBASE_TASK" in cmd
+            assert "AUTOMATION — the orchestrator parses" in cmd
             return {"type": "turn", "answer": "x" * 220 + "\n(no pipeline block)"}
         assert "ORCHESTRATION" in cmd
         assert "no pipeline block" in cmd
@@ -150,3 +153,33 @@ def test_parse_or_retry_short_reply_increments_parse_fails(code_ext):
     assert ok is False
     assert pf[0] == 5  # inner_round_max attempts, each short reply increments
     assert len(calls) == 5
+    for c in calls:
+        assert "AUTOMATION — the orchestrator parses" in c
+
+
+def test_parse_or_retry_nudges_when_first_reply_empty(code_ext):
+    calls: list[str] = []
+
+    def dl(role, cmd):
+        calls.append(cmd)
+        if len(calls) == 1:
+            assert "ORCHESTRATION" not in cmd
+            return {"type": "turn", "answer": ""}
+        assert "ORCHESTRATION" in cmd
+        assert "empty answer" in cmd or "step limit" in cmd
+        return {
+            "type": "turn",
+            "answer": "---PIPELINE---\nVERDICT: PASS\nSUMMARY: ok\n---END---\n",
+        }
+
+    class S:
+        python_delegate_line = staticmethod(dl)
+        settings = AgentSettings.defaults()
+
+    lim = code_ext._pipeline_limits(S())
+    pf = [0]
+    ok, _ = code_ext._parse_or_retry(
+        S(), "coder", lambda _prev: "BASE_TASK", parse_fails=pf, stage="unit", lim=lim
+    )
+    assert ok is True
+    assert len(calls) == 2

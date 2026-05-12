@@ -137,7 +137,29 @@ def _verdict_reminder() -> str:
     return (
         "Always end with exactly one block of this form (no extra text after ---END--- is required, "
         "but the block must be parseable):\n"
-        "---PIPELINE---\nVERDICT: PASS or FAIL\nSUMMARY: …\n---END---\n"
+        "---PIPELINE---\nVERDICT: PASS or FAIL\nSUMMARY: …\n---END---\n\n"
+        "You must respond with JSON only. Put that entire block inside the JSON string value of "
+        '"answer" (literal newlines inside the string are fine). Example shape:\n'
+        '{"action":"answer","answer":"…your prose…\\n---PIPELINE---\\nVERDICT: PASS\\nSUMMARY: …\\n---END---\\n"}\n'
+    )
+
+
+# Placed at the end of the orchestrator-composed user request (right before the runner adds
+# "Respond with JSON only…") so it stays in the model's last-token context for this turn.
+_TRAIL_PIPELINE_REMINDER = (
+    "\n\nAUTOMATION — the orchestrator parses only your JSON \"answer\" string. "
+    'That string MUST contain the literal lines ---PIPELINE---\nVERDICT: PASS or FAIL\nSUMMARY: …\n---END---\n'
+    "exactly as in the template above. If you omit them, this lane will be retried and the pipeline stalls."
+)
+
+
+def _empty_prior_verdict_nudge() -> str:
+    """When the lane returned nothing usable, still push a strict retry (``prev_reply`` was empty)."""
+    return (
+        "ORCHESTRATION — your last turn produced no usable assistant text for the orchestrator "
+        "(empty answer, step limit, or parse failure before text was captured). Reply once with JSON only:\n"
+        '{"action":"answer","answer":"…\\n---PIPELINE---\\nVERDICT: FAIL\\nSUMMARY: what went wrong\\n---END---\\n"}\n'
+        "Use PASS only if you actually completed the work and included the block as required."
     )
 
 
@@ -148,7 +170,8 @@ def _missing_verdict_nudge(prior_reply: str) -> str:
         tail = tail[-1600:]
     return (
         "ORCHESTRATION — your previous reply in this lane could not be parsed: it must end with "
-        "exactly one block in this form (include the literal ---END--- line):\n"
+        "exactly one block in this form (include the literal ---END--- line). "
+        "Put that block inside your JSON answer string value, not after the closing brace.\n"
         "---PIPELINE---\n"
         "VERDICT: PASS or FAIL\n"
         "SUMMARY: …\n"
@@ -186,9 +209,19 @@ def _parse_or_retry(
         attempt = f"{i + 1}/{lim.inner_round_max}" if lim.inner_round_max > 1 else "1/1"
         _msg(f"→ {role}: {stage} (delegate {attempt}; parse issues so far: {parse_fails[0]}) …")
         prev_reply = last_text
-        prompt = build_prompt(prev_reply).strip()
-        if i > 0 and prev_reply.strip():
-            prompt = prompt + "\n\n" + _missing_verdict_nudge(prev_reply)
+        # Prepend contract + trail reminder (runner appends "Respond with JSON only" after user_query).
+        body = build_prompt(prev_reply).strip()
+        prompt = (
+            _verdict_reminder().strip()
+            + "\n\n────────\n\n"
+            + body
+            + _TRAIL_PIPELINE_REMINDER
+        )
+        if i > 0:
+            if prev_reply.strip():
+                prompt = prompt + "\n\n" + _missing_verdict_nudge(prev_reply)
+            else:
+                prompt = prompt + "\n\n" + _empty_prior_verdict_nudge()
         last_text = _delegate(session, role, prompt)
         parsed = parse_pipeline_verdict(last_text)
         if parsed:
@@ -228,6 +261,8 @@ When you receive a user request, produce a concise implementation plan for this 
 Make sure you study the directory and subdirectories from it that you are in to understand the current source code.
 The directory may be empty if you are starting a new project.
 
+The runner requires JSON only: put the ---PIPELINE--- through ---END--- block inside your final action answer string.
+
 End your message with EXACTLY one block in this form (SUMMARY may use multiple short lines).
 Your response must include the highly stylized information below.  It will be parsed by code so do not forget any part of it (including the ---END---)
 
@@ -247,6 +282,8 @@ Match existing style and patterns in the repo.
 
 Implement using your tools from the session working directory. Add or update tests as the plan describes.
 
+The runner requires JSON only: put the ---PIPELINE--- through ---END--- block inside your final action answer string (the long text value), not after the JSON object.
+
 When the implementation is ready for review (code written, tests added/updated as planned), end with a block below.
 Your response must include the highly stylized information below.  It will be parsed by code so do not forget any part of it (including the ---END---)
 
@@ -264,6 +301,8 @@ Judge consistency with the user ask, whether the implementation summary plausibl
 and whether obvious gaps are acknowledged (tests, error handling, backwards compatibility).
 
 You will need to study the directory and subdirectories to understand the repository.
+
+The runner requires JSON only: put the ---PIPELINE--- through ---END--- block inside your final action answer string.
 
 Use this checklist mentally; if any item is clearly violated, prefer VERDICT: FAIL and say which item:
 - Scope creep vs user ask / design
@@ -283,6 +322,8 @@ Use VERDICT: FAIL if the implementation should be reworked."""
 _BOOT_TESTER = """You are the tester agent.
 
 Run automated tests from the session working directory (e.g. pytest, make test, npm test) using your tools.
+
+The runner requires JSON only: put the ---PIPELINE--- through ---END--- block inside your final action answer string.
 
 You will need to scan the repo to find where the tests are located.
 
@@ -357,8 +398,7 @@ def _run_pipeline(session, user_ask: str) -> str:
             _workspace_blurb(session)
             + "The user wants this feature or change in the codebase.\n\n"
             f"USER REQUEST:\n{ask}\n\n"
-            + "Discuss steps and testing as required. If you did not see the boot message, still follow this contract:\n"
-            + _verdict_reminder()
+            + "Discuss steps and testing as required. The pipeline contract is prepended to this message.\n"
         )
 
     ok, designer_summary = _parse_or_retry(
@@ -399,7 +439,6 @@ def _run_pipeline(session, user_ask: str) -> str:
                     "Implement the change: minimal scope, match repo style, add/update tests per the plan.\n"
                     "VERDICT: PASS means the work is ready for review (not 'merged to main' unless you actually did that).\n"
                     "SUMMARY must list paths touched, commands you ran (e.g. pytest), and any remaining risks.\n"
-                    + _verdict_reminder()
                 )
                 return "".join(chunks)
 
@@ -423,7 +462,6 @@ def _run_pipeline(session, user_ask: str) -> str:
                     f"DESIGN:\n{designer_summary}\n\n"
                     f"IMPLEMENTATION (coder SUMMARY):\n{coder_summary}\n\n"
                     "If critical verification needs files you were not given, use VERDICT: FAIL and say what is missing.\n"
-                    + _verdict_reminder()
                 )
 
             ok_r, reviewer_summary = _parse_or_retry(
@@ -458,7 +496,6 @@ def _run_pipeline(session, user_ask: str) -> str:
                     f"REVIEWER FEEDBACK:\n{reviewer_summary}\n\n"
                     "Use VERDICT: FAIL only if you still cannot produce any reasonable plan. "
                     "Otherwise VERDICT: PASS with the revised plan in SUMMARY.\n"
-                    + _verdict_reminder()
                 )
 
             ok_d2, designer_summary = _parse_or_retry(
@@ -486,7 +523,6 @@ def _run_pipeline(session, user_ask: str) -> str:
                 f"REVIEW:\n{reviewer_summary}\n\n"
                 "Run automated tests when possible. If none exist or no command is discoverable, say so clearly; "
                 "use VERDICT: FAIL unless you document an explicit alternative check you performed.\n"
-                + _verdict_reminder()
             )
 
         ok_t, tester_summary = _parse_or_retry(
