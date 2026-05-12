@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agentlib.repl_extensions import ReplExtensionRegistry
 from agentlib.settings import AgentSettings
 from agentlib.tui_parse import parse_fork_background_command
 
@@ -121,6 +122,7 @@ def test_parse_or_retry_nudges_when_substantial_reply_has_no_verdict(code_ext):
         }
 
     class S:
+        python_fork_background_agent = staticmethod(lambda *_a, **_k: {"type": "fork", "ok": True})
         python_delegate_line = staticmethod(dl)
         settings = AgentSettings.defaults()
 
@@ -142,6 +144,7 @@ def test_parse_or_retry_short_reply_increments_parse_fails(code_ext):
         return {"type": "turn", "answer": "short"}
 
     class S:
+        python_fork_background_agent = staticmethod(lambda *_a, **_k: {"type": "fork", "ok": True})
         python_delegate_line = staticmethod(dl)
         settings = AgentSettings.defaults()
 
@@ -173,6 +176,7 @@ def test_parse_or_retry_nudges_when_first_reply_empty(code_ext):
         }
 
     class S:
+        python_fork_background_agent = staticmethod(lambda *_a, **_k: {"type": "fork", "ok": True})
         python_delegate_line = staticmethod(dl)
         settings = AgentSettings.defaults()
 
@@ -183,3 +187,93 @@ def test_parse_or_retry_nudges_when_first_reply_empty(code_ext):
     )
     assert ok is True
     assert len(calls) == 2
+
+
+def test_multilane_pipeline_available_requires_both_hooks(code_ext):
+    class _ForkOnly:
+        python_fork_background_agent = lambda *_a, **_k: None
+        python_delegate_line = None
+
+    class _DelOnly:
+        python_fork_background_agent = None
+        python_delegate_line = lambda *_a, **_k: None
+
+    class _Both:
+        python_fork_background_agent = lambda *_a, **_k: None
+        python_delegate_line = lambda *_a, **_k: None
+
+    assert not code_ext._multilane_pipeline_available(_ForkOnly())
+    assert not code_ext._multilane_pipeline_available(_DelOnly())
+    assert code_ext._multilane_pipeline_available(_Both())
+
+
+def test_delegate_single_lane_uses_execute_line(code_ext):
+    calls: list[str] = []
+
+    def el(line: str, emit=None):
+        calls.append(line)
+        return {
+            "type": "turn",
+            "answer": "---PIPELINE---\nVERDICT: PASS\nSUMMARY: step\n---END---\n",
+        }
+
+    class S:
+        python_fork_background_agent = None
+        python_delegate_line = None
+        execute_line = staticmethod(el)
+        settings = AgentSettings.defaults()
+
+    out = code_ext._delegate(S(), "designer", "  prompt  ")
+    assert "PIPELINE" in out
+    assert calls == ["prompt"]
+
+
+def test_register_repl_post_load_empty_without_multilane(code_ext):
+    class S:
+        settings = AgentSettings.defaults()
+        python_fork_background_agent = None
+        python_delegate_line = None
+
+        def _repl_register_extension_command(self, key, handler):
+            self._cmd = (key, handler)
+
+    s = S()
+    reg = ReplExtensionRegistry(session=s, script_path=str(_EXT))
+    post = code_ext.register_repl(s, reg)
+    assert post == []
+
+
+def test_register_repl_post_load_fork_lines_when_multilane(code_ext):
+    class S:
+        settings = AgentSettings.defaults()
+        python_fork_background_agent = staticmethod(lambda *_a, **_k: {"type": "fork", "ok": True})
+        python_delegate_line = staticmethod(lambda *_a, **_k: {"type": "turn", "answer": ""})
+
+        def _repl_register_extension_command(self, key, handler):
+            pass
+
+    s = S()
+    reg = ReplExtensionRegistry(session=s, script_path=str(_EXT))
+    post = code_ext.register_repl(s, reg)
+    assert isinstance(post, list)
+    assert len(post) == len(code_ext._POST_LOAD_LINES)
+
+
+def test_run_pipeline_single_lane_happy_path(code_ext):
+    verdict = "---PIPELINE---\nVERDICT: PASS\nSUMMARY: ok\n---END---\n"
+    calls: list[str] = []
+
+    def el(line: str, emit=None):
+        calls.append(line)
+        return {"type": "turn", "answer": verdict}
+
+    class S:
+        settings = AgentSettings.defaults()
+        session_cwd = "/tmp"
+        python_fork_background_agent = None
+        python_delegate_line = None
+        execute_line = staticmethod(el)
+
+    msg = code_ext._run_pipeline(S(), "add a small feature")
+    assert "Pipeline complete" in msg
+    assert len(calls) == 4

@@ -1,15 +1,17 @@
 """
-TUI extension: multi-lane feature pipeline (designer → coder → reviewer ⟲ → tester ⟲).
+Feature pipeline: designer → coder → reviewer ⟲ → tester ⟲.
 
 Load with ``/load extensions/code.py`` (from repo root) or an absolute path.
 
-Requires ``agent_tui.py`` (``python_delegate_line`` + ``python_fork_background_agent``).
+**Multi-lane (``agent_tui.py``):** when ``python_fork_background_agent`` and ``python_delegate_line``
+are both set, post-load forks background lanes (designer, coder, reviewer, tester) and each step
+delegates to the matching lane.
 
-Lane labels (case-insensitive): designer, coder, reviewer, tester — created via post-load
-``/fork_background`` if they do not already exist.
+**Single-lane (plain ``agent`` / CLI):** when fork is not wired, the same prompts run on the
+current session via ``execute_line`` (one conversation; no ``/fork``).
 
-Boot and per-step prompts include workspace (``session_cwd``), scope/rubric guidance, and a shared
-``---PIPELINE---`` verdict block; ``SUMMARY`` may span multiple lines (newlines preserved when parsed).
+Boot strings apply only to forked lanes. Per-step prompts include workspace (``session_cwd``),
+rubric guidance, and a shared ``---PIPELINE---`` verdict block.
 
 Pipeline loop limits are **defaults in this module**; optional overrides via
 ``/set extensions code_pipeline set <key> <value>`` (then ``/set save``) merge on top of those defaults.
@@ -182,11 +184,22 @@ def _missing_verdict_nudge(prior_reply: str) -> str:
     )
 
 
+def _multilane_pipeline_available(session) -> bool:
+    """True when the host can fork background lanes and delegate to them (e.g. ``agent_tui``)."""
+    return (
+        getattr(session, "python_fork_background_agent", None) is not None
+        and getattr(session, "python_delegate_line", None) is not None
+    )
+
+
 def _delegate(session, role: str, prompt: str) -> str:
-    dl = session.python_delegate_line
-    if dl is None:
-        raise RuntimeError("python_delegate_line is not configured")
-    return _text_from_delegate(dl(role, prompt.strip()))
+    text = (prompt or "").strip()
+    if _multilane_pipeline_available(session):
+        return _text_from_delegate(session.python_delegate_line(role, text))
+    el = getattr(session, "execute_line", None)
+    if not callable(el):
+        raise RuntimeError("single-lane pipeline requires session.execute_line")
+    return _text_from_delegate(el(text))
 
 
 def _msg(line: str) -> None:
@@ -364,10 +377,12 @@ _pipeline_lock = threading.Lock()
 
 
 def _run_pipeline(session, user_ask: str) -> str:
-    if session.python_fork_background_agent is None:
-        return "[code] python_fork_background_agent is not set. Run under agent_tui.py."
-    if session.python_delegate_line is None:
-        return "[code] python_delegate_line is not set. Run under agent_tui.py."
+    multilane = _multilane_pipeline_available(session)
+    if not multilane and not callable(getattr(session, "execute_line", None)):
+        return (
+            "[code] No pipeline host: need either (1) agent_tui with fork + delegate hooks, or "
+            "(2) a normal session with execute_line for single-lane mode."
+        )
 
     lim = _pipeline_limits(session)
 
@@ -387,11 +402,18 @@ def _run_pipeline(session, user_ask: str) -> str:
     tester_summary = ""
     tester_feedback = ""
 
-    _msg(
-        "Starting pipeline (blocking: each line waits for that lane to finish). "
-        f"Flow: designer plan → coder ↔ reviewer⇄designer (max {lim.design_review_max} review rounds) → tester; "
-        f"tester FAIL re-enters coder (max {lim.code_test_max} test cycles)."
-    )
+    if multilane:
+        _msg(
+            "Starting pipeline (multi-lane: each step delegates to that lane). "
+            f"Flow: designer plan → coder ↔ reviewer⇄designer (max {lim.design_review_max} review rounds) → tester; "
+            f"tester FAIL re-enters coder (max {lim.code_test_max} test cycles)."
+        )
+    else:
+        _msg(
+            "Starting pipeline (single-lane: all steps run on this session via execute_line). "
+            f"Same flow as multi-lane; max {lim.design_review_max} design/review rounds, "
+            f"{lim.code_test_max} test/code cycles."
+        )
 
     def designer_prompt_initial(_: str) -> str:
         return (
@@ -570,9 +592,12 @@ def _cmd_code(session, rest: str) -> SessionLineResult:
 
 def register_repl(session, registry: ReplExtensionRegistry):
     registry.register_help(
-        "/code <description> — run the multi-lane pipeline (designer → coder ↔ reviewer → tester) "
-        "via /fork_background lanes. Tunables live in this module; optional prefs: "
-        "/set extensions code_pipeline set <key> <value> (see module _PIPELINE_DEFAULTS keys)."
+        "/code <description> — run the feature pipeline (designer → coder ↔ reviewer → tester). "
+        "With agent_tui fork+delegate hooks, steps run on separate lanes (post-load forks lanes). "
+        "Otherwise all steps run on this session (single-lane). Tunables: "
+        "/set extensions code_pipeline set <key> <value> (see _PIPELINE_DEFAULTS in this module)."
     )
     registry.register_command("code", _cmd_code)
-    return list(_POST_LOAD_LINES)
+    if _multilane_pipeline_available(session):
+        return list(_POST_LOAD_LINES)
+    return []
