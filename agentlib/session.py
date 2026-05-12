@@ -930,6 +930,22 @@ class AgentSession:
         self._repl_extensions_loaded.clear()
         self._repl_extension_commands.clear()
 
+    def _repl_drop_loaded_extension_path(self, resolved_path: Path) -> int:
+        """Unload extension records that match ``resolved_path`` (same file re-``/load``ed).
+
+        Returns how many prior records were removed.
+        """
+        key = str(resolved_path)
+        n_before = len(self._repl_extensions_loaded)
+        kept: list[_LoadedReplExtension] = []
+        for rec in self._repl_extensions_loaded:
+            if rec.path == key:
+                self._repl_unwind_extension_commands(rec.command_keys)
+            else:
+                kept.append(rec)
+        self._repl_extensions_loaded = kept
+        return n_before - len(kept)
+
     def _repl_run_post_load_lines(self, lines: list[str]) -> None:
         self._repl_post_load_depth += 1
         try:
@@ -947,23 +963,25 @@ class AgentSession:
             self._repl_post_load_depth -= 1
 
     def _try_dispatch_repl_extension(self, s: str) -> Optional[SessionLineResult]:
+        """Dispatch ``/extname …`` to a loaded extension handler.
+
+        Split only the leading command token; do **not** ``shlex.split`` the full line — user prose
+        often contains apostrophes (e.g. ``doesn't``) which breaks shell parsing and drops dispatch.
+        """
         if not self._repl_extension_commands:
             return None
-        try:
-            parts = shlex.split(s.strip())
-        except ValueError:
+        stripped = (s or "").strip()
+        if not stripped.startswith("/"):
             return None
-        if not parts:
-            return None
-        key = parts[0].lower()
+        i = 1
+        n = len(stripped)
+        while i < n and not stripped[i].isspace():
+            i += 1
+        key = stripped[:i].lower()
         handler = self._repl_extension_commands.get(key)
         if handler is None:
             return None
-        rest = s.strip()
-        if len(parts[0]) <= len(rest):
-            rest = rest[len(parts[0]) :].lstrip()
-        else:
-            rest = ""
+        rest = stripped[i:].lstrip()
         try:
             return handler(self, rest)
         except BaseException:
@@ -991,6 +1009,8 @@ class AgentSession:
         if not path.is_file():
             sink_print_compat(f"/load: not a file: {path}")
             return SessionLineResult()
+        if self._repl_drop_loaded_extension_path(path):
+            sink_print_compat("/load: replacing earlier registration of the same file.")
         digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
         module_name = f"repl_ext_{digest}"
         if module_name in sys.modules:
