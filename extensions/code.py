@@ -31,9 +31,9 @@ EXTENSION_SETTINGS_ID = "code_pipeline"
 
 # Self-contained pipeline tunables (override per-session with ``/set extensions code_pipeline …``).
 _PIPELINE_DEFAULTS: dict[str, int] = {
-    "design_review_max": 5,
-    "code_test_max": 5,
-    "inner_round_max": 3,
+    "design_review_max": 10,
+    "code_test_max": 10,
+    "inner_round_max": 5,
     "parse_fail_max": 10,
     "user_ask_max_len": 8000,
 }
