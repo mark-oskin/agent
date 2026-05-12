@@ -38,6 +38,10 @@ _PIPELINE_DEFAULTS: dict[str, int] = {
     "user_ask_max_len": 8000,
 }
 
+# Replies at least this long without a parseable verdict block get a follow-up nudge and do not
+# increment the global ``parse_fails`` counter (``inner_round_max`` still limits tries).
+_SUBSTANTIAL_REPLY_MIN_CHARS = 200
+
 
 class _PipelineLimits(NamedTuple):
     design_review_max: int
@@ -137,6 +141,24 @@ def _verdict_reminder() -> str:
     )
 
 
+def _missing_verdict_nudge(prior_reply: str) -> str:
+    """Append to a follow-up user prompt when the lane's last answer did not contain a parseable verdict."""
+    tail = (prior_reply or "").strip()
+    if len(tail) > 1600:
+        tail = tail[-1600:]
+    return (
+        "ORCHESTRATION — your previous reply in this lane could not be parsed: it must end with "
+        "exactly one block in this form (include the literal ---END--- line):\n"
+        "---PIPELINE---\n"
+        "VERDICT: PASS or FAIL\n"
+        "SUMMARY: …\n"
+        "---END---\n"
+        "Put your status, file paths, and commands you ran in SUMMARY. If work is incomplete, use VERDICT: FAIL.\n"
+        "Reply again now (you may be brief outside the block).\n"
+        + (f"\n--- Excerpt of your prior reply (reference only) ---\n{tail}\n" if tail else "")
+    )
+
+
 def _delegate(session, role: str, prompt: str) -> str:
     dl = session.python_delegate_line
     if dl is None:
@@ -163,7 +185,11 @@ def _parse_or_retry(
     for i in range(lim.inner_round_max):
         attempt = f"{i + 1}/{lim.inner_round_max}" if lim.inner_round_max > 1 else "1/1"
         _msg(f"→ {role}: {stage} (delegate {attempt}; parse issues so far: {parse_fails[0]}) …")
-        last_text = _delegate(session, role, build_prompt(last_text))
+        prev_reply = last_text
+        prompt = build_prompt(prev_reply).strip()
+        if i > 0 and prev_reply.strip():
+            prompt = prompt + "\n\n" + _missing_verdict_nudge(prev_reply)
+        last_text = _delegate(session, role, prompt)
         parsed = parse_pipeline_verdict(last_text)
         if parsed:
             verdict, summary = parsed
@@ -171,11 +197,20 @@ def _parse_or_retry(
             prev = (one_line[:160] + "…") if len(one_line) > 160 else one_line
             _msg(f"← {role}: parsed VERDICT={'PASS' if verdict else 'FAIL'}; SUMMARY preview: {prev!r}")
             return parsed
-        parse_fails[0] += 1
-        _msg(
-            f"← {role}: no valid ---PIPELINE--- block (parse issues: {parse_fails[0]}/{lim.parse_fail_max}); "
-            f"will retry if attempts remain."
-        )
+        substantial = len((last_text or "").strip()) >= _SUBSTANTIAL_REPLY_MIN_CHARS
+        if substantial:
+            _msg(
+                f"← {role}: no parseable ---PIPELINE--- block (substantial reply, {len((last_text or '').strip())} chars); "
+                f"will retry with reminder (parse_fail cap unchanged: {parse_fails[0]}/{lim.parse_fail_max})."
+            )
+        else:
+            parse_fails[0] += 1
+            _msg(
+                f"← {role}: no valid ---PIPELINE--- block (parse issues: {parse_fails[0]}/{lim.parse_fail_max}); "
+                f"will retry if attempts remain."
+            )
+            if parse_fails[0] >= lim.parse_fail_max:
+                break
         if parse_fails[0] >= lim.parse_fail_max:
             break
     return False, (last_text or "")[:2000]

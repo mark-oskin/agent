@@ -93,3 +93,60 @@ line three
     assert "spaced" in s
     assert "line three" in s
     assert "\n" in s
+
+
+def test_missing_verdict_nudge_requires_end(code_ext):
+    n = code_ext._missing_verdict_nudge("some prior text")
+    assert "---END---" in n
+    assert "ORCHESTRATION" in n
+    assert "some prior text" in n
+
+
+def test_parse_or_retry_nudges_when_substantial_reply_has_no_verdict(code_ext):
+    calls: list[str] = []
+
+    def dl(role, cmd):
+        calls.append(cmd)
+        if len(calls) == 1:
+            assert "ORCHESTRATION" not in cmd
+            return {"type": "turn", "answer": "x" * 220 + "\n(no pipeline block)"}
+        assert "ORCHESTRATION" in cmd
+        assert "no pipeline block" in cmd
+        return {
+            "type": "turn",
+            "answer": "---PIPELINE---\nVERDICT: PASS\nSUMMARY: fixed\n---END---\n",
+        }
+
+    class S:
+        python_delegate_line = staticmethod(dl)
+        settings = AgentSettings.defaults()
+
+    lim = code_ext._pipeline_limits(S())
+    pf = [0]
+    ok, _ = code_ext._parse_or_retry(
+        S(), "coder", lambda _prev: "BASE_TASK", parse_fails=pf, stage="unit", lim=lim
+    )
+    assert ok is True
+    assert pf[0] == 0
+    assert len(calls) == 2
+
+
+def test_parse_or_retry_short_reply_increments_parse_fails(code_ext):
+    calls: list[str] = []
+
+    def dl(role, cmd):
+        calls.append(cmd)
+        return {"type": "turn", "answer": "short"}
+
+    class S:
+        python_delegate_line = staticmethod(dl)
+        settings = AgentSettings.defaults()
+
+    lim = code_ext._pipeline_limits(S())
+    pf = [0]
+    ok, _ = code_ext._parse_or_retry(
+        S(), "designer", lambda _p: "ASK", parse_fails=pf, stage="unit", lim=lim
+    )
+    assert ok is False
+    assert pf[0] == 5  # inner_round_max attempts, each short reply increments
+    assert len(calls) == 5
