@@ -277,3 +277,47 @@ def test_run_pipeline_single_lane_happy_path(code_ext):
     msg = code_ext._run_pipeline(S(), "add a small feature")
     assert "Pipeline complete" in msg
     assert len(calls) == 4
+
+
+def test_parse_code_rest_empty(code_ext):
+    f, ask = code_ext._parse_code_rest("")
+    assert ask == ""
+    assert not any(f)
+
+
+def test_parse_code_rest_flags_and_ask(code_ext):
+    f, ask = code_ext._parse_code_rest("  --skip_design   --skip_test  fix login  ")
+    assert f.skip_design and f.skip_test and not f.skip_review
+    assert ask == "fix login"
+
+
+def test_parse_code_rest_all_flags_order_independent_for_ask(code_ext):
+    f, ask = code_ext._parse_code_rest("--skip_review --skip_design do thing")
+    assert f.skip_design and f.skip_review and not f.skip_test
+    assert ask == "do thing"
+
+
+def test_parse_code_rest_unknown_token_stops_flags(code_ext):
+    f, ask = code_ext._parse_code_rest("--skip_design --not_a_flag rest")
+    assert f.skip_design
+    assert ask == "--not_a_flag rest"
+
+
+def test_run_pipeline_single_lane_skip_all_but_coder(code_ext):
+    verdict = "---PIPELINE---\nVERDICT: PASS\nSUMMARY: ok\n---END---\n"
+    calls: list[str] = []
+
+    def el(line: str, emit=None):
+        calls.append(line)
+        return {"type": "turn", "answer": verdict}
+
+    class S:
+        settings = AgentSettings.defaults()
+        session_cwd = "/tmp"
+        python_fork_background_agent = None
+        python_delegate_line = None
+        execute_line = staticmethod(el)
+
+    msg = code_ext._run_pipeline(S(), "--skip_design --skip_review --skip_test only coder runs")
+    assert "Pipeline complete" in msg
+    assert len(calls) == 1

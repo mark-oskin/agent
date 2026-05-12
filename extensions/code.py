@@ -15,6 +15,9 @@ rubric guidance, and a shared ``---PIPELINE---`` verdict block.
 
 Pipeline loop limits are **defaults in this module**; optional overrides via
 ``/set extensions code_pipeline set <key> <value>`` (then ``/set save``) merge on top of those defaults.
+
+Optional ``/code`` flags (any combination, before the description): ``--skip_design`` (use request as plan;
+after a **tester** failure, run **design** to revise the plan), ``--skip_review``, ``--skip_test``.
 """
 
 from __future__ import annotations
@@ -43,6 +46,42 @@ _PIPELINE_DEFAULTS: dict[str, int] = {
 # Replies at least this long without a parseable verdict block get a follow-up nudge and do not
 # increment the global ``parse_fails`` counter (``inner_round_max`` still limits tries).
 _SUBSTANTIAL_REPLY_MIN_CHARS = 200
+
+
+# Optional ``/code`` flags (leading tokens, whitespace-separated).
+_CODE_FLAG_SKIP_DESIGN = "--skip_design"
+_CODE_FLAG_SKIP_REVIEW = "--skip_review"
+_CODE_FLAG_SKIP_TEST = "--skip_test"
+_CODE_KNOWN_FLAGS = frozenset({_CODE_FLAG_SKIP_DESIGN, _CODE_FLAG_SKIP_REVIEW, _CODE_FLAG_SKIP_TEST})
+
+
+class _CodePipelineFlags(NamedTuple):
+    skip_design: bool = False
+    skip_review: bool = False
+    skip_test: bool = False
+
+
+def _parse_code_rest(rest: str) -> tuple[_CodePipelineFlags, str]:
+    """
+    Parse leading ``--skip_*`` tokens; remainder is the user request text.
+
+    Example: ``"--skip_design --skip_test fix login"`` → flags + ``"fix login"``.
+    """
+    parts = (rest or "").split()
+    skip_design = False
+    skip_review = False
+    skip_test = False
+    i = 0
+    while i < len(parts) and parts[i] in _CODE_KNOWN_FLAGS:
+        if parts[i] == _CODE_FLAG_SKIP_DESIGN:
+            skip_design = True
+        elif parts[i] == _CODE_FLAG_SKIP_REVIEW:
+            skip_review = True
+        elif parts[i] == _CODE_FLAG_SKIP_TEST:
+            skip_test = True
+        i += 1
+    ask = " ".join(parts[i:]).strip()
+    return _CodePipelineFlags(skip_design, skip_review, skip_test), ask
 
 
 class _PipelineLimits(NamedTuple):
@@ -386,9 +425,13 @@ def _run_pipeline(session, user_ask: str) -> str:
 
     lim = _pipeline_limits(session)
 
-    ask = " ".join(user_ask.split()).strip()
+    flags, raw_ask = _parse_code_rest(user_ask)
+    ask = " ".join(raw_ask.split()).strip()
     if not ask:
-        return "[code] Usage: /code <description of the feature or change>"
+        return (
+            "[code] Usage: /code [--skip_design] [--skip_review] [--skip_test] "
+            "<description of the feature or change>"
+        )
     if len(ask) > lim.user_ask_max_len:
         ask = ask[: lim.user_ask_max_len] + "\n…(truncated)"
 
@@ -402,39 +445,58 @@ def _run_pipeline(session, user_ask: str) -> str:
     tester_summary = ""
     tester_feedback = ""
 
+    flag_note = []
+    if flags.skip_design:
+        flag_note.append("skip_design")
+    if flags.skip_review:
+        flag_note.append("skip_review")
+    if flags.skip_test:
+        flag_note.append("skip_test")
+    active = f" [flags: {', '.join(flag_note)}]" if flag_note else ""
+
     if multilane:
         _msg(
-            "Starting pipeline (multi-lane: each step delegates to that lane). "
-            f"Flow: designer plan → coder ↔ reviewer⇄designer (max {lim.design_review_max} review rounds) → tester; "
+            "Starting pipeline (multi-lane: each step delegates to that lane)."
+            + active
+            + " Flow: designer plan → coder ↔ reviewer⇄designer → tester; "
             f"tester FAIL re-enters coder (max {lim.code_test_max} test cycles)."
         )
     else:
         _msg(
-            "Starting pipeline (single-lane: all steps run on this session via execute_line). "
-            f"Same flow as multi-lane; max {lim.design_review_max} design/review rounds, "
-            f"{lim.code_test_max} test/code cycles."
+            "Starting pipeline (single-lane: all steps on this session via execute_line)."
+            + active
+            + f" Max {lim.design_review_max} design/review rounds, {lim.code_test_max} test/code cycles."
         )
 
-    def designer_prompt_initial(_: str) -> str:
-        return (
-            _workspace_blurb(session)
-            + "The user wants this feature or change in the codebase.\n\n"
-            f"USER REQUEST:\n{ask}\n\n"
-            + "Discuss steps and testing as required. The pipeline contract is prepended to this message.\n"
+    if flags.skip_design:
+        designer_summary = (
+            "[Initial design phase skipped by --skip_design. "
+            "Implement directly from the user request; treat this block as the working specification.]\n\n"
+            f"USER REQUEST:\n{ask}\n"
         )
+        _msg("Design skipped (--skip_design): using user request as the working plan for the coder.")
+    else:
 
-    ok, designer_summary = _parse_or_retry(
-        session,
-        "designer",
-        designer_prompt_initial,
-        parse_fails=parse_fails,
-        stage="initial plan from user request",
-        lim=lim,
-    )
-    if not ok:
-        return f"[code] designer could not produce a passing plan (or parse failed). Last excerpt:\n{designer_summary[:1500]}"
+        def designer_prompt_initial(_: str) -> str:
+            return (
+                _workspace_blurb(session)
+                + "The user wants this feature or change in the codebase.\n\n"
+                f"USER REQUEST:\n{ask}\n\n"
+                + "Discuss steps and testing as required. The pipeline contract is prepended to this message.\n"
+            )
 
-    _msg("Initial designer plan accepted (VERDICT: PASS). Entering implement/review loop.")
+        ok, designer_summary = _parse_or_retry(
+            session,
+            "designer",
+            designer_prompt_initial,
+            parse_fails=parse_fails,
+            stage="initial plan from user request",
+            lim=lim,
+        )
+        if not ok:
+            return f"[code] designer could not produce a passing plan (or parse failed). Last excerpt:\n{designer_summary[:1500]}"
+
+        _msg("Initial designer plan accepted (VERDICT: PASS). Entering implement/review loop.")
 
     while code_test_cycles < lim.code_test_max:
         reviewer_pass = False
@@ -474,6 +536,12 @@ def _run_pipeline(session, user_ask: str) -> str:
                 return f"[code] coder blocked or failed verdict.\n{coder_summary[:1500]}"
 
             _msg(f"Coder step complete (design/review round index {design_review_cycles}).")
+
+            if flags.skip_review:
+                reviewer_summary = "(Review skipped by user flag --skip_review.)"
+                reviewer_pass = True
+                _msg("Reviewer skipped (--skip_review) — proceeding.")
+                break
 
             def reviewer_prompt(_: str) -> str:
                 return (
@@ -535,30 +603,48 @@ def _run_pipeline(session, user_ask: str) -> str:
         if not reviewer_pass:
             return "[code] internal: expected reviewer pass before tester (please report)."
 
-        def tester_prompt(_: str) -> str:
-            return (
-                _workspace_blurb(session)
-                + "The user requested a codebase change. Summaries follow.\n\n"
-                f"USER REQUEST:\n{ask}\n\n"
-                f"DESIGN:\n{designer_summary}\n\n"
-                f"IMPLEMENTATION:\n{coder_summary}\n\n"
-                f"REVIEW:\n{reviewer_summary}\n\n"
-                "Run automated tests when possible. If none exist or no command is discoverable, say so clearly; "
-                "use VERDICT: FAIL unless you document an explicit alternative check you performed.\n"
-            )
+        if flags.skip_test:
+            tester_summary = "(Tests skipped by user flag --skip_test.)"
+            ok_t = True
+            _msg("Tester skipped (--skip_test).")
+        else:
 
-        ok_t, tester_summary = _parse_or_retry(
-            session,
-            "tester",
-            tester_prompt,
-            parse_fails=parse_fails,
-            stage="run tests / report",
-            lim=lim,
-        )
+            def tester_prompt(_: str) -> str:
+                return (
+                    _workspace_blurb(session)
+                    + "The user requested a codebase change. Summaries follow.\n\n"
+                    f"USER REQUEST:\n{ask}\n\n"
+                    f"DESIGN:\n{designer_summary}\n\n"
+                    f"IMPLEMENTATION:\n{coder_summary}\n\n"
+                    f"REVIEW:\n{reviewer_summary}\n\n"
+                    "Run automated tests when possible. If none exist or no command is discoverable, say so clearly; "
+                    "use VERDICT: FAIL unless you document an explicit alternative check you performed.\n"
+                )
+
+            ok_t, tester_summary = _parse_or_retry(
+                session,
+                "tester",
+                tester_prompt,
+                parse_fails=parse_fails,
+                stage="run tests / report",
+                lim=lim,
+            )
         if ok_t:
             design_snip = designer_summary if len(designer_summary) <= 500 else designer_summary[:500] + "…"
+            bits = ["[code] Pipeline complete."]
+            if flags.skip_review:
+                bits.append("Reviewer skipped (--skip_review).")
+            if flags.skip_test:
+                bits.append("Tester skipped (--skip_test).")
+            if not flags.skip_review and not flags.skip_test:
+                bits.append("Reviewer and tester PASS.")
+            elif not flags.skip_test:
+                bits.append("Tester PASS.")
+            elif not flags.skip_review:
+                bits.append("Reviewer PASS.")
+            head = " ".join(bits) if len(bits) > 1 else bits[0]
             return (
-                "[code] Pipeline complete — reviewer and tester PASS.\n\n"
+                f"{head}\n\n"
                 f"Tester summary:\n{tester_summary}\n\n"
                 f"Design (excerpt):\n{design_snip}"
             )
@@ -572,7 +658,39 @@ def _run_pipeline(session, user_ask: str) -> str:
                 f"[code] test/code loop exceeded {lim.code_test_max} cycles.\n"
                 f"Last tester output:\n{tester_summary[:1500]}"
             )
-        tester_feedback = tester_summary
+
+        if flags.skip_design:
+            _msg("Tester failed with --skip_design: running designer to revise the plan from test output.")
+
+            def designer_after_test_fail(_: str) -> str:
+                return (
+                    _workspace_blurb(session)
+                    + "Automated tests failed or reported problems. Produce an updated implementation plan "
+                    "that addresses the failures (the coder will follow this plan on the next pass).\n\n"
+                    f"USER REQUEST:\n{ask}\n\n"
+                    f"PRIOR PLAN / SPEC:\n{designer_summary}\n\n"
+                    f"TESTER OUTPUT:\n{tester_summary}\n\n"
+                    "Use VERDICT: PASS with the revised plan in SUMMARY unless you cannot salvage a reasonable approach.\n"
+                )
+
+            ok_td, designer_summary = _parse_or_retry(
+                session,
+                "designer",
+                designer_after_test_fail,
+                parse_fails=parse_fails,
+                stage="revise plan after tester FAIL (--skip_design mode)",
+                lim=lim,
+            )
+            if not ok_td:
+                return (
+                    "[code] designer could not produce a plan after tester failure "
+                    f"(skip_design recovery).\n{designer_summary[:1500]}"
+                )
+            tester_feedback = ""
+            _msg("Designer updated plan after test failure; re-entering coder with new design.")
+        else:
+            tester_feedback = tester_summary
+
         design_review_cycles = 0
 
     return f"[code] aborted after {lim.code_test_max} test/code cycles (outer guard)."
@@ -592,10 +710,8 @@ def _cmd_code(session, rest: str) -> SessionLineResult:
 
 def register_repl(session, registry: ReplExtensionRegistry):
     registry.register_help(
-        "/code <description> — run the feature pipeline (designer → coder ↔ reviewer → tester). "
-        "With agent_tui fork+delegate hooks, steps run on separate lanes (post-load forks lanes). "
-        "Otherwise all steps run on this session (single-lane). Tunables: "
-        "/set extensions code_pipeline set <key> <value> (see _PIPELINE_DEFAULTS in this module)."
+        "/code [--skip_design] [--skip_review] [--skip_test] <description> — "
+        "designer → coder ↔ reviewer → tester pipeline."
     )
     registry.register_command("code", _cmd_code)
     if _multilane_pipeline_available(session):
