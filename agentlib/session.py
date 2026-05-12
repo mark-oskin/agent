@@ -2136,7 +2136,7 @@ class AgentSession:
         return self._context_snapshot_save_path(path)
 
     def _cmd_set_extensions(self, toks: list) -> SessionLineResult:
-        """``/set extensions …`` — JSON-ish bag for REPL extensions (see ``DEFAULT_SETTINGS['extensions']``)."""
+        """``/set extensions …`` — optional overrides for REPL extensions (persist with ``/set save``)."""
         if len(toks) < 3:
             sink_print_compat(
                 "Usage:\n"
@@ -2145,8 +2145,9 @@ class AgentSession:
                 "  /set extensions <id> set <key> <value>\n"
                 "  /set extensions <id> unset <key>\n"
                 "Example: /set extensions code_pipeline set code_test_max 8\n"
-                "Shipped keys (code_pipeline): design_review_max, code_test_max, inner_round_max, "
-                "parse_fail_max, user_ask_max_len\n"
+                "Valid keys depend on each extension (e.g. ``extensions/code.py`` documents "
+                "``code_pipeline`` keys such as design_review_max, code_test_max, inner_round_max, "
+                "parse_fail_max, user_ask_max_len).\n"
                 "Use /set save to persist."
             )
             return SessionLineResult()

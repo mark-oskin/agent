@@ -52,16 +52,9 @@ DEFAULT_SETTINGS: dict = {
         # When True (default), PDF responses from fetch_page are converted to extracted text for the LLM.
         "fetch_page_pdf_to_text": True,
     },
-    # Third-party / REPL extension options: each key is an extension id (e.g. code_pipeline); value is a JSON object.
-    "extensions": {
-        "code_pipeline": {
-            "design_review_max": 5,
-            "code_test_max": 5,
-            "inner_round_max": 3,
-            "parse_fail_max": 10,
-            "user_ask_max_len": 8000,
-        },
-    },
+    # Optional overrides for REPL extensions (``/set extensions <id> …``). Each key is an extension id;
+    # defaults for an extension belong in that extension's module, not here.
+    "extensions": {},
 }
 
 

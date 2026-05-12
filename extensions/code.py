@@ -11,8 +11,8 @@ Lane labels (case-insensitive): designer, coder, reviewer, tester — created vi
 Boot and per-step prompts include workspace (``session_cwd``), scope/rubric guidance, and a shared
 ``---PIPELINE---`` verdict block; ``SUMMARY`` may span multiple lines (newlines preserved when parsed).
 
-Pipeline loop limits default from ``agentlib.settings.DEFAULT_SETTINGS["extensions"]["code_pipeline"]``;
-override at runtime with ``/set extensions code_pipeline set code_test_max 8`` (then ``/set save``).
+Pipeline loop limits are **defaults in this module**; optional overrides via
+``/set extensions code_pipeline set <key> <value>`` (then ``/set save``) merge on top of those defaults.
 """
 
 from __future__ import annotations
@@ -23,12 +23,20 @@ from typing import NamedTuple, Optional, Tuple
 
 from agentlib.repl_extensions import ReplExtensionRegistry
 from agentlib.session import SessionLineResult
-from agentlib.settings import DEFAULT_SETTINGS
 from agentlib.sink import sink_print_compat
 from agentlib.tui_parse import format_fork_command_line
 
-# Prefs id under ``settings.extensions`` (see ``/set extensions``).
+# Prefs id under ``session.settings.extensions`` (optional overrides via ``/set extensions``).
 EXTENSION_SETTINGS_ID = "code_pipeline"
+
+# Self-contained pipeline tunables (override per-session with ``/set extensions code_pipeline …``).
+_PIPELINE_DEFAULTS: dict[str, int] = {
+    "design_review_max": 5,
+    "code_test_max": 5,
+    "inner_round_max": 3,
+    "parse_fail_max": 10,
+    "user_ask_max_len": 8000,
+}
 
 
 class _PipelineLimits(NamedTuple):
@@ -40,31 +48,29 @@ class _PipelineLimits(NamedTuple):
 
 
 def _pipeline_limits(session) -> _PipelineLimits:
-    root = (DEFAULT_SETTINGS.get("extensions") or {}).get(EXTENSION_SETTINGS_ID) or {}
+    base = dict(_PIPELINE_DEFAULTS)
     st = getattr(session, "settings", None)
-    sub: dict = {}
     if st is not None:
         raw = st.get(("extensions", EXTENSION_SETTINGS_ID))
         if isinstance(raw, dict):
-            sub = raw
+            for k in _PIPELINE_DEFAULTS:
+                if k in raw:
+                    base[k] = raw[k]
 
-    def _int(key: str, fallback: int, *, minimum: int = 1) -> int:
-        v = sub.get(key, root.get(key, fallback))
+    def _int(name: str, *, minimum: int = 1) -> int:
+        v = base.get(name)
         try:
             n = int(str(v).strip(), 10)
         except Exception:
-            try:
-                n = int(root.get(key, fallback), 10)
-            except Exception:
-                n = int(fallback)
+            n = int(_PIPELINE_DEFAULTS[name])
         return max(minimum, n)
 
     return _PipelineLimits(
-        design_review_max=_int("design_review_max", 5),
-        code_test_max=_int("code_test_max", 5),
-        inner_round_max=_int("inner_round_max", 3),
-        parse_fail_max=_int("parse_fail_max", 10),
-        user_ask_max_len=_int("user_ask_max_len", 8000, minimum=256),
+        design_review_max=_int("design_review_max"),
+        code_test_max=_int("code_test_max"),
+        inner_round_max=_int("inner_round_max"),
+        parse_fail_max=_int("parse_fail_max"),
+        user_ask_max_len=_int("user_ask_max_len", minimum=256),
     )
 
 # --- Verdict block ------------------------------------------------------------
@@ -184,7 +190,12 @@ When you receive a user request, produce a concise implementation plan for this 
 - how tests should validate the change (which suites, new vs updated tests);
 - risks, edge cases, and assumptions where requirements are ambiguous (the orchestrator cannot answer follow-ups).
 
-End your message with EXACTLY one block in this form (SUMMARY may use multiple short lines):
+Make sure you study the directory and subdirectories from it that you are in to understand the current source code.
+The directory may be empty if you are starting a new project.
+
+End your message with EXACTLY one block in this form (SUMMARY may use multiple short lines).
+Your response must include the highly stylized information below.  It will be parsed by code so do not forget any part of it (including the ---END---)
+
 
 ---PIPELINE---
 VERDICT: PASS
@@ -201,7 +212,8 @@ Match existing style and patterns in the repo.
 
 Implement using your tools from the session working directory. Add or update tests as the plan describes.
 
-When the implementation is ready for review (code written, tests added/updated as planned), end with:
+When the implementation is ready for review (code written, tests added/updated as planned), end with a block below.
+Your response must include the highly stylized information below.  It will be parsed by code so do not forget any part of it (including the ---END---)
 
 ---PIPELINE---
 VERDICT: PASS
@@ -216,13 +228,15 @@ You only see text summaries (user ask, design, implementation) — not the full 
 Judge consistency with the user ask, whether the implementation summary plausibly matches the design,
 and whether obvious gaps are acknowledged (tests, error handling, backwards compatibility).
 
+You will need to study the directory and subdirectories to understand the repository.
+
 Use this checklist mentally; if any item is clearly violated, prefer VERDICT: FAIL and say which item:
 - Scope creep vs user ask / design
 - Missing or contradictory tests vs what the design promised
-- Security basics (secrets in code, injection, unsafe shell) if applicable from summaries
-- Breaking API/behavior without mention
+- Break any explicitly documented public API
 
 If you cannot verify something critical without seeing files, FAIL with SUMMARY explaining what you need (e.g. diff or paths).
+Your response must include the highly stylized information below.  It will be parsed by code so do not forget any part of it (including the ---END---)
 
 ---PIPELINE---
 VERDICT: PASS
@@ -235,8 +249,11 @@ _BOOT_TESTER = """You are the tester agent.
 
 Run automated tests from the session working directory (e.g. pytest, make test, npm test) using your tools.
 
+You will need to scan the repo to find where the tests are located.
+
 If the repo has no automated tests or you cannot find a standard command after a quick check, say so in SUMMARY
 and use VERDICT: FAIL unless you performed and described an explicit alternative verification (e.g. ran a minimal repro script).
+Your response must include the highly stylized information below.  It will be parsed by code so do not forget any part of it (including the ---END---)
 
 ---PIPELINE---
 VERDICT: PASS
@@ -483,7 +500,8 @@ def _cmd_code(session, rest: str) -> SessionLineResult:
 def register_repl(session, registry: ReplExtensionRegistry):
     registry.register_help(
         "/code <description> — run the multi-lane pipeline (designer → coder ↔ reviewer → tester) "
-        "via /fork_background lanes. Limits: /set extensions code_pipeline show"
+        "via /fork_background lanes. Tunables live in this module; optional prefs: "
+        "/set extensions code_pipeline set <key> <value> (see module _PIPELINE_DEFAULTS keys)."
     )
     registry.register_command("code", _cmd_code)
     return list(_POST_LOAD_LINES)
