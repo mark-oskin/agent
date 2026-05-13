@@ -750,11 +750,8 @@ class AgentApp:
         except Exception:
             self._repl_readline_installed = False
 
-    def repl_read_line(self, prompt: str) -> str:
-        if not sys.stdin.isatty():
-            return input(prompt)
-        if not self.settings_get_bool(("agent", "repl_buffered_line"), False):
-            return input(prompt)
+    def _repl_read_stdin_line_raw(self, prompt: str) -> str:
+        """Read one physical line from stdin (no ``input()`` / per-line readline history)."""
         maxb = self.repl_input_max_bytes()
         print(prompt, end="", flush=True)
         try:
@@ -764,15 +761,31 @@ class AgentApp:
         if len(raw) > maxb:
             print(f"\n[Input truncated to {maxb} bytes]", file=sys.stderr)
             raw = raw[:maxb]
-        text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-        if self._repl_readline_installed and text.strip():
-            try:
-                import readline  # type: ignore[import-not-found]
+        return raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
-                readline.add_history(text)
-            except Exception:
-                pass
-        return text
+    def repl_commit_readline_history(self, line: str) -> None:
+        """Append one logical line to GNU readline history (used after multi-line ``\"\"\"`` blocks)."""
+        if not self._repl_readline_installed:
+            return
+        if not (line or "").strip():
+            return
+        try:
+            import readline  # type: ignore[import-not-found]
+
+            readline.add_history(line)
+        except Exception:
+            pass
+
+    def repl_read_line(self, prompt: str, *, record_history: bool = True) -> str:
+        tty = sys.stdin.isatty()
+        buffered = self.settings_get_bool(("agent", "repl_buffered_line"), False)
+        # Buffered TTY, or any path that must not auto-record each physical line (multi-line blocks).
+        if not record_history or (tty and buffered):
+            text = self._repl_read_stdin_line_raw(prompt)
+            if record_history and tty and buffered and text.strip():
+                self.repl_commit_readline_history(text)
+            return text
+        return input(prompt)
 
     # --- run modes ---
 
@@ -965,9 +978,11 @@ class AgentApp:
         run_interactive_repl_loop(
             session,
             install_readline=self.interactive_repl_install_readline,
-            repl_read_line=self.repl_read_line,
+            repl_read_line=lambda p: self.repl_read_line(p, record_history=False),
             flush_repl_history=self.flush_repl_readline_history,
             agent_progress=self.agent_progress,
+            max_input_bytes=self.repl_input_max_bytes(),
+            repl_commit_input_history=self.repl_commit_readline_history,
         )
 
     def run(self, argv: Optional[list[str]] = None) -> None:

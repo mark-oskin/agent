@@ -617,6 +617,7 @@ def test_ctrl_c_cancels_request_but_keeps_repl_running(tmp_path, monkeypatch):
             repl_read_line=repl_read_line,
             flush_repl_history=lambda: None,
             agent_progress=lambda _m: None,
+            max_input_bytes=131072,
         )
     out = buf.getvalue()
     assert "[Cancelled]" in out
