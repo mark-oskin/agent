@@ -48,6 +48,7 @@ def build_test_session(
     """
     from agentlib.session import AgentSession
     from agentlib.llm.profile import LlmProfile, default_primary_llm_profile
+    from agentlib.llm import usage as llm_usage
     from agentlib import prompt_templates_io, prompts
     from agentlib.context.io import load_context_messages, save_context_bundle
     from agentlib.skills.loader import load_skills_from_dir
@@ -158,7 +159,7 @@ def build_test_session(
         session_prompt_template=None,
         agent_progress=app.agent_progress,
         fetch_ollama_local_model_names=lambda: [],
-        format_last_ollama_usage_for_repl=lambda: "",
+        format_last_ollama_usage_for_repl=lambda: llm_usage.format_last_ollama_usage_for_repl(None),
         format_session_primary_llm_line=format_session_primary_llm_line,
         format_session_reviewer_line=format_session_reviewer_line,
         print_skill_usage_verbose=app.print_skill_usage_verbose,

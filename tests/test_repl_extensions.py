@@ -172,6 +172,16 @@ def test_repl_load_same_file_twice_replaces_help(monkeypatch):
 _CODE_EXT = Path(__file__).resolve().parent.parent / "extensions" / "code.py"
 
 
+def test_repl_usage_and_tokens_show_message_when_no_usage(monkeypatch):
+    lines = ["/usage", "/tokens", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert out.count("No data available") >= 2
+
+
 def test_repl_load_bare_help_is_generic(monkeypatch):
     lines = ["/load", "/quit"]
     buf = io.StringIO()

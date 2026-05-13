@@ -1351,7 +1351,8 @@ class AgentSession:
         if cmd == "/compact":
             return self._cmd_compact(s)
         if low in ("/usage", "/tokens"):
-            sink_print_compat(self._format_last_ollama_usage_for_repl())
+            text = self._format_last_ollama_usage_for_repl()
+            sink_print_compat(text.strip() if text.strip() else "No data available.")
             return SessionLineResult()
         if s.startswith("/show"):
             return self._cmd_show(s)

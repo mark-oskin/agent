@@ -89,6 +89,7 @@ def build_embedded_session(
     from agentlib.app import default_app
     from agentlib.context.io import load_context_messages, save_context_bundle
     from agentlib.llm.discovery import fetch_ollama_local_model_names as fetch_ollama_local_model_names_impl
+    from agentlib.llm import usage as llm_usage
     from agentlib.coercion import scalar_to_str
     from agentlib.deliverables import deliverable_skip_mandatory_web, user_wants_written_deliverable
     from agentlib.llm.profile import (
@@ -236,7 +237,9 @@ def build_embedded_session(
         fetch_ollama_local_model_names=lambda: fetch_ollama_local_model_names_impl(
             app.ollama_base_url(), http_get=requests.get, timeout=60
         ),
-        format_last_ollama_usage_for_repl=lambda: "",
+        format_last_ollama_usage_for_repl=lambda: llm_usage.format_last_ollama_usage_for_repl(
+            app._last_ollama_usage
+        ),
         format_session_primary_llm_line=format_session_primary_llm_line,
         format_session_reviewer_line=format_session_reviewer_line,
         print_skill_usage_verbose=app.print_skill_usage_verbose,

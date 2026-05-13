@@ -40,9 +40,9 @@ def format_last_ollama_usage_for_repl(last_usage: Optional[dict]) -> str:
     """Human-readable report for /usage (last local Ollama agent chat only)."""
     if last_usage is None:
         return (
-            "No Ollama usage captured yet. Stats come from the local primary model's last "
-            "/api/chat response (not hosted APIs). After a turn, try again, or use "
-            "/set verbose 2 to print usage after each Ollama call (level 2)."
+            "No data available.\n"
+            "Ollama usage stats come from the local primary model's last /api/chat response (not hosted APIs). "
+            "After a turn, try again, or use /set verbose 2 to print usage after each Ollama call (level 2)."
         )
     return (
         format_ollama_usage_line(last_usage)

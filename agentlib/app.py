@@ -86,6 +86,7 @@ class AgentApp:
 
     _cached_turn_deps: Optional[ConversationTurnDeps] = None
     _repl_readline_installed: bool = False
+    _last_ollama_usage: Optional[dict] = None
 
     # --- directories / defaults ---
 
@@ -280,6 +281,9 @@ class AgentApp:
             return
         sink_emit({"type": "progress", "text": f"→ {msg.strip()}"})
 
+    def _set_last_ollama_usage(self, usage: Optional[dict]) -> None:
+        self._last_ollama_usage = usage
+
     # --- LLM calls (overridable in tests by monkeypatching these methods) ---
 
     def merge_stream_message_chunks(self, lines_iter, *, stream_chunks: bool = False):
@@ -312,8 +316,8 @@ class AgentApp:
                 msg, enabled_tools, self.agent_json_deps()
             ),
             verbose_emit_final_agent_readable=lambda _txt: None,
-            format_ollama_usage_line=lambda u: "",
-            set_last_ollama_usage=lambda _u: None,
+            format_ollama_usage_line=llm_usage.format_ollama_usage_line,
+            set_last_ollama_usage=self._set_last_ollama_usage,
             call_hosted_agent_chat_impl=call_hosted_agent_chat,
         )
 
@@ -353,7 +357,7 @@ class AgentApp:
             ollama_model=self.ollama_model(),
             merge_stream_message_chunks=self.merge_stream_message_chunks,
             ollama_usage_from_chat_response=streaming.ollama_usage_from_chat_response,
-            set_last_ollama_usage=lambda _u: None,
+            set_last_ollama_usage=self._set_last_ollama_usage,
         )
 
     # --- tool/router helpers (overridable in tests) ---
@@ -952,7 +956,9 @@ class AgentApp:
             fetch_ollama_local_model_names=lambda: fetch_ollama_local_model_names_impl(
                 self.ollama_base_url(), http_get=requests.get, timeout=60
             ),
-            format_last_ollama_usage_for_repl=lambda: "",
+            format_last_ollama_usage_for_repl=lambda: llm_usage.format_last_ollama_usage_for_repl(
+                self._last_ollama_usage
+            ),
             format_session_primary_llm_line=format_session_primary_llm_line,
             format_session_reviewer_line=format_session_reviewer_line,
             print_skill_usage_verbose=self.print_skill_usage_verbose,
