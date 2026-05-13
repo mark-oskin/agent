@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional, cast
+import re
+from typing import Any, Callable, Optional, cast
 
 from agentlib.llm.profile import LlmProfile
 
@@ -165,3 +166,90 @@ def maybe_compact_context_window(
             }
         )
     return new_messages
+
+
+_RE_WORDS = re.compile(r"\S+")
+
+
+def count_words(text: str) -> int:
+    return len(_RE_WORDS.findall((text or "").strip()))
+
+
+def _truncate_to_max_words(text: str, max_words: int) -> str:
+    words = _RE_WORDS.findall((text or "").strip())
+    if len(words) <= max_words:
+        return (text or "").strip()
+    return " ".join(words[:max_words]) + "\n…(truncated to word budget)\n"
+
+
+def _truncate_to_approx_tokens(text: str, max_tokens: int) -> str:
+    cap = max(200, int(max_tokens) * 4)
+    t = (text or "").strip()
+    if len(t) <= cap:
+        return t
+    return t[: cap - 40].rstrip() + "\n…(truncated to token budget)\n"
+
+
+def llm_compress_transcript_for_repl(
+    *,
+    profile: Optional[LlmProfile],
+    transcript: str,
+    constraint_kind: str,
+    constraint_value: int,
+    call_hosted_chat_plain: Callable[[list, Any], str],
+    call_ollama_plaintext: Callable[[list, str], str],
+    ollama_model: str,
+) -> str:
+    """
+    Ask the primary LLM to compress a transcript for continued conversation.
+
+    ``constraint_kind`` is ``"approx_tokens"`` (aim under ~N heuristic tokens) or ``"max_words"``
+    (hard cap on words in the model output).
+    """
+    t = (transcript or "").strip()
+    if not t:
+        return ""
+
+    if constraint_kind == "max_words":
+        n = max(1, int(constraint_value))
+        constraint_line = (
+            f"Your entire reply must be at most {n} words. "
+            "Count words in the final text only; stay under the limit."
+        )
+        post_trim = lambda s: _truncate_to_max_words(s, n)
+    elif constraint_kind == "approx_tokens":
+        tok = max(32, int(constraint_value))
+        approx_chars = max(200, tok * 4)
+        constraint_line = (
+            f"Your entire reply must fit within approximately {tok} tokens "
+            f"(aim well under ~{approx_chars} characters of body text; be concise)."
+        )
+        post_trim = lambda s: _truncate_to_approx_tokens(s, tok)
+    else:
+        raise ValueError(f"unknown constraint_kind: {constraint_kind!r}")
+
+    prompt = (
+        "You are compressing a prior chat transcript so the assistant can continue with less context.\n\n"
+        "Preserve: user goals, constraints, decisions, file paths, commands run, errors, open questions, "
+        "and technical facts the user cares about.\n"
+        "Omit: chit-chat, repeated content, and raw tool dumps unless a short conclusion is impossible "
+        "without them.\n\n"
+        "Write plain text or light markdown as one cohesive summary of what matters for the next turns "
+        "(not a screenplay unless necessary).\n\n"
+        f"{constraint_line}\n\n"
+        "Do not preface with phrases like 'Here is a summary'. Do not comment on these instructions.\n\n"
+        "Transcript to compress:\n---\n"
+        f"{t}\n---\n"
+    )
+    msgs = [
+        {"role": "system", "content": "You compress conversation transcripts. Output only the compressed text."},
+        {"role": "user", "content": prompt},
+    ]
+    if profile is not None and getattr(profile, "backend", "") == "hosted":
+        raw = call_hosted_chat_plain(msgs, profile)
+    else:
+        raw = call_ollama_plaintext(msgs, ollama_model)
+    out = cast(str, raw).strip()
+    if not out:
+        return ""
+    return post_trim(out)

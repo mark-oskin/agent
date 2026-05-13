@@ -120,6 +120,7 @@ In the TUI, normal slash-command help and confirmations appear in the **main tra
 | `/help` | Command list (many topics also support **`/topic help`**, e.g. **`/set help`**) |
 | `/quit` | Exit |
 | `/clear` | Clear in-memory messages (and the stored skill for `/skill reuse`) |
+| `/compact` | Optional target **N%** (e.g. `25%`) or **word count** (e.g. `400`); default **10%** of current estimated tokens. Asks the primary LLM to compress the transcript, then replaces all messages with that summary (same scratch reset as `/clear`). |
 | `/show models` | List local Ollama models (`/api/tags`; alias **`/show local_models`**) |
 | `/usage` | Show last Ollama prompt/completion usage from `/api/chat` |
 | `/show model` | Current **primary** LLM (Ollama or hosted) |

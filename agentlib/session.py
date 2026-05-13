@@ -25,8 +25,13 @@ from agentlib.tools.turn_support import resolve_path_under_session
 from agentlib import prompts as agent_prompts
 from agentlib.tui_parse import parse_send_command
 from agentlib.tools import builtins as tool_builtins
+from agentlib.context.compaction import (
+    approx_message_tokens,
+    format_messages_for_summary,
+    llm_compress_transcript_for_repl,
+)
 from agentlib.llm.discovery import fetch_ollama_model_show
-from agentlib.llm.profile import preserved_request_options
+from agentlib.llm.profile import effective_ollama_model_from_profile, preserved_request_options
 from agentlib.llm.request_options import (
     normalize_request_options_pref,
     parse_request_option_scalar_value,
@@ -301,6 +306,106 @@ class AgentSession:
         self.session_cwd = target
         self._rebind_session_fs_tools()
         sink_print_compat(f"Working directory: {self.session_cwd}")
+        return SessionLineResult()
+
+    def _cmd_compact(self, s: str) -> SessionLineResult:
+        """``/compact`` — LLM-compress transcript, then replace ``messages`` (same scratch reset as ``/clear``)."""
+        try:
+            parts = shlex.split(s.strip())
+        except ValueError as e:
+            sink_print_compat(f"/compact: {e}")
+            return SessionLineResult()
+        if len(parts) > 2:
+            sink_print_compat("Usage: /compact [N% | WORDS]   (default: 10% of current size; try /compact help)")
+            return SessionLineResult()
+        arg = parts[1] if len(parts) > 1 else ""
+        if arg.lower() in ("help", "-h", "--help"):
+            sink_print_compat(
+                "/compact — ask the primary LLM to compress chat history, then replace messages "
+                "(same reset as /clear for skill reuse and /last snapshots).\n"
+                "  /compact        target ~10% of current estimated token size\n"
+                "  /compact 25%    target ~25% of current estimated token size\n"
+                "  /compact 400    compressed summary at most 400 words\n"
+            )
+            return SessionLineResult()
+
+        text = format_messages_for_summary(self.messages)
+        if not text.strip():
+            sink_print_compat("/compact: nothing to compress (no user/assistant text in history).")
+            return SessionLineResult()
+
+        approx0 = approx_message_tokens(self.messages)
+        if approx0 < 1:
+            approx0 = 1
+
+        kind: str
+        val: int
+        if not arg:
+            target_toks = max(1, min(approx0, int(approx0 * 0.10)))
+            kind, val = "approx_tokens", target_toks
+        elif arg.endswith("%"):
+            try:
+                pct = float(arg[:-1].strip())
+            except ValueError:
+                sink_print_compat("/compact: invalid percent; use e.g. 25%")
+                return SessionLineResult()
+            if not (0.0 < pct <= 100.0):
+                sink_print_compat("/compact: percent must be greater than 0 and at most 100.")
+                return SessionLineResult()
+            target_toks = max(1, min(approx0, int(approx0 * pct / 100.0)))
+            kind, val = "approx_tokens", target_toks
+        elif arg.isdigit():
+            w = int(arg, 10)
+            if w < 1:
+                sink_print_compat("/compact: word count must be at least 1.")
+                return SessionLineResult()
+            kind, val = "max_words", w
+        else:
+            sink_print_compat("Usage: /compact [N% | WORDS]   (try /compact help)")
+            return SessionLineResult()
+
+        default_om = self.settings.get_str(("ollama", "model"), "qwen3.6:latest")
+        om = effective_ollama_model_from_profile(self.primary_profile, default_om)
+
+        self._agent_progress("Compressing conversation with the primary LLM…")
+        try:
+            compressed = llm_compress_transcript_for_repl(
+                profile=self.primary_profile,
+                transcript=text,
+                constraint_kind=kind,
+                constraint_value=val,
+                call_hosted_chat_plain=self._conversation_turn_deps.call_hosted_chat_plain,
+                call_ollama_plaintext=self._conversation_turn_deps.call_ollama_plaintext,
+                ollama_model=om,
+            )
+        except Exception as e:
+            sink_print_compat(f"/compact failed: {type(e).__name__}: {e}")
+            return SessionLineResult()
+
+        if not (compressed or "").strip():
+            sink_print_compat("/compact: model returned empty text; history unchanged.")
+            return SessionLineResult()
+
+        self.messages.clear()
+        self.last_reuse_skill_id = None
+        self.repl_last_user_query = None
+        self.repl_last_assistant_answer = None
+
+        body = (
+            "The following is a compressed transcript of the prior session "
+            "(produced by /compact). Continue from this context.\n\n"
+            f"{compressed.strip()}"
+        )
+        self.messages.append({"role": "system", "content": body})
+
+        approx1 = approx_message_tokens(self.messages)
+        if kind == "max_words":
+            detail = f"max {val} words"
+        else:
+            detail = f"~{val} target tokens"
+        sink_print_compat(
+            f"/compact: replaced history (~{approx0} → ~{approx1} est. tokens; {detail})."
+        )
         return SessionLineResult()
 
     def _resolve_call_python_argv_paths(self, argv: list[str]) -> list[str]:
@@ -1096,6 +1201,8 @@ class AgentSession:
             self.repl_last_assistant_answer = None
             sink_print_compat("Context cleared (including stored skill for /skill reuse).")
             return SessionLineResult()
+        if cmd == "/compact":
+            return self._cmd_compact(s)
         if low in ("/usage", "/tokens"):
             sink_print_compat(self._format_last_ollama_usage_for_repl())
             return SessionLineResult()
@@ -1198,6 +1305,7 @@ class AgentSession:
             sink_print_compat(
                 "  /quit · /exit\n"
                 "  /clear\n"
+                "  /compact [N% | WORDS]   (default 10%; LLM compresses history, replaces messages)\n"
                 "  /help · /?\n"
                 "  /usage · /tokens\n"
                 "  /cd DIR\n"
