@@ -606,7 +606,7 @@ def test_ctrl_c_cancels_request_but_keeps_repl_running(tmp_path, monkeypatch):
 
     lines = iter(["hello", "/quit"])
 
-    def repl_read_line(_prompt: str) -> str:
+    def repl_read_line(_prompt: str, _idx: int = 0) -> str:
         return next(lines)
 
     buf = io.StringIO()
@@ -1068,8 +1068,37 @@ def test_replace_text_on_real_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     p = tmp_path / "r.txt"
     p.write_text("aa OLD bb OLD cc", encoding="utf-8")
-    tool_builtins.replace_text(str(p), "OLD", "NEW", replace_all=True)
+    msg = tool_builtins.replace_text(str(p), "OLD", "NEW", replace_all=True)
     assert p.read_text(encoding="utf-8") == "aa NEW bb NEW cc"
+    assert "2 occurrences" in msg
+
+
+def test_replace_text_no_match_does_not_rewrite_file(tmp_path, monkeypatch):
+    from agentlib.tools import builtins as tool_builtins
+
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "q.txt"
+    body = "line one\n    choice = input(\"x\").strip()\n\n    if choice == '1':\n"
+    p.write_text(body, encoding="utf-8")
+    msg = tool_builtins.replace_text(
+        str(p),
+        r"DOES_NOT_EXIST_LITERAL_XYZ",
+        "REPLACED",
+        replace_all=True,
+    )
+    assert "No matches" in msg
+    assert p.read_text(encoding="utf-8") == body
+
+
+def test_replace_text_single_occurrence_message(tmp_path, monkeypatch):
+    from agentlib.tools import builtins as tool_builtins
+
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "one.txt"
+    p.write_text("only ONE here", encoding="utf-8")
+    msg = tool_builtins.replace_text(str(p), "ONE", "two", replace_all=True)
+    assert "1 occurrence" in msg
+    assert "two" in p.read_text(encoding="utf-8")
 
 
 def test_list_directory_real(tmp_path, monkeypatch):

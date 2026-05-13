@@ -89,7 +89,9 @@ CORE_TOOL_PROMPT_DOCS: dict[str, str] = {
     ),
     "replace_text": (
         "replace_text — parameters.path, parameters.pattern (regex string), parameters.replacement (string); "
-        "optional: parameters.replace_all (boolean, default true)."
+        "optional: parameters.replace_all (boolean, default true). "
+        "If the regex matches nowhere, the file is left unchanged and the tool explains why (indentation, "
+        "\\n vs spaces, unescaped . ( ) + * etc.)."
     ),
     "call_python": (
         "call_python — parameters.code (string, syntactically valid Python ONLY). "

@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from agentlib.repl.io import read_repl_lines_until_balanced_triple_double_quotes
+from agentlib.repl.io import _invoke_repl_read_line, read_repl_lines_until_balanced_triple_double_quotes
+
+
+def test_invoke_repl_read_line_passes_line_index_when_supported():
+    seen: list[tuple[str, int]] = []
+
+    def two_arg(p: str, i: int) -> str:
+        seen.append((p, i))
+        return f"L{i}"
+
+    assert _invoke_repl_read_line(two_arg, ">", 0) == "L0"
+    assert _invoke_repl_read_line(two_arg, "... ", 1) == "L1"
+    assert seen == [(">", 0), ("... ", 1)]
 
 
 def test_plain_line_one_read_no_triple_quotes():

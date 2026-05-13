@@ -787,6 +787,33 @@ class AgentApp:
             return text
         return input(prompt)
 
+    def repl_read_line_in_block(self, prompt: str, physical_line_index: int) -> str:
+        """Stdin REPL multiline reader: first physical line uses ``input()`` so readline (↑/↓) works; later lines raw."""
+        tty = sys.stdin.isatty()
+        buffered = self.settings_get_bool(("agent", "repl_buffered_line"), False)
+        if tty and not buffered and physical_line_index == 0:
+            return self.repl_read_line(prompt, record_history=True)
+        return self.repl_read_line(prompt, record_history=False)
+
+    def repl_commit_block_readline_history(self, out: str) -> None:
+        """Append one logical block to readline history without duplicating single-line ``input()`` entries."""
+        if not (out or "").strip():
+            return
+        tty = sys.stdin.isatty()
+        buffered = self.settings_get_bool(("agent", "repl_buffered_line"), False)
+        if tty and not buffered:
+            if "\n" not in out:
+                return
+            try:
+                import readline  # type: ignore[import-not-found]
+
+                n = readline.get_current_history_length()
+                if n > 0:
+                    readline.remove_history_item(n - 1)
+            except Exception:
+                pass
+        self.repl_commit_readline_history(out)
+
     # --- run modes ---
 
     def run_interactive(
@@ -978,11 +1005,11 @@ class AgentApp:
         run_interactive_repl_loop(
             session,
             install_readline=self.interactive_repl_install_readline,
-            repl_read_line=lambda p: self.repl_read_line(p, record_history=False),
+            repl_read_line=lambda p, i: self.repl_read_line_in_block(p, i),
             flush_repl_history=self.flush_repl_readline_history,
             agent_progress=self.agent_progress,
             max_input_bytes=self.repl_input_max_bytes(),
-            repl_commit_input_history=self.repl_commit_readline_history,
+            repl_commit_input_history=self.repl_commit_block_readline_history,
         )
 
     def run(self, argv: Optional[list[str]] = None) -> None:

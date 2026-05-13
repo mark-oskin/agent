@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 
 REPL_INPUT_MAX_DEFAULT = 131072
 
 
+def _invoke_repl_read_line(repl_read_line: Callable[..., Any], prompt: str, line_index: int) -> str:
+    """Call ``repl_read_line(prompt)`` or ``repl_read_line(prompt, line_index)`` (second form preferred)."""
+    try:
+        return repl_read_line(prompt, line_index)
+    except TypeError:
+        return repl_read_line(prompt)
+
+
 def read_repl_lines_until_balanced_triple_double_quotes(
-    repl_read_line: Callable[[str], str],
+    repl_read_line: Callable[..., Any],
     *,
     first_prompt: str,
     continuation_prompt: str = "... ",
@@ -21,11 +29,14 @@ def read_repl_lines_until_balanced_triple_double_quotes(
 
     If ``repl_commit_history`` is set, it is called **once** with the final stripped block (so a
     multi-physical-line ``\"\"\" … \"\"\"`` entry becomes a single readline history item).
+
+    ``repl_read_line`` may be ``(prompt) -> str`` or ``(prompt, line_index) -> str`` where
+    ``line_index`` is 0 for the first physical line of the block, 1 for the next, and so on.
     """
     chunks: list[str] = []
     while True:
         prompt = first_prompt if not chunks else continuation_prompt
-        line = repl_read_line(prompt)
+        line = _invoke_repl_read_line(repl_read_line, prompt, len(chunks))
         chunks.append(line)
         buf = "\n".join(chunks)
         raw_len = len(buf.encode("utf-8"))

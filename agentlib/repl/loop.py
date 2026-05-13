@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from agentlib.repl.io import read_repl_lines_until_balanced_triple_double_quotes
 from agentlib.session import AgentSession
@@ -12,7 +12,7 @@ def run_interactive_repl_loop(
     session: AgentSession,
     *,
     install_readline: Callable[[], None],
-    repl_read_line: Callable[[str], str],
+    repl_read_line: Callable[..., Any],
     flush_repl_history: Callable[[], None],
     agent_progress: Callable[[str], None],
     prompt: str = "> ",

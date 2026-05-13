@@ -123,10 +123,19 @@ def replace_text(path, pattern, replacement, replace_all=True):
         with open(path, "r") as f:
             text = f.read()
         count = 0 if bool(replace_all) else 1
-        new_text = re.sub(pattern, replacement, text, count=count)
+        new_text, n_subs = re.subn(pattern, replacement, text, count=count)
+        if n_subs == 0:
+            return (
+                f"No matches in {path} for the given regex (file left unchanged). "
+                "Patterns are full regular expressions (not plain text): match indentation, "
+                "newlines (\\n), and escape metacharacters like . ^ $ * + ? ( ) [ ] {{ }} | \\. "
+                "Use read_file on this path first and copy the exact substring to match."
+            )
         with open(path, "w") as f:
             f.write(new_text)
-        return f"Replaced text in {path}."
+        if n_subs == 1:
+            return f"Replaced 1 occurrence in {path}."
+        return f"Replaced {n_subs} occurrences in {path}."
     except Exception as e:
         return f"Replace error: {e}"
 
