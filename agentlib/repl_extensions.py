@@ -1,7 +1,10 @@
 """REPL extension loading via ``/load`` — user-supplied Python registers slash commands.
 
-``/load`` may pass options after the path (e.g. ``--single_lane``); see ``AgentSession._cmd_repl_load``.
-They appear on :attr:`ReplExtensionRegistry.load_flags` as normalized names (``single_lane``, …).
+``/load`` may pass options after the path (tokens after the first ``--``); see ``AgentSession._cmd_repl_load``.
+They appear on :attr:`ReplExtensionRegistry.load_flags` as normalized names.
+
+Optionally define ``describe_repl_load_options() -> str`` so ``/load FILE.py --help``, ``-h``, or
+``/load info FILE.py`` can print extension-specific documentation without registering the module.
 """
 
 from __future__ import annotations

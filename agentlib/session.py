@@ -64,7 +64,7 @@ def _split_repl_load_path_and_flags(parts: list[str]) -> tuple[Optional[str], li
     if not path_tokens:
         return (
             "no file path before options (put the ``.py`` path before any ``--`` flags, e.g. "
-            "``/load ./ext/code.py --single_lane``)",
+            "``/load ./my_ext.py --some_option``)",
             [],
             raw_flags,
         )
@@ -1152,6 +1152,47 @@ class AgentSession:
             sink_print_compat(traceback.format_exc())
             return SessionLineResult()
 
+    def _repl_load_describe_extension_options(self, path: Path) -> SessionLineResult:
+        """Import ``path`` ephemerally and print ``describe_repl_load_options()`` if present."""
+        path = path.resolve()
+        if not path.is_file():
+            sink_print_compat(f"/load: not a file: {path}")
+            return SessionLineResult()
+        digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+        module_name = f"repl_ext_doc_{digest}"
+        sys.modules.pop(module_name, None)
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        if spec is None or spec.loader is None:
+            sink_print_compat(f"/load: could not load spec for {path!r}")
+            return SessionLineResult()
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(module_name, None)
+            sink_print_compat(traceback.format_exc())
+            return SessionLineResult()
+        fn = getattr(mod, "describe_repl_load_options", None)
+        if callable(fn):
+            try:
+                text = fn()
+            except BaseException:
+                sys.modules.pop(module_name, None)
+                sink_print_compat(traceback.format_exc())
+                return SessionLineResult()
+            sys.modules.pop(module_name, None)
+            if text is not None:
+                sink_print_compat(str(text).rstrip())
+                return SessionLineResult()
+        sys.modules.pop(module_name, None)
+        sink_print_compat(
+            f"{path.name}: no ``describe_repl_load_options()`` hook (or it returned ``None``).\n"
+            "Extension authors can define ``def describe_repl_load_options() -> str:`` to document "
+            "``/load`` flags for this file. See also the module docstring and project README."
+        )
+        return SessionLineResult()
+
     def _cmd_repl_load(self, s: str) -> SessionLineResult:
         try:
             parts = shlex.split(s.strip())
@@ -1160,18 +1201,48 @@ class AgentSession:
             return SessionLineResult()
         if len(parts) < 2:
             sink_print_compat(
-                "/load FILE.py [OPTION …]\n\n"
-                "Options (after the path):\n"
-                "  --single_lane   For ``extensions/code.py``: run the ``/code`` pipeline inline on this\n"
-                "                    session (no ``/fork_background`` helper lanes).\n\n"
+                "/load FILE.py [ … --OPTIONS ]\n\n"
                 "Load a Python file that defines ``register_repl(session, registry)``.\n"
-                "The registry exposes ``registry.load_flags`` (frozenset of normalized option names).\n"
-                "The registry can ``register_command('name', handler)`` for ``/name`` lines, and "
+                "Tokens after the first ``--`` following the path are treated as ``/load`` options; "
+                "normalized names appear on ``registry.load_flags`` (e.g. ``--foo-bar`` → ``foo_bar``).\n"
+                "The registry can ``register_command('name', handler)`` for ``/name`` lines and "
                 "``register_help('…')`` to append lines to ``/help``.\n"
-                "Return ``None``, a single str, or a list of str lines to run via ``execute_line`` after loading.\n"
+                "Return ``None``, a single str, or a list of str lines to run via ``execute_line`` after loading.\n\n"
+                "Documentation for a specific file (does not register the extension):\n"
+                "  /load FILE.py --help     or  /load FILE.py -h\n"
+                "  /load info FILE.py\n\n"
+                "If the module defines ``describe_repl_load_options() -> str``, that text is printed; "
+                "otherwise a short default message is shown.\n\n"
                 "Use ``/unload`` to drop all loaded extensions."
             )
             return SessionLineResult()
+        if parts[1].lower() == "info":
+            if len(parts) < 3:
+                sink_print_compat("Usage: /load info FILE.py")
+                return SessionLineResult()
+            path_tokens = parts[2:]
+            path_raw = shlex.join(path_tokens) if len(path_tokens) > 1 else path_tokens[0]
+            path = Path(self._resolve_session_path(path_raw)).resolve()
+            return self._repl_load_describe_extension_options(path)
+        rest = parts[1:]
+        help_idx: Optional[int] = None
+        for i, t in enumerate(rest):
+            if t in ("--help", "-h"):
+                help_idx = i
+                break
+        if help_idx is not None:
+            prefix = rest[:help_idx]
+            trailing = rest[help_idx + 1 :]
+            if trailing:
+                sink_print_compat("/load: tokens after --help are ignored for documentation.")
+            fake_parts = ["/load", *prefix]
+            err, path_tokens, _raw_before_help = _split_repl_load_path_and_flags(fake_parts)
+            if err:
+                sink_print_compat(f"/load: {err}")
+                return SessionLineResult()
+            path_raw = shlex.join(path_tokens) if len(path_tokens) > 1 else path_tokens[0]
+            path = Path(self._resolve_session_path(path_raw)).resolve()
+            return self._repl_load_describe_extension_options(path)
         err, path_tokens, raw_flags = _split_repl_load_path_and_flags(parts)
         if err:
             sink_print_compat(f"/load: {err}")

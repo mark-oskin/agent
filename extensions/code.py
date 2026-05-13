@@ -798,6 +798,17 @@ def _run_pipeline(session, user_ask: str) -> str:
     return f"[code] aborted after {lim.code_test_max} test/code cycles (outer guard)."
 
 
+def describe_repl_load_options() -> str:
+    return """REPL extension load options for this file (after the path on the same line):
+
+  --single_lane   When the host exposes fork/delegate hooks, run the ``/code`` pipeline on the
+                  current session only (no ``/fork_background`` helper lanes). Ignored if the host
+                  is already single-lane.
+
+Same documentation: ``/load`` on this file with ``--help`` or ``-h``, or ``/load info`` on this path.
+"""
+
+
 def _cmd_code(session, rest: str) -> SessionLineResult:
     if not _pipeline_lock.acquire(blocking=False):
         return SessionLineResult(output="[code] Pipeline already running; wait for it to finish.")

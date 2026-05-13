@@ -172,6 +172,63 @@ def test_repl_load_same_file_twice_replaces_help(monkeypatch):
 _CODE_EXT = Path(__file__).resolve().parent.parent / "extensions" / "code.py"
 
 
+def test_repl_load_bare_help_is_generic(monkeypatch):
+    lines = ["/load", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "/load FILE.py --help" in out or "/load FILE.py -h" in out
+    assert "/load info FILE.py" in out
+    assert "extensions/code.py" not in out
+    assert "--single_lane" not in out
+
+
+def test_repl_load_info_and_help_describe_without_registering(monkeypatch):
+    fx = FIXTURES / "repl_ext_with_describe.py"
+    lines = [
+        f"/load info {fx}",
+        "/ext_with_desc_z x",
+        f"/load {fx} --help",
+        "/ext_with_desc_z y",
+        f"/load {fx} -h",
+        "/ext_with_desc_z z",
+        "/quit",
+    ]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert out.count("TEST_EXT_LOAD_OPTIONS_LINE") == 3
+    assert out.count("Unknown command '/ext_with_desc_z'") == 3
+
+
+def test_repl_load_info_usage_when_missing_path(monkeypatch):
+    lines = ["/load info", "/quit"]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    assert "Usage: /load info FILE.py" in buf.getvalue()
+
+
+def test_repl_load_help_trailing_tokens_warn(monkeypatch):
+    fx = FIXTURES / "repl_ext_with_describe.py"
+    lines = [
+        f"/load {fx} --help --ignored",
+        "/quit",
+    ]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "tokens after --help are ignored" in out
+    assert "TEST_EXT_LOAD_OPTIONS_LINE" in out
+
+
 def test_load_code_py_single_lane_updates_session_flag(monkeypatch):
     _app, session = build_test_session(monkeypatch, verbose=0)
     session.execute_line(f"/load {_CODE_EXT} --single_lane")
