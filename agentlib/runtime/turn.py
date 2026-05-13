@@ -483,7 +483,7 @@ def run_agent_conversation_turn(
             params = turn_support.apply_session_cwd_tool_params(tool, params, deps)
             fp = deps.tool_params_fingerprint(tool, params)
             orig_fp = fp
-            dedupe_ok = tool not in ("read_file", "tail_file")
+            dedupe_ok = tool not in ("read_file", "tail_file", "grep")
             skipped_duplicate = bool(dedupe_ok and fp in seen_tool_fingerprints)
             policy_blocked = False
             if verbose >= 1:
@@ -563,6 +563,15 @@ def run_agent_conversation_turn(
                             result = deps.list_directory(params.get("path"))
                         elif tool == "read_file":
                             result = deps.read_file(params.get("path"))
+                        elif tool == "grep":
+                            result = deps.grep(
+                                params.get("pattern"),
+                                params.get("path", "."),
+                                params.get("glob_pattern") if params.get("glob_pattern") is not None else params.get("glob"),
+                                params.get("max_matches", 200),
+                                params.get("max_files", 8000),
+                                params.get("ignore_case", False),
+                            )
                         elif tool == "download_file":
                             result = deps.download_file(params.get("url"), params.get("path"))
                         elif tool == "tail_file":

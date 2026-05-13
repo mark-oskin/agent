@@ -43,6 +43,11 @@ CORE_TOOL_ENTRIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("read_file", "Read a file", ("read", "cat", "open file", "slurp")),
     (
+        "grep",
+        "Search files with a regex (ripgrep-like, Python re)",
+        ("rg", "ripgrep", "code search", "search in repo", "find in files"),
+    ),
+    (
         "list_directory",
         "List directory contents",
         ("ls", "dir", "list dir", "folder", "directory"),
@@ -82,6 +87,12 @@ CORE_TOOL_PROMPT_DOCS: dict[str, str] = {
     ),
     "write_file": "write_file — parameters.path (file path string), parameters.content (string to write).",
     "read_file": "read_file — parameters.path (file path string).",
+    "grep": (
+        "grep — parameters.pattern (non-empty Python ``re`` regex string); optional parameters.path "
+        "(file or directory, default ``.``); optional parameters.glob_pattern (e.g. ``*.py``) when searching a directory; "
+        "optional parameters.max_matches (int, default 200, max 5000); optional parameters.max_files (int, default 8000); "
+        "optional parameters.ignore_case (boolean). Returns matching lines as ``path:line:text`` plus a short summary footer."
+    ),
     "list_directory": "list_directory — parameters.path (directory path string).",
     "download_file": "download_file — parameters.url (source URL string), parameters.path (destination file path).",
     "tail_file": (
@@ -285,6 +296,7 @@ def describe_tool_call_contract(tool_id: str) -> str:
         "use_git": "parameters.op plus additional fields (status|log|diff|add|commit|push|pull|branch). Returns: git output string.",
         "write_file": "parameters.path, parameters.content. Returns: success/error string.",
         "read_file": "parameters.path. Returns: file contents string (or error).",
+        "grep": "parameters.pattern; optional path, glob_pattern, max_matches, max_files, ignore_case. Returns: path:line:text lines + summary (or error).",
         "list_directory": "parameters.path. Returns: JSON-ish list string (or error).",
         "download_file": "parameters.url, parameters.path. Returns: success/error string.",
         "tail_file": "parameters.path, optional lines. Returns: tail text string.",

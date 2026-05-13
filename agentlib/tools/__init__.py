@@ -1,6 +1,7 @@
 from .builtins import (
     download_file,
     fetch_page,
+    grep,
     list_directory,
     read_file,
     replace_text,
@@ -33,6 +34,7 @@ __all__ = [
     "fetch_page",
     "format_settings_tools_list",
     "format_unknown_tool_hint",
+    "grep",
     "list_directory",
     "load_plugin_toolsets",
     "normalize_tool_name",

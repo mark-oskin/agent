@@ -31,6 +31,12 @@ def tool_progress_message(tool: str, params: dict, *, search_backend_banner: str
         return f"Tool: fetch_page url={_clip(p.get('url'))!r}"
     if t == "read_file":
         return f"Tool: read_file path={_clip(p.get('path'))!r}"
+    if t == "grep":
+        glo = p.get("glob_pattern") if p.get("glob_pattern") is not None else p.get("glob")
+        return (
+            f"Tool: grep pattern={_clip(p.get('pattern'))!r} path={_clip(p.get('path'))!r} "
+            f"glob={_clip(glo)!r}"
+        )
     if t == "list_directory":
         return f"Tool: list_directory path={_clip(p.get('path'))!r}"
     if t == "tail_file":

@@ -42,6 +42,7 @@ class ConversationTurnDeps:
     write_file: Callable[[Any, Any], str]
     list_directory: Callable[[Any], str]
     read_file: Callable[[Any], str]
+    grep: Callable[..., str]
     download_file: Callable[[Any, Any], str]
     tail_file: Callable[[Any, Any], str]
     replace_text: Callable[..., str]

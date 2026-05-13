@@ -601,6 +601,7 @@ class AgentApp:
             write_file=tool_builtins.write_file,
             list_directory=tool_builtins.list_directory,
             read_file=tool_builtins.read_file,
+            grep=tool_builtins.grep,
             download_file=tool_builtins.download_file,
             tail_file=tool_builtins.tail_file,
             replace_text=tool_builtins.replace_text,

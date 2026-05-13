@@ -656,6 +656,16 @@ def normalize_agent_dict(d: dict, deps: AgentJsonDeps) -> dict:
             for alt in ("files", "file", "file_paths"):
                 if alt in out and out[alt] is not None and "paths" not in params:
                     params.setdefault("paths", out[alt])
+        elif tool_name == "grep":
+            for alt in ("regex", "regexp", "re"):
+                if alt in out and out[alt] is not None:
+                    params.setdefault("pattern", out[alt])
+            for alt in ("root", "directory", "dir", "folder"):
+                if alt in out and out[alt] is not None:
+                    params.setdefault("path", out[alt])
+            for alt in ("glob", "include", "file_glob"):
+                if alt in out and out[alt] is not None and "glob_pattern" not in params:
+                    params.setdefault("glob_pattern", out[alt])
 
         merge = deps.merge_tool_param_aliases
         params = merge(tool_name or "", params)
@@ -684,6 +694,16 @@ def normalize_agent_dict(d: dict, deps: AgentJsonDeps) -> dict:
                 "files",
                 "file",
                 "file_paths",
+                "regex",
+                "regexp",
+                "re",
+                "root",
+                "directory",
+                "dir",
+                "folder",
+                "glob",
+                "include",
+                "file_glob",
                 "applescript",
                 "code",
                 "source",

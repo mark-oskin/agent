@@ -140,6 +140,27 @@ def merge_tool_param_aliases(tool: str, params: dict, *, scalar_to_str_fn=scalar
                     p["text"] = p.get(alt)
                     p.pop(alt, None)
                     break
+    elif tool == "grep":
+        if not st(p.get("pattern"), "").strip():
+            for alt in ("regex", "regexp", "re"):
+                t = st(p.get(alt), "").strip()
+                if t:
+                    p["pattern"] = t
+                    p.pop(alt, None)
+                    break
+        if not st(p.get("path"), "").strip():
+            for alt in ("root", "directory", "dir", "folder"):
+                t = st(p.get(alt), "").strip()
+                if t:
+                    p["path"] = t
+                    p.pop(alt, None)
+                    break
+        if p.get("glob_pattern") is None:
+            for alt in ("glob", "include", "file_glob"):
+                if p.get(alt) is not None:
+                    p["glob_pattern"] = p.get(alt)
+                    p.pop(alt, None)
+                    break
     elif tool == "run_applescript":
         if not st(p.get("script"), "").strip():
             for alt in ("code", "applescript", "source", "text", "body"):
@@ -159,6 +180,9 @@ def ensure_tool_defaults(tool: str, params: dict, user_query: str, *, scalar_to_
     if tool in ("search_web", "search_web_fetch_top"):
         if not st(p.get("query"), "").strip():
             p["query"] = uq if uq else "web search"
+    if tool == "grep":
+        if not st(p.get("path"), "").strip():
+            p["path"] = "."
     return p
 
 
@@ -255,6 +279,9 @@ def apply_session_cwd_tool_params(tool: str, params: dict, deps: Any) -> dict:
             p["path"] = rp(p.get("path"))
     elif tool == "read_file":
         if "path" in p:
+            p["path"] = rp(p.get("path"))
+    elif tool == "grep":
+        if "path" in p and st(p.get("path"), "").strip():
             p["path"] = rp(p.get("path"))
     elif tool == "list_directory":
         if "path" in p:
@@ -358,7 +385,7 @@ def is_tool_result_weak_for_dedup(result: str) -> bool:
         return True
     if r.startswith("Fetch error:") or "Fetch error:" in r[:200]:
         return True
-    if r.startswith("Read error:") or r.startswith("List dir error:"):
+    if r.startswith("Read error:") or r.startswith("List dir error:") or r.startswith("Grep error:"):
         return True
     if ("[DuckDuckGo instant answer]" in r or "[Web results]" in r or "[Wikipedia search]" in r) and not re.search(
         r"https?://", r
@@ -417,6 +444,8 @@ def tool_result_indicates_retryable_failure(tool: str, result) -> bool:
     r = (result if isinstance(result, str) else str(result)).strip()
     if not r:
         return False
+    if tool == "grep":
+        return r.startswith("Grep error:")
     if tool == "run_command":
         return r.startswith("Command error:")
     if tool == "call_python":

@@ -60,7 +60,7 @@ def self_capability_followup(user_query: str, proposed_answer: str) -> str:
     uq = (user_query or "").strip()
     ans = (proposed_answer or "").strip()
     tools = (
-        "search_web, search_web_fetch_top, fetch_page, run_command, use_git, write_file, read_file, list_directory, "
+        "search_web, search_web_fetch_top, fetch_page, run_command, use_git, write_file, read_file, grep, list_directory, "
         "download_file, tail_file, replace_text, call_python"
     )
     return (

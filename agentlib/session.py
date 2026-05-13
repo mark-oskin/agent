@@ -302,6 +302,26 @@ class AgentSession:
     def _session_read_file(self, path: object) -> str:
         return tool_builtins.read_file(self._resolve_session_path(path))
 
+    def _session_grep(
+        self,
+        pattern: object,
+        path: object = ".",
+        glob_pattern: object = None,
+        max_matches: object = 200,
+        max_files: object = 8000,
+        ignore_case: object = False,
+    ) -> str:
+        raw_path = self._conversation_turn_deps.scalar_to_str(path, ".") or "."
+        resolved = self._resolve_session_path(raw_path)
+        return tool_builtins.grep(
+            pattern,
+            resolved,
+            glob_pattern,
+            max_matches,
+            max_files,
+            ignore_case,
+        )
+
     def _session_list_directory(self, path: object) -> str:
         return tool_builtins.list_directory(self._resolve_session_path(path))
 
@@ -326,6 +346,7 @@ class AgentSession:
             session_cwd=self.session_cwd,
             write_file=self._session_write_file,
             read_file=self._session_read_file,
+            grep=self._session_grep,
             list_directory=self._session_list_directory,
             download_file=self._session_download_file,
             tail_file=self._session_tail_file,

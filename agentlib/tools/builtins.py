@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import io
 import json
 import os
 import re
 import subprocess
 import time
-import io
 from typing import Any, Optional, Union
 
 import requests
@@ -83,6 +83,173 @@ def read_file(path):
             return f.read()
     except Exception as e:
         return f"Read error: {e}"
+
+
+_GREP_SKIP_DIR_NAMES = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+        ".tox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".nox",
+        "dist",
+        "build",
+        ".eggs",
+        ".gradle",
+        ".idea",
+        ".vscode",
+    }
+)
+_GREP_MAX_FILE_BYTES = 2 * 1024 * 1024
+_GREP_MAX_OUTPUT_CHARS = 120_000
+
+
+def _grep_scalar_bool(x, default: bool = False) -> bool:
+    if x is None:
+        return default
+    if isinstance(x, bool):
+        return x
+    s = str(x).strip().lower()
+    if s in ("1", "true", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "no", "n", "off", ""):
+        return False
+    return default
+
+
+def _grep_file_matches_glob(rel_path: str, pat: str) -> bool:
+    if not pat.strip():
+        return True
+    rel = rel_path.replace(os.sep, "/")
+    bn = os.path.basename(rel)
+    return fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(bn, pat)
+
+
+def grep(pattern, path=".", glob_pattern=None, max_matches=200, max_files=8000, ignore_case=False):
+    """
+    Search for ``pattern`` (Python ``re`` regex) under ``path`` (file or directory).
+
+    Optional ``glob_pattern`` (e.g. ``*.py``) filters relative paths when searching a directory.
+    """
+    pattern = _scalar_to_str(pattern, "")
+    path = _scalar_to_str(path, ".") or "."
+    gp = glob_pattern
+    glob_pattern = _scalar_to_str(gp, "").strip() if gp is not None else ""
+    glob_pattern = glob_pattern or None
+    max_matches = max(1, min(_scalar_to_int(max_matches, 200), 5000))
+    max_files = max(1, min(_scalar_to_int(max_files, 8000), 50_000))
+    ignore_case = _grep_scalar_bool(ignore_case, False)
+    if not pattern.strip():
+        return "Grep error: parameters.pattern (regex) is required and must be non-empty."
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        cre = re.compile(pattern, flags)
+    except re.error as e:
+        return f"Grep error: invalid regex: {e}"
+    root = os.path.abspath(os.path.expanduser(path))
+    if not os.path.exists(root):
+        return f"Grep error: path does not exist: {root!r}"
+
+    lines_out: list[str] = []
+    out_len = 0
+    total_matches = 0
+    files_scanned = 0
+    truncated = False
+
+    def emit(line: str) -> bool:
+        nonlocal out_len, truncated
+        if truncated:
+            return False
+        if out_len + len(line) + 1 > _GREP_MAX_OUTPUT_CHARS:
+            truncated = True
+            return False
+        lines_out.append(line)
+        out_len += len(line) + 1
+        return True
+
+    def scan_one_file(fp: str, rel_disp: str) -> bool:
+        """Return False if caller should stop scanning (limits or output cap)."""
+        nonlocal files_scanned, total_matches, truncated
+        if total_matches >= max_matches or truncated:
+            return False
+        try:
+            sz = os.path.getsize(fp)
+        except OSError:
+            return True
+        if sz > _GREP_MAX_FILE_BYTES:
+            return True
+        if files_scanned >= max_files:
+            return False
+        files_scanned += 1
+        try:
+            with open(fp, "rb") as bf:
+                probe = bf.read(8192)
+            if b"\x00" in probe:
+                return True
+            with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                for lineno, line in enumerate(f, 1):
+                    if total_matches >= max_matches:
+                        return False
+                    if cre.search(line):
+                        piece = line.rstrip("\n\r")
+                        if len(piece) > 2000:
+                            piece = piece[:2000] + "…"
+                        if not emit(f"{rel_disp}:{lineno}:{piece}"):
+                            return False
+                        total_matches += 1
+        except (OSError, UnicodeError):
+            return not truncated
+        return not truncated
+
+    if os.path.isfile(root):
+        rel_disp = os.path.basename(root)
+        if glob_pattern and not _grep_file_matches_glob(rel_disp, glob_pattern):
+            return (
+                "Grep: 0 matches (optional glob_pattern did not match this file; "
+                "omit glob_pattern or point path at a directory)."
+            )
+        scan_one_file(root, rel_disp)
+    elif os.path.isdir(root):
+        stop_walk = False
+        for dirpath, dirnames, filenames in os.walk(root):
+            if stop_walk:
+                break
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in _GREP_SKIP_DIR_NAMES and not str(d).endswith(".egg-info")
+            ]
+            for fn in filenames:
+                fp = os.path.join(dirpath, fn)
+                rel = os.path.relpath(fp, root).replace(os.sep, "/")
+                if glob_pattern and not _grep_file_matches_glob(rel, glob_pattern):
+                    continue
+                if not scan_one_file(fp, rel):
+                    stop_walk = True
+                    break
+    else:
+        return f"Grep error: not a file or directory: {root!r}"
+
+    if not lines_out:
+        hint = ""
+        if glob_pattern:
+            hint = f" (glob_pattern={glob_pattern!r})"
+        return f"Grep: 0 matches under {root!r}{hint}."
+
+    footer = []
+    footer.append(f"[Grep summary] matches={total_matches} files_opened={files_scanned}")
+    if truncated or total_matches >= max_matches or files_scanned >= max_files:
+        footer.append(
+            "[Grep limits] Output or match/file budget was reached; narrow pattern, path, or glob_pattern "
+            "or raise max_matches / max_files."
+        )
+    body = "\n".join(lines_out)
+    return body + "\n" + "\n".join(footer)
 
 
 def download_file(url, path):
