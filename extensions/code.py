@@ -18,11 +18,16 @@ Pipeline loop limits are **defaults in this module**; optional overrides via
 
 Optional ``/code`` flags (any combination, before the description): ``--skip_design`` (use request as plan;
 after a **tester** failure, run **design** to revise the plan), ``--skip_review``, ``--skip_test``.
+
+Each pipeline step receives an **orchestrator git snapshot** (``git status -sb``, ``git diff --stat``, capped
+``git diff``) from ``session_cwd`` when git is available; otherwise a short note that no snapshot was captured.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import threading
 from typing import NamedTuple, Optional, Tuple
 
@@ -117,6 +122,90 @@ def _pipeline_limits(session) -> _PipelineLimits:
         parse_fail_max=_int("parse_fail_max"),
         user_ask_max_len=_int("user_ask_max_len", minimum=256),
     )
+
+_GIT_TIMEOUT_SEC = 25
+_GIT_SNAPSHOT_MAX_TOTAL = 12000
+_GIT_DIFF_MAX = 7000
+
+
+def _git_repo_snapshot_blurb(session) -> str:
+    """
+    Best-effort ``git status`` / ``git diff`` from ``session_cwd`` on the orchestrator host.
+
+    When the tree is not a git repo, ``git`` is missing, or commands fail, returns a short
+    explanation so lanes still know orchestrator snapshot is unavailable (not an error in the pipeline).
+    """
+    raw = (getattr(session, "session_cwd", None) or "").strip()
+    if not raw:
+        return ""
+    cwd = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isdir(cwd):
+        return ""
+
+    def _note(msg: str) -> str:
+        return f"Orchestrator repo snapshot (git):\n{msg}\n\n"
+
+    def _run_git(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SEC,
+        )
+
+    try:
+        st = _run_git(["status", "-sb"])
+    except FileNotFoundError:
+        return _note("git executable not found on PATH — no status/diff captured.")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return _note(f"git could not be run ({type(e).__name__}) — no status/diff captured.")
+
+    if st.returncode != 0:
+        err = (st.stderr or "").strip().lower()
+        out_l = (st.stdout or "").strip().lower()
+        if "not a git repository" in err or "not a git repository" in out_l:
+            return _note(
+                "This workspace is not a git repository (or .git is inaccessible) — "
+                "no status/diff captured. Use your tools to inspect files as usual."
+            )
+        tail = (st.stderr or st.stdout or "").strip() or f"exit {st.returncode}"
+        return _note(f"git status failed — no diff captured. ({tail})")
+
+    status_block = (st.stdout or "").rstrip() or "(empty working tree — status output empty)"
+
+    try:
+        dst = _run_git(["diff", "--stat"])
+    except (subprocess.TimeoutExpired, OSError):
+        dst = None
+    stat_block = ""
+    if dst is not None and dst.returncode == 0:
+        stat_block = (dst.stdout or "").rstrip() or "(no unstaged/staged diff — stat empty)"
+
+    diff_block = ""
+    try:
+        df = _run_git(["diff", "--no-color"])
+    except (subprocess.TimeoutExpired, OSError):
+        df = None
+    if df is not None and df.returncode == 0:
+        raw_diff = (df.stdout or "").strip()
+        if len(raw_diff) > _GIT_DIFF_MAX:
+            raw_diff = raw_diff[:_GIT_DIFF_MAX] + "\n…(diff truncated by orchestrator)\n"
+        diff_block = raw_diff or "(no patch text — diff empty)"
+
+    body = (
+        "Orchestrator repo snapshot (git) — captured on the orchestrator host (for orientation; "
+        "verify with your own tools if needed):\n\n"
+        f"$ git status -sb\n{status_block}\n"
+    )
+    if stat_block:
+        body += f"\n$ git diff --stat\n{stat_block}\n"
+    if diff_block:
+        body += f"\n$ git diff\n{diff_block}\n"
+
+    if len(body) > _GIT_SNAPSHOT_MAX_TOTAL:
+        body = body[: _GIT_SNAPSHOT_MAX_TOTAL - 40] + "\n…(snapshot truncated by orchestrator)\n"
+    return body + "\n"
+
 
 # --- Verdict block ------------------------------------------------------------
 
@@ -480,6 +569,7 @@ def _run_pipeline(session, user_ask: str) -> str:
         def designer_prompt_initial(_: str) -> str:
             return (
                 _workspace_blurb(session)
+                + _git_repo_snapshot_blurb(session)
                 + "The user wants this feature or change in the codebase.\n\n"
                 f"USER REQUEST:\n{ask}\n\n"
                 + "Discuss steps and testing as required. The pipeline contract is prepended to this message.\n"
@@ -510,6 +600,7 @@ def _run_pipeline(session, user_ask: str) -> str:
             def coder_prompt(_: str) -> str:
                 chunks = [
                     _workspace_blurb(session),
+                    _git_repo_snapshot_blurb(session),
                     "The user asked for the following. The designer produced a plan.\n\n",
                     f"USER REQUEST:\n{ask}\n\n",
                     f"DESIGNER PLAN:\n{designer_summary}\n\n",
@@ -546,8 +637,11 @@ def _run_pipeline(session, user_ask: str) -> str:
             def reviewer_prompt(_: str) -> str:
                 return (
                     _workspace_blurb(session)
-                    + "You only have the text below — not a full git diff. Base judgment on consistency, "
-                    "plausibility, and whether the coder's SUMMARY gives enough to trust the change.\n\n"
+                    + _git_repo_snapshot_blurb(session)
+                    + "You have the USER REQUEST, design, and coder SUMMARY below, plus an orchestrator-captured "
+                    "git snapshot when this workspace is a git repository. If the snapshot states that git is "
+                    "unavailable or the tree is not under git, ignore it and use your tools as needed. "
+                    "Base judgment on consistency, plausibility, and whether the SUMMARY is enough to trust the change.\n\n"
                     f"USER REQUEST:\n{ask}\n\n"
                     f"DESIGN:\n{designer_summary}\n\n"
                     f"IMPLEMENTATION (coder SUMMARY):\n{coder_summary}\n\n"
@@ -580,6 +674,7 @@ def _run_pipeline(session, user_ask: str) -> str:
             def redesign_prompt(_: str) -> str:
                 return (
                     _workspace_blurb(session)
+                    + _git_repo_snapshot_blurb(session)
                     + "The reviewer rejected the implementation or design fit. Produce an updated plan.\n\n"
                     f"USER REQUEST:\n{ask}\n\n"
                     f"PREVIOUS DESIGN:\n{designer_summary}\n\n"
@@ -612,6 +707,7 @@ def _run_pipeline(session, user_ask: str) -> str:
             def tester_prompt(_: str) -> str:
                 return (
                     _workspace_blurb(session)
+                    + _git_repo_snapshot_blurb(session)
                     + "The user requested a codebase change. Summaries follow.\n\n"
                     f"USER REQUEST:\n{ask}\n\n"
                     f"DESIGN:\n{designer_summary}\n\n"
@@ -665,6 +761,7 @@ def _run_pipeline(session, user_ask: str) -> str:
             def designer_after_test_fail(_: str) -> str:
                 return (
                     _workspace_blurb(session)
+                    + _git_repo_snapshot_blurb(session)
                     + "Automated tests failed or reported problems. Produce an updated implementation plan "
                     "that addresses the failures (the coder will follow this plan on the next pass).\n\n"
                     f"USER REQUEST:\n{ask}\n\n"

@@ -321,3 +321,53 @@ def test_run_pipeline_single_lane_skip_all_but_coder(code_ext):
     msg = code_ext._run_pipeline(S(), "--skip_design --skip_review --skip_test only coder runs")
     assert "Pipeline complete" in msg
     assert len(calls) == 1
+
+
+def test_git_repo_snapshot_empty_cwd(code_ext):
+    class S:
+        session_cwd = ""
+
+    assert code_ext._git_repo_snapshot_blurb(S()) == ""
+
+
+def test_git_repo_snapshot_non_repo_directory(code_ext, tmp_path):
+    class S:
+        session_cwd = str(tmp_path)
+
+    blur = code_ext._git_repo_snapshot_blurb(S())
+    assert "Orchestrator repo snapshot (git)" in blur
+    assert "not a git repository" in blur.lower() or "not under git" in blur.lower()
+
+
+def test_git_repo_snapshot_populated_repo(code_ext, tmp_path):
+    import subprocess
+
+    try:
+        subprocess.run(["git", "--version"], check=True, capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        import pytest
+
+        pytest.skip("git not installed")
+
+    subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True, timeout=10)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@test.t"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "test"],
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "f.txt").write_text("v1\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "f.txt"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "c1"], check=True, capture_output=True)
+    (tmp_path / "f.txt").write_text("v2\n")
+
+    class S:
+        session_cwd = str(tmp_path)
+
+    blur = code_ext._git_repo_snapshot_blurb(S())
+    assert "git status" in blur.lower()
+    assert "f.txt" in blur
