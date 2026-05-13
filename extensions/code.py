@@ -1,14 +1,16 @@
 """
 Feature pipeline: designer → coder → reviewer ⟲ → tester ⟲.
 
-Load with ``/load extensions/code.py`` (from repo root) or an absolute path.
+Load with ``/load extensions/code.py`` (from repo root) or an absolute path. In ``agent_tui`` you can
+keep one lane with ``/load extensions/code.py --single_lane`` (no post-load ``/fork_background`` lanes;
+the pipeline uses ``execute_line`` on the current session even when fork/delegate hooks exist).
 
 **Multi-lane (``agent_tui.py``):** when ``python_fork_background_agent`` and ``python_delegate_line``
 are both set, post-load forks background lanes (designer, coder, reviewer, tester) and each step
-delegates to the matching lane.
+delegates to the matching lane — unless ``--single_lane`` was used on ``/load`` (see above).
 
-**Single-lane (plain ``agent`` / CLI):** when fork is not wired, the same prompts run on the
-current session via ``execute_line`` (one conversation; no ``/fork``).
+**Single-lane (plain ``agent`` / CLI, or TUI with ``--single_lane``):** prompts run on the current
+session via ``execute_line`` (one conversation; no ``/fork`` for pipeline steps).
 
 Boot strings apply only to forked lanes. Per-step prompts include workspace (``session_cwd``),
 rubric guidance, and a shared ``---PIPELINE---`` verdict block.
@@ -322,12 +324,15 @@ def _multilane_pipeline_available(session) -> bool:
 
 def _delegate(session, role: str, prompt: str) -> str:
     text = (prompt or "").strip()
-    if _multilane_pipeline_available(session):
-        return _text_from_delegate(session.python_delegate_line(role, text))
-    el = getattr(session, "execute_line", None)
-    if not callable(el):
-        raise RuntimeError("single-lane pipeline requires session.execute_line")
-    return _text_from_delegate(el(text))
+    use_execute = (not _multilane_pipeline_available(session)) or bool(
+        getattr(session, "repl_code_extension_single_lane", False)
+    )
+    if use_execute:
+        el = getattr(session, "execute_line", None)
+        if not callable(el):
+            raise RuntimeError("single-lane pipeline requires session.execute_line")
+        return _text_from_delegate(el(text))
+    return _text_from_delegate(session.python_delegate_line(role, text))
 
 
 def _msg(line: str) -> None:
@@ -811,6 +816,8 @@ def register_repl(session, registry: ReplExtensionRegistry):
         "designer → coder ↔ reviewer → tester pipeline."
     )
     registry.register_command("code", _cmd_code)
-    if _multilane_pipeline_available(session):
+    if _multilane_pipeline_available(session) and "single_lane" not in getattr(
+        registry, "load_flags", frozenset()
+    ):
         return list(_POST_LOAD_LINES)
     return []

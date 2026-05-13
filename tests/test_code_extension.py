@@ -259,7 +259,42 @@ def test_register_repl_post_load_fork_lines_when_multilane(code_ext):
     assert len(post) == len(code_ext._POST_LOAD_LINES)
 
 
-def test_run_pipeline_single_lane_happy_path(code_ext):
+def test_register_repl_single_lane_skips_fork_lines_even_when_multilane(code_ext):
+    class S:
+        settings = AgentSettings.defaults()
+        python_fork_background_agent = staticmethod(lambda *_a, **_k: {"type": "fork", "ok": True})
+        python_delegate_line = staticmethod(lambda *_a, **_k: {"type": "turn", "answer": ""})
+
+        def _repl_register_extension_command(self, key, handler):
+            pass
+
+    s = S()
+    reg = ReplExtensionRegistry(session=s, script_path=str(_EXT), load_flags=frozenset({"single_lane"}))
+    post = code_ext.register_repl(s, reg)
+    assert post == []
+
+
+def test_delegate_multilane_uses_execute_line_when_single_lane_flag(code_ext):
+    calls: list[tuple] = []
+
+    def el(line: str, emit=None):
+        calls.append(("el", line[:50]))
+        return {"type": "turn", "answer": "via_execute"}
+
+    class S:
+        settings = AgentSettings.defaults()
+        python_fork_background_agent = staticmethod(lambda *_a, **_k: {"ok": True})
+
+        def python_delegate_line(self, role, text):
+            calls.append(("dl", role, text[:20]))
+            return {"type": "turn", "answer": "via_delegate"}
+
+        execute_line = staticmethod(el)
+        repl_code_extension_single_lane = True
+
+    out = code_ext._delegate(S(), "designer", "prompt")
+    assert out == "via_execute"
+    assert calls and calls[0][0] == "el"
     verdict = "---PIPELINE---\nVERDICT: PASS\nSUMMARY: ok\n---END---\n"
     calls: list[str] = []
 

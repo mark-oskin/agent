@@ -1,9 +1,13 @@
-"""REPL extension loading via ``/load`` — user-supplied Python registers slash commands."""
+"""REPL extension loading via ``/load`` — user-supplied Python registers slash commands.
+
+``/load`` may pass options after the path (e.g. ``--single_lane``); see ``AgentSession._cmd_repl_load``.
+They appear on :attr:`ReplExtensionRegistry.load_flags` as normalized names (``single_lane``, …).
+"""
 
 from __future__ import annotations
 
 import shlex
-from typing import Any, Callable, List, TYPE_CHECKING
+from typing import Any, Callable, FrozenSet, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agentlib.session import AgentSession
@@ -20,9 +24,17 @@ class ReplExtensionRegistry:
     to forward to ``/call_python THIS_SCRIPT subcommand …`` with safe quoting.
     """
 
-    def __init__(self, session: "AgentSession", script_path: str) -> None:
+    def __init__(
+        self,
+        session: "AgentSession",
+        script_path: str,
+        *,
+        load_flags: FrozenSet[str] = frozenset(),
+    ) -> None:
         self.session = session
         self.script_path = script_path
+        #: Normalized ``/load`` option names (e.g. ``{"single_lane"}`` from ``--single_lane``).
+        self.load_flags: FrozenSet[str] = frozenset(load_flags)
         self._keys: List[str] = []
         self._help_chunks: List[str] = []
 

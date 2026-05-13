@@ -10,7 +10,7 @@ import re
 import shlex
 import sys
 import traceback
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import AbstractSet, Callable, Iterable, Optional
 
@@ -43,6 +43,52 @@ from .settings import AgentSettings
 
 _EXTENSION_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
+# Normalized names after ``--foo-bar`` → ``foo_bar`` (see :func:`_normalize_repl_load_flags`).
+_REPL_LOAD_KNOWN_FLAGS = frozenset({"single_lane"})
+
+
+def _split_repl_load_path_and_flags(parts: list[str]) -> tuple[Optional[str], list[str], list[str]]:
+    """Split shlex parts (``['/load', …]``) into path tokens and raw ``--`` option tokens."""
+    if len(parts) < 2:
+        return ("no file path", [], [])
+    rest = parts[1:]
+    split_at = len(rest)
+    for i, t in enumerate(rest):
+        if t.startswith("--"):
+            split_at = i
+            break
+    path_tokens = rest[:split_at]
+    raw_flags = rest[split_at:]
+    while raw_flags and raw_flags[0] == "--":
+        raw_flags = raw_flags[1:]
+    if not path_tokens:
+        return (
+            "no file path before options (put the ``.py`` path before any ``--`` flags, e.g. "
+            "``/load ./ext/code.py --single_lane``)",
+            [],
+            raw_flags,
+        )
+    return (None, path_tokens, raw_flags)
+
+
+def _normalize_repl_load_flags(raw_flags: list[str]) -> tuple[frozenset, list[str]]:
+    """Return ``(known_flags, warning_messages)`` for ``/load`` tail options."""
+    normalized: set[str] = set()
+    warnings: list[str] = []
+    for t in raw_flags:
+        if not t.startswith("--"):
+            warnings.append(f"expected option starting with '--', ignoring {t!r}")
+            continue
+        name = t[2:].strip().lower().replace("-", "_")
+        if not name:
+            warnings.append("empty '--' option ignored")
+            continue
+        if name not in _REPL_LOAD_KNOWN_FLAGS:
+            warnings.append(f"unknown /load option {t!r} (ignored)")
+            continue
+        normalized.add(name)
+    return (frozenset(normalized), warnings)
+
 
 @dataclass(frozen=True)
 class _LoadedReplExtension:
@@ -50,6 +96,7 @@ class _LoadedReplExtension:
     path: str
     command_keys: tuple[str, ...]
     help_chunks: tuple[str, ...] = ()
+    load_flags: frozenset = field(default_factory=frozenset)
 
 # Sentinel: `_instruction_for_import` failed (usage printed); caller returns an empty command result.
 _IMPORT_INSTRUCTION_ERROR = object()
@@ -232,6 +279,8 @@ class AgentSession:
         self._repl_extension_commands: dict[str, Callable[..., SessionLineResult]] = {}
         self._repl_extensions_loaded: list[_LoadedReplExtension] = []
         self._repl_post_load_depth = 0
+        # ``/load … --single_lane`` for ``extensions/code.py``: run the /code pipeline on this session only.
+        self.repl_code_extension_single_lane = False
 
         self.python_fork_agent = python_fork_agent
         self.python_fork_background_agent = python_fork_background_agent
@@ -1022,6 +1071,14 @@ class AgentSession:
                     lines.append("  " + ln)
         return "\n".join(lines) + "\n"
 
+    def _repl_sync_code_extension_lane_mode(self) -> None:
+        """Set ``repl_code_extension_single_lane`` from the most recently loaded extension that registers ``/code``."""
+        self.repl_code_extension_single_lane = False
+        for rec in reversed(self._repl_extensions_loaded):
+            if "/code" in rec.command_keys:
+                self.repl_code_extension_single_lane = "single_lane" in rec.load_flags
+                return
+
     def _repl_unwind_extension_commands(self, keys: tuple[str, ...]) -> None:
         for k in keys:
             self._repl_extension_commands.pop(k, None)
@@ -1034,6 +1091,7 @@ class AgentSession:
                 seen.add(rec.module_name)
         self._repl_extensions_loaded.clear()
         self._repl_extension_commands.clear()
+        self.repl_code_extension_single_lane = False
 
     def _repl_drop_loaded_extension_path(self, resolved_path: Path) -> int:
         """Unload extension records that match ``resolved_path`` (same file re-``/load``ed).
@@ -1049,6 +1107,7 @@ class AgentSession:
             else:
                 kept.append(rec)
         self._repl_extensions_loaded = kept
+        self._repl_sync_code_extension_lane_mode()
         return n_before - len(kept)
 
     def _repl_run_post_load_lines(self, lines: list[str]) -> None:
@@ -1101,15 +1160,26 @@ class AgentSession:
             return SessionLineResult()
         if len(parts) < 2:
             sink_print_compat(
-                "/load FILE.py\n\n"
+                "/load FILE.py [OPTION …]\n\n"
+                "Options (after the path):\n"
+                "  --single_lane   For ``extensions/code.py``: run the ``/code`` pipeline inline on this\n"
+                "                    session (no ``/fork_background`` helper lanes).\n\n"
                 "Load a Python file that defines ``register_repl(session, registry)``.\n"
+                "The registry exposes ``registry.load_flags`` (frozenset of normalized option names).\n"
                 "The registry can ``register_command('name', handler)`` for ``/name`` lines, and "
                 "``register_help('…')`` to append lines to ``/help``.\n"
                 "Return ``None``, a single str, or a list of str lines to run via ``execute_line`` after loading.\n"
                 "Use ``/unload`` to drop all loaded extensions."
             )
             return SessionLineResult()
-        path_raw = shlex.join(parts[1:]) if len(parts) > 2 else parts[1]
+        err, path_tokens, raw_flags = _split_repl_load_path_and_flags(parts)
+        if err:
+            sink_print_compat(f"/load: {err}")
+            return SessionLineResult()
+        load_flags, flag_warn = _normalize_repl_load_flags(raw_flags)
+        for w in flag_warn:
+            sink_print_compat(f"/load: {w}")
+        path_raw = shlex.join(path_tokens) if len(path_tokens) > 1 else path_tokens[0]
         path = Path(self._resolve_session_path(path_raw)).resolve()
         if not path.is_file():
             sink_print_compat(f"/load: not a file: {path}")
@@ -1139,11 +1209,12 @@ class AgentSession:
                 f"/load: module {path.name!r} has no callable ``register_repl(session, registry)``."
             )
             return SessionLineResult()
-        reg = ReplExtensionRegistry(session=self, script_path=str(path))
+        reg = ReplExtensionRegistry(session=self, script_path=str(path), load_flags=load_flags)
         try:
             post = register_fn(self, reg)
         except BaseException:
             self._repl_unwind_extension_commands(tuple(dict.fromkeys(reg.command_keys())))
+            self._repl_sync_code_extension_lane_mode()
             sys.modules.pop(module_name, None)
             sink_print_compat(traceback.format_exc())
             return SessionLineResult()
@@ -1154,15 +1225,17 @@ class AgentSession:
         elif isinstance(post, (list, tuple)):
             post_lines = [str(x) for x in post if str(x).strip()]
         else:
-            self._repl_unwind_extension_commands(reg.command_keys())
+            self._repl_unwind_extension_commands(tuple(dict.fromkeys(reg.command_keys())))
+            self._repl_sync_code_extension_lane_mode()
             sys.modules.pop(module_name, None)
             sink_print_compat("/load: register_repl must return None, str, or list[str].")
             return SessionLineResult()
         keys = tuple(dict.fromkeys(reg.command_keys()))
         help_chunks = reg.help_chunks()
         self._repl_extensions_loaded.append(
-            _LoadedReplExtension(module_name, str(path), keys, help_chunks=help_chunks)
+            _LoadedReplExtension(module_name, str(path), keys, help_chunks=help_chunks, load_flags=load_flags)
         )
+        self._repl_sync_code_extension_lane_mode()
         sink_print_compat(f"/load: registered extension from {str(path)!r} ({len(keys)} command(s)).")
         if post_lines:
             self._repl_run_post_load_lines(post_lines)
@@ -1186,7 +1259,10 @@ class AgentSession:
             return SessionLineResult()
         for rec in self._repl_extensions_loaded:
             keys = ", ".join(rec.command_keys) if rec.command_keys else "(no slash commands)"
-            sink_print_compat(f"  {rec.path}  →  {keys}")
+            extra = ""
+            if rec.load_flags:
+                extra = f"  [{', '.join(sorted(rec.load_flags))}]"
+            sink_print_compat(f"  {rec.path}  →  {keys}{extra}")
         return SessionLineResult()
 
     def _execute_command_line(self, s: str) -> SessionLineResult:
