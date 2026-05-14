@@ -3,11 +3,13 @@ from __future__ import annotations
 import datetime
 import html as html_module
 import json
+import os
 import re
 from typing import Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
+
 
 def _unique_in_order(items: list[str]) -> list[str]:
     seen: set[str] = set()
@@ -270,7 +272,17 @@ def search_web_backend(settings=None) -> str:
         return "ddg"
     if v in ("searx", "searxng"):
         return "searxng"
+    if v in ("brave", "brave_search"):
+        return "brave"
     return "ddg"
+
+
+def brave_search_api_key(settings=None) -> str:
+    """API key from prefs ``agent.brave_search_api_key`` or ``BRAVE_SEARCH_API_KEY`` env."""
+    k = _settings_get_str(settings, "agent", "brave_search_api_key", "").strip()
+    if k:
+        return k
+    return (os.environ.get("BRAVE_SEARCH_API_KEY") or "").strip()
 
 
 def searxng_base_url(settings=None) -> str:
@@ -324,7 +336,81 @@ def search_backend_banner_line(settings=None) -> str:
     bk = search_web_backend(settings)
     if bk == "searxng":
         return f"[Search backend] searxng ({searxng_base_url(settings)!r})"
+    if bk == "brave":
+        return "[Search backend] brave (api.search.brave.com)"
     return "[Search backend] duckduckgo"
+
+
+def _brave_search(
+    query: str,
+    *,
+    max_results: int,
+    settings=None,
+    log: Optional[Callable[[str], None]] = None,
+) -> str:
+    """
+    Brave Web Search API (JSON). Requires ``agent.brave_search_api_key`` or ``BRAVE_SEARCH_API_KEY``.
+    https://api.search.brave.com/res/v1/web/search
+    """
+    q = (query or "").strip()
+    if not q:
+        return ""
+    key = brave_search_api_key(settings)
+    if not key:
+        return ""
+    # Brave caps ``count`` per request (documented range 1–20 for web search).
+    count = max(1, min(20, int(max_results)))
+    url = "https://api.search.brave.com/res/v1/web/search"
+    try:
+        r = requests.get(
+            url,
+            params={"q": q, "count": count},
+            timeout=20,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "agentlib/1.0",
+                "X-Subscription-Token": key,
+            },
+        )
+        if log:
+            log(f"Brave GET {r.url!r} status={r.status_code} bytes={len(r.content)}")
+        if r.status_code == 401 or r.status_code == 403:
+            if log:
+                log(f"Brave auth error body_head={str(r.text)[:200]!r}")
+            return ""
+        r.raise_for_status()
+        data = r.json()
+        if log and isinstance(data, dict):
+            web = data.get("web")
+            n = len((web or {}).get("results") or []) if isinstance(web, dict) else "n/a"
+            log(f"Brave JSON keys={sorted(data.keys())} web.results_len={n}")
+    except Exception as ex:
+        if log:
+            log(f"Brave error: {type(ex).__name__}: {ex}")
+        return ""
+
+    web = data.get("web") if isinstance(data, dict) else None
+    res = web.get("results") if isinstance(web, dict) else None
+    if not isinstance(res, list) or not res:
+        return ""
+
+    lines: list[str] = []
+    for one in res[: max(1, min(30, int(max_results)))]:
+        if not isinstance(one, dict):
+            continue
+        title = str(one.get("title") or "").strip()
+        url0 = str(one.get("url") or "").strip()
+        desc = str(one.get("description") or one.get("snippet") or "").strip()
+        if not url0:
+            continue
+        if title:
+            block = f"- {title}\n  {desc}\n  {url0}".rstrip() if desc else f"- {title}\n  {url0}".rstrip()
+        else:
+            block = f"- {desc}\n  {url0}".rstrip() if desc else f"- {url0}".rstrip()
+        lines.append(block)
+    if log and not lines:
+        log("Brave: web.results non-empty but no lines after filtering (missing urls?)")
+    return "\n".join(lines)
 
 
 def _searxng_search(
@@ -522,6 +608,14 @@ def search_web(query: str, params: Optional[dict] = None, *, settings=None, fetc
     q = enrich_search_query_for_present_day(raw_q, settings=settings)
     mr = search_web_effective_max_results(params or {}, settings=settings)
     backend = search_web_backend(settings)
+    if backend == "brave" and not brave_search_api_key(settings):
+        return (
+            "[Search backend] brave (api.search.brave.com)\n\n"
+            "Brave Search is selected (search_web_backend=brave) but no API key is configured. "
+            "Set agent.brave_search_api_key (for example `/set agent set brave_search_api_key <KEY>` then `/set save`) "
+            "or set the BRAVE_SEARCH_API_KEY environment variable. "
+            "Sign up at https://brave.com/search/api/ ."
+        )
     parts: list[str] = []
 
     if dbg:
@@ -544,7 +638,17 @@ def search_web(query: str, params: Optional[dict] = None, *, settings=None, fetc
                 f"[Note] SearXNG returned no usable results (instance: {searxng_base_url(settings)!r}). "
                 "Falling back to DuckDuckGo instant answers and Wikipedia."
             )
-    if backend != "searxng" or not got_rows:
+    elif backend == "brave":
+        rows_text = _brave_search(q, max_results=mr, settings=settings, log=dbg)
+        if rows_text:
+            parts.append("[Web results]\n" + rows_text)
+            got_rows = True
+        else:
+            parts.append(
+                "[Note] Brave Search returned no usable results (check API key, query, or quota). "
+                "Falling back to DuckDuckGo instant answers and Wikipedia."
+            )
+    if backend not in ("searxng", "brave") or not got_rows:
         ia = _ddg_instant_answer(q, log=dbg)
         if dbg:
             dbg(f"DDG instant answer text_chars={len(ia)} non_empty={bool((ia or '').strip())}")

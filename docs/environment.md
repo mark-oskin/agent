@@ -16,6 +16,7 @@ Legacy prefs may store **env-style key names** inside those JSON groups (for exa
 | Variable | Where | Effect |
 |----------|--------|--------|
 | **`AGENT_BROWSER_ENGINE`** | `tools/web.py` | Default Playwright engine for `browser_navigate` / related tools: `chromium` (default), `webkit`, or `safari` (Safari aliases to WebKit). |
+| **`BRAVE_SEARCH_API_KEY`** | `agentlib/tools/websearch.py` | API key for [Brave Web Search](https://api.search.brave.com/) when **`agent.search_web_backend`** is **`brave`**. Prefs **`agent.brave_search_api_key`** overrides this env var if set. |
 
 No other **`AGENT_*`** names are read via `os.environ` in **`agentlib/`** for the main CLI today. Directory overrides for tools and skills are the prefs keys **`agent.tools_dir`** and **`agent.skills_dir`** (or top-level snapshot fields accepted on load — see `agentlib/prefs/bootstrap.py`), not separate `AGENT_TOOLS_DIR` / `AGENT_SKILLS_DIR` env vars.
 

@@ -68,7 +68,9 @@ CORE_TOOL_ENTRIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 CORE_TOOL_PROMPT_DOCS: dict[str, str] = {
     "search_web": (
         "search_web — parameters.query (non-empty string, the web search terms); optional parameters.max_results "
-        "(integer 1–30, how many result rows to parse; default from AGENT_SEARCH_WEB_MAX_RESULTS, else 5)."
+        "(integer 1–30, how many result rows to parse; default from AGENT_SEARCH_WEB_MAX_RESULTS, else 5). "
+        "Backend is prefs agent.search_web_backend: ddg (default), searxng (needs agent.searxng_url), or brave "
+        "(needs agent.brave_search_api_key or BRAVE_SEARCH_API_KEY)."
     ),
     "search_web_fetch_top": (
         "search_web_fetch_top — parameters.query (non-empty string); optional parameters.max_results (1–30) and "

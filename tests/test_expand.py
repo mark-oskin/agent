@@ -864,6 +864,76 @@ def test_search_web_effective_max_results_clamped(monkeypatch):
     assert search_web_effective_max_results({}, settings=settings) == 5
 
 
+def test_search_web_backend_brave_aliases():
+    from agentlib.tools import websearch as ws
+
+    settings = AgentSettings.defaults()
+    settings.set(("agent", "search_web_backend"), "brave")
+    assert ws.search_web_backend(settings=settings) == "brave"
+    settings.set(("agent", "search_web_backend"), "brave_search")
+    assert ws.search_web_backend(settings=settings) == "brave"
+
+
+def test_brave_search_api_key_pref_over_env(monkeypatch):
+    from agentlib.tools import websearch as ws
+
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "envkey")
+    settings = AgentSettings.defaults()
+    assert ws.brave_search_api_key(settings=settings) == "envkey"
+    settings.set(("agent", "brave_search_api_key"), "prefkey")
+    assert ws.brave_search_api_key(settings=settings) == "prefkey"
+
+
+def test_search_web_brave_missing_key_returns_instructions():
+    from agentlib.tools import websearch as ws
+
+    settings = AgentSettings.defaults()
+    settings.set(("agent", "search_web_backend"), "brave")
+    out = ws.search_web("hello", settings=settings, fetch_page=lambda u: "")
+    assert "API key" in out
+    assert "brave.com/search/api" in out
+
+
+def test_search_web_brave_parses_api_json(monkeypatch):
+    from agentlib.tools import websearch as ws
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        assert kwargs.get("headers", {}).get("X-Subscription-Token") == "test-token"
+
+        class R:
+            status_code = 200
+            content = b"{}"
+            text = "{}"
+
+            def json(self):
+                return {
+                    "web": {
+                        "results": [
+                            {"title": "T1", "url": "https://example.com/a", "description": "D1"},
+                            {"title": "T2", "url": "https://example.com/b", "description": ""},
+                        ]
+                    }
+                }
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(ws.requests, "get", fake_get)
+    settings = AgentSettings.defaults()
+    settings.set(("agent", "search_web_backend"), "brave")
+    settings.set(("agent", "brave_search_api_key"), "test-token")
+    out = ws.search_web("myquery", settings=settings, fetch_page=lambda u: "")
+    assert "[Search backend] brave" in out
+    assert "https://example.com/a" in out
+    assert "T1" in out
+    assert calls and "api.search.brave.com" in calls[0][0]
+
+
 def test_debug_search_web_defaults_off_and_group_set():
     from agentlib.tools.websearch import _debug_search_web_log
 

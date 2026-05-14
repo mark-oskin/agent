@@ -163,7 +163,7 @@ The agent can **compact** older transcript turns when a heuristic size threshold
 
 ### Web search
 
-Web search result count is capped; configure via `~/.agent.json` / `/settings agent` where exposed.
+Web search result count is capped; configure via `~/.agent.json` / `/settings agent` where exposed. **Backend:** set **`agent.search_web_backend`** to **`ddg`** (default, DuckDuckGo HTML + instant answer), **`searxng`** (needs **`agent.searxng_url`**), or **`brave`** (Brave Search API — set **`agent.brave_search_api_key`** or **`BRAVE_SEARCH_API_KEY`**). See **[docs/environment.md](docs/environment.md)**.
 
 ## Tools
 
