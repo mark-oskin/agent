@@ -17,6 +17,10 @@ It can run as:
 - **`agent_knowledge.txt`** (repo root) is optional reading for **LLMs** writing Python that **drives this agent** from `/call_python` (`ai()`, `session`, batching and bridge patterns like `foreach_line.py` / `telegram_channel_ai.py`).
 <!-- Embedding / Python API temporarily removed; CLI/REPL only. -->
 
+## Documentation
+
+Longer user guides (core tools, plugin toolsets, `/load` extensions, cwd/context/`/source`, `/while`, `/set` topics, extension prefs, **`/help`**, environment/prefs, queue, code pipeline) live under **[docs/](docs/index.md)**.
+
 ## Install
 
 The project uses [`uv`](https://github.com/astral-sh/uv).
@@ -112,20 +116,25 @@ In the TUI, normal slash-command help and confirmations appear in the **main tra
 - **Default file:** `~/.agent.json` (versioned schema; the agent migrates/reads what it understands).
 - **Override path:** `--config ./path/to/agent.json`
 - In the **REPL**, use `/settings ollama`, `/settings openai`, `/settings agent` to view or set persisted settings, then **`/settings save`** to write the file.
+- **`/settings`** is the same as **`/set`**. For a topic map (tools, primary LLM, context manager, templates, …), see **[docs/settings-repl.md](docs/settings-repl.md)**. Prefs vs env vars: **[docs/environment.md](docs/environment.md)**.
 
 ## Interactive REPL (important commands)
 
 | Command | Purpose |
 |---------|---------|
-| `/help` | Command list (many topics also support **`/topic help`**, e.g. **`/set help`**) |
+| `/help` | Command list (many topics use **`<topic> help`**, e.g. **`/set help`**, **`/while help`**) — see **[docs/help-repl.md](docs/help-repl.md)** |
+| `/load` · `/unload` · `/extensions` | Load optional REPL extensions from a `.py` file (`register_repl`), list loaded paths, or unload all — see **[docs/repl-extensions.md](docs/repl-extensions.md)** |
+| `/cd` · `/chdir` | Set the session working directory (tools, `run_command`, `!`) — see **[docs/repl-session.md](docs/repl-session.md)** |
+| `/context …` · `/load_context` · `/save_context` | Load/save transcript JSON; **`/context start_log`** enables per-turn auto-save to a file — see **[docs/repl-session.md](docs/repl-session.md)** |
+| `/source FILE` | Run each non-empty line of a UTF-8 file as a REPL line (batch setup) — **[docs/repl-session.md](docs/repl-session.md)** |
 | `/quit` | Exit |
 | `/clear` | Clear in-memory messages (and the stored skill for `/skill reuse`) |
 | `/compact` | Optional target **N%** (e.g. `25%`) or **word count** (e.g. `400`); default **10%** of current estimated tokens. Asks the primary LLM to compress the transcript, then replaces all messages with that summary (same scratch reset as `/clear`). |
 | `/show models` | List local Ollama models (`/api/tags`; alias **`/show local_models`**) |
-| `/usage` | Show last Ollama prompt/completion usage from `/api/chat` |
+| `/usage` · `/tokens` | Show last Ollama prompt/completion usage from `/api/chat` (same command; **`/tokens`** is an alias) |
 | `/show model` | Current **primary** LLM (Ollama or hosted) |
 | `/show reviewer` | Current **second-opinion** reviewer model |
-| `/while [--max N] 'condition' do 'prompt' [, 'prompt' …]` | Same idea as **`while (condition) { … }`**: judge **1** = condition **true** (stay in loop), **0** = **false** (exit). After each **true** check, runs every **comma-separated** body prompt as its own REPL turn (step 1/N …), then re-checks. Capped by **--max** (default 50). See `/while help`. |
+| `/while [--max N] 'condition' do 'prompt' [, 'prompt' …]` | Same idea as **`while (condition) { … }`**: judge **1** = condition **true** (stay in loop), **0** = **false** (exit). After each **true** check, runs every **comma-separated** body prompt as its own REPL turn (step 1/N …), then re-checks. Capped by **--max** (default 50). See **`/while help`** and **[docs/while-repl.md](docs/while-repl.md)**. |
 | `/skill list` | List available skills (ids) from the current `skills_dir`. |
 | `/skill <skill> <request>` | Run a **specific** skill id (must exist in `skills_dir`); no model selection is performed. |
 | `/skill auto <request>` | Ask the model to pick a skill, then run it (may be multi-step). |
@@ -150,7 +159,7 @@ Temporarily unavailable. Use the CLI/REPL for now.
 
 ### Context window
 
-The agent can **compact** older transcript turns when a heuristic size threshold is hit. Configure with `/settings context …` (tokens, trigger/target fractions, `keep_tail`, on/off) and persist with `/settings save`. Some values can be overridden with `AGENT_CONTEXT_*` / `AGENT_DISABLE_CONTEXT_MANAGER` (see `/help environment`).
+The agent can **compact** older transcript turns when a heuristic size threshold is hit. Configure with `/settings context …` (tokens, trigger/target fractions, `keep_tail`, on/off) and persist with `/settings save`. Compaction can also be turned off with **`agent.disable_context_manager`** in prefs (`/set agent set disable_context_manager true` then `/set save`). Details: **[docs/environment.md](docs/environment.md)**.
 
 ### Web search
 
@@ -165,17 +174,19 @@ These are always defined by the agent; you can **disable** ones you do not want 
 | ID | Role |
 |----|------|
 | `search_web` | Web search (DuckDuckGo HTML) |
+| `search_web_fetch_top` | Web search plus fetched excerpts from top result pages |
 | `fetch_page` | Fetch a URL (HTTP GET) |
 | `run_command` | Run a shell command |
 | `use_git` | Vetted `git` operations |
 | `write_file` / `read_file` | Write or read a file |
+| `grep` | Regex search in a file or directory (ripgrep-like, Python `re`) |
 | `list_directory` | List a directory |
 | `download_file` | Download a URL to a path |
 | `tail_file` | Read the end of a file |
 | `replace_text` | Search-and-replace in a file |
 | `call_python` | Run Python in-process |
 
-Aliases exist for natural phrasing (e.g. “web search” → `search_web`); the REPL suggests names if you mistype one.
+Aliases exist for natural phrasing (e.g. “web search” → `search_web`); the REPL suggests names if you mistype one. Full table and parameter lines: **[docs/core-tools.md](docs/core-tools.md)**.
 
 **REPL:** `/settings tools` lists core tools and **plugin** toolsets. `/settings enable …` / `/settings disable …` accept a tool id or a phrase.
 
@@ -186,7 +197,7 @@ Aliases exist for natural phrasing (e.g. “web search” → `search_web`); the
 Extra tools ship as **Python modules** in a **tools directory**:
 
 - **Default directory:** the repo’s `tools/` package (bundled `dev`, `desktop`, etc.).
-- **Override:** `AGENT_TOOLS_DIR`, or the `tools_dir` field in `~/.agent.json` (set via session + `/settings save`).
+- **Override:** the **`tools_dir`** field in `~/.agent.json` (set via `/set agent set tools_dir …` and `/set save`, or a top-level `tools_dir` in older prefs — see **[docs/environment.md](docs/environment.md)**).
 
 Each plugin file defines a **`TOOLSET`** dict: `name`, `description`, optional `triggers` (keywords or `regex:…` patterns), and a list of tools (`id`, `description`, `aliases`, `handler`).
 
@@ -201,10 +212,14 @@ Each plugin file defines a **`TOOLSET`** dict: `name`, `description`, optional `
 |---------|--------|
 | `dev` | e.g. `run_pytest` — runs the project test suite (`uv run pytest` when `uv.lock` exists) |
 | `desktop` | e.g. `open_url` — macOS `open` in the default browser |
+| `browser` | Playwright browser tools (`browser_navigate`, …) — install **`uv sync --extra browser`**; see **[docs/plugin-toolsets.md](docs/plugin-toolsets.md)** |
+| `applescript` | `run_applescript` (macOS `osascript`) — see **[docs/plugin-toolsets.md](docs/plugin-toolsets.md)** |
+| `lanes` | `agent_send` for **agent_tui** cross-lane lines — see **[docs/plugin-toolsets.md](docs/plugin-toolsets.md)** |
+| `queue` | Named in-memory FIFO lists for the model (`list_add`, …) — see **[docs/queue.md](docs/queue.md)** and optional **`/queue`** REPL extension |
 
 ## Skills
 
-Skills are **JSON files** (one file per skill) under **`skills/`** by default. Override the directory with **`AGENT_SKILLS_DIR`** or the `skills_dir` preference (via `/settings agent` and `/settings save`).
+Skills are **JSON files** (one file per skill) under **`skills/`** by default. Override the directory with the **`skills_dir`** preference (`/set agent set skills_dir …` and `/set save`, or top-level `skills_dir` in older prefs — see **[docs/environment.md](docs/environment.md)**).
 
 A typical skill object includes:
 
