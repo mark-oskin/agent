@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 import html as html_module
 import json
-import os
 import re
 from typing import Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -278,11 +277,8 @@ def search_web_backend(settings=None) -> str:
 
 
 def brave_search_api_key(settings=None) -> str:
-    """API key from prefs ``agent.brave_search_api_key`` or ``BRAVE_SEARCH_API_KEY`` env."""
-    k = _settings_get_str(settings, "agent", "brave_search_api_key", "").strip()
-    if k:
-        return k
-    return (os.environ.get("BRAVE_SEARCH_API_KEY") or "").strip()
+    """API key from prefs ``agent.brave_search_api_key``."""
+    return _settings_get_str(settings, "agent", "brave_search_api_key", "").strip()
 
 
 def searxng_base_url(settings=None) -> str:
@@ -349,7 +345,7 @@ def _brave_search(
     log: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
-    Brave Web Search API (JSON). Requires ``agent.brave_search_api_key`` or ``BRAVE_SEARCH_API_KEY``.
+    Brave Web Search API (JSON). Requires ``agent.brave_search_api_key``.
     https://api.search.brave.com/res/v1/web/search
     """
     q = (query or "").strip()
@@ -612,8 +608,7 @@ def search_web(query: str, params: Optional[dict] = None, *, settings=None, fetc
         return (
             "[Search backend] brave (api.search.brave.com)\n\n"
             "Brave Search is selected (search_web_backend=brave) but no API key is configured. "
-            "Set agent.brave_search_api_key (for example `/set agent set brave_search_api_key <KEY>` then `/set save`) "
-            "or set the BRAVE_SEARCH_API_KEY environment variable. "
+            "Set agent.brave_search_api_key (for example `/set agent set brave_search_api_key <KEY>` then `/set save`). "
             "Sign up at https://brave.com/search/api/ ."
         )
     parts: list[str] = []

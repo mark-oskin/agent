@@ -19,4 +19,4 @@ These pages complement [README.md](../README.md) with deeper, website-style guid
 | [Extension settings (`/set extensions`)](extension-settings.md) | Prefs keys under `extensions.<id>` (e.g. `code_pipeline`), `/set save` minimal vs full |
 | [Settings (`/set`, `/settings`)](settings-repl.md) | Topic map: tools, primary LLM, context manager, templates, `save` — use `/set help` for full syntax |
 | [REPL help (`/help`)](help-repl.md) | Built-in listing, extension lines, `<command> help` pattern |
-| [Configuration & environment](environment.md) | Prefs JSON vs env; `AGENT_BROWSER_ENGINE`; context manager keys |
+| [Configuration & environment](environment.md) | Prefs JSON vs env; `agent.default_browser_engine`; context manager keys |

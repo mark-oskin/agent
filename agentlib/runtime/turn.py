@@ -481,6 +481,10 @@ def run_agent_conversation_turn(
             params = deps.merge_tool_param_aliases(tool, params)
             params = deps.ensure_tool_defaults(tool, params, user_query)
             params = turn_support.apply_session_cwd_tool_params(tool, params, deps)
+            if tool in deps.plugin_tool_handlers:
+                params = turn_support.prepare_plugin_tool_browser_params(
+                    tool, params, default_engine=deps.default_browser_engine()
+                )
             fp = deps.tool_params_fingerprint(tool, params)
             orig_fp = fp
             dedupe_ok = tool not in ("read_file", "tail_file", "grep")

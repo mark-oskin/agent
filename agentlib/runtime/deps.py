@@ -58,4 +58,5 @@ class ConversationTurnDeps:
     tool_progress_message: Callable[[str, dict], str]
     is_tool_result_weak_for_dedup: Callable[[str], bool]
     tool_result_user_message: Callable[..., str]
+    default_browser_engine: Callable[[], str]
     session_cwd: Optional[str] = None

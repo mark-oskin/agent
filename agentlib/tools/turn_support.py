@@ -172,6 +172,23 @@ def merge_tool_param_aliases(tool: str, params: dict, *, scalar_to_str_fn=scalar
     return p
 
 
+def prepare_plugin_tool_browser_params(tool: str, params: dict, *, default_engine: str) -> dict:
+    """
+    For Playwright ``browser_*`` plugin tools, set ``parameters.engine`` when the model
+    omitted both ``engine`` and ``browser`` (prefs ``agent.default_browser_engine``).
+    """
+    if not str(tool).startswith("browser_"):
+        return params if isinstance(params, dict) else {}
+    if not isinstance(params, dict):
+        return {}
+    out = dict(params)
+    if out.get("engine") is not None or out.get("browser") is not None:
+        return out
+    raw = (default_engine or "").strip()
+    out["engine"] = raw if raw else "chromium"
+    return out
+
+
 def ensure_tool_defaults(tool: str, params: dict, user_query: str, *, scalar_to_str_fn=scalar_to_str) -> dict:
     """Fill required parameters when the model emits an empty object."""
     p = dict(params) if isinstance(params, dict) else {}

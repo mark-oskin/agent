@@ -31,7 +31,7 @@ Each module exports a **`TOOLSET`** dict: `name`, `description`, optional `trigg
 | `dev` | `run_pytest` — test suite (`uv run pytest` when `uv.lock` exists, else `python3 -m pytest`). |
 | `desktop` | `open_url` — macOS `open` in the default browser (`http`/`https` only). |
 | `queue` | `list_add`, `list_remove`, `list_peek`, `list_length`, `list_clear`, `list_names` — see [Queue toolset and `/queue`](queue.md). |
-| `browser` | Playwright-backed automation: `browser_navigate`, `browser_click`, `browser_fill`, `browser_type`, `browser_press`, `browser_snapshot`, `browser_wait`, `browser_close`. Engines include **chromium** (default) and **webkit** (Safari engine, not Safari.app). Install with **`uv sync --extra browser`**; without Playwright, enable fails with a clear message. |
+| `browser` | Playwright-backed automation: `browser_navigate`, `browser_click`, `browser_fill`, `browser_type`, `browser_press`, `browser_snapshot`, `browser_wait`, `browser_close`. Engines include **chromium** (default) and **webkit** (Safari engine, not Safari.app). Default when the model omits `engine` / `browser`: prefs **`agent.default_browser_engine`**. Install with **`uv sync --extra browser`**; without Playwright, enable fails with a clear message. |
 | `applescript` | `run_applescript` — runs AppleScript via `osascript` (timeouts, optional script echo, temp file mode for better error locations). **macOS only; side effects.** |
 | `lanes` | `agent_send` — in **agent_tui**, send one REPL line to another lane (optional `wait` / `timeout_ms`). In a plain stdin REPL, behavior is limited to what the host wires. |
 

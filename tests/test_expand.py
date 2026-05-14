@@ -874,14 +874,30 @@ def test_search_web_backend_brave_aliases():
     assert ws.search_web_backend(settings=settings) == "brave"
 
 
-def test_brave_search_api_key_pref_over_env(monkeypatch):
+def test_brave_search_api_key_prefs_only_ignores_env(monkeypatch):
     from agentlib.tools import websearch as ws
 
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "envkey")
     settings = AgentSettings.defaults()
-    assert ws.brave_search_api_key(settings=settings) == "envkey"
+    assert ws.brave_search_api_key(settings=settings) == ""
     settings.set(("agent", "brave_search_api_key"), "prefkey")
     assert ws.brave_search_api_key(settings=settings) == "prefkey"
+
+
+def test_prepare_plugin_tool_browser_params():
+    from agentlib.tools import turn_support as ts
+
+    assert ts.prepare_plugin_tool_browser_params("write_file", {"path": "a"}, default_engine="webkit") == {"path": "a"}
+    assert ts.prepare_plugin_tool_browser_params("browser_navigate", {"url": "https://x/"}, default_engine="webkit") == {
+        "url": "https://x/",
+        "engine": "webkit",
+    }
+    assert ts.prepare_plugin_tool_browser_params(
+        "browser_navigate",
+        {"url": "https://x/", "engine": "chromium"},
+        default_engine="webkit",
+    ) == {"url": "https://x/", "engine": "chromium"}
+    assert ts.prepare_plugin_tool_browser_params("browser_click", {}, default_engine="") == {"engine": "chromium"}
 
 
 def test_search_web_brave_missing_key_returns_instructions():
@@ -892,6 +908,7 @@ def test_search_web_brave_missing_key_returns_instructions():
     out = ws.search_web("hello", settings=settings, fetch_page=lambda u: "")
     assert "API key" in out
     assert "brave.com/search/api" in out
+    assert "BRAVE_SEARCH" not in out
 
 
 def test_search_web_brave_parses_api_json(monkeypatch):

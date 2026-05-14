@@ -34,6 +34,7 @@ DEFAULT_SETTINGS: dict = {
         "search_web_max_results": 5,
         "search_web_backend": "ddg",
         "brave_search_api_key": "",
+        "default_browser_engine": "chromium",
         "debug_search_web": False,
         "searxng_url": "https://searx.party",
         "auto_confirm_tool_retry": False,

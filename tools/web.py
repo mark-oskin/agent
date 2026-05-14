@@ -20,9 +20,9 @@ Requires::
     uv sync --extra browser
     playwright install chromium webkit
 
-Pick an engine on each ``browser_navigate`` (``parameters.engine``), or set
-``AGENT_BROWSER_ENGINE`` to ``chromium`` or ``webkit`` / ``safari`` for the default
-when a call omits ``engine``.
+Pick an engine on each ``browser_navigate`` (``parameters.engine``), or set prefs
+``agent.default_browser_engine`` to ``chromium`` or ``webkit`` / ``safari`` for the
+default when a call omits ``engine`` and ``browser``.
 
 Use ``browser_close`` to tear down; the next navigate recreates the browser.
 
@@ -86,7 +86,7 @@ def _normalize_engine(raw: Optional[str]) -> Tuple[str, Optional[str]]:
     """
     s = ("" if raw is None else str(raw)).strip().lower()
     if not s:
-        s = (os.environ.get("AGENT_BROWSER_ENGINE") or "chromium").strip().lower()
+        s = "chromium"
     if s in ("chromium", "chrome", "google-chrome"):
         return "chromium", None
     if s in ("webkit", "safari", "safari-webkit"):

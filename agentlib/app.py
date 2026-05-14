@@ -607,6 +607,9 @@ class AgentApp:
             replace_text=tool_builtins.replace_text,
             call_python=tool_builtins.call_python,
             plugin_tool_handlers=self.registry.plugin_tool_handlers,
+            default_browser_engine=lambda: (
+                self.settings_get_str(("agent", "default_browser_engine"), "chromium").strip() or "chromium"
+            ),
             tool_fault_result=lambda tool, exc: f"Tool fault: {tool} raised {type(exc).__name__}: {exc}",
             tool_recovery_may_run=lambda interactive: (bool(interactive) and sys.stdin.isatty())
             or bool(self.settings_get_bool(("agent", "auto_confirm_tool_retry"), False)),
