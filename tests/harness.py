@@ -206,6 +206,7 @@ def build_test_session(
         python_delegate_line=None,
         python_host_command=None,
         python_enqueue_line=None,
+        host_app=app,
     )
     return app, session
 

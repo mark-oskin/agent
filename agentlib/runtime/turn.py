@@ -7,7 +7,7 @@ from typing import AbstractSet, Any, Optional, Tuple
 
 from agentlib.agent_json import consume_last_json_parse_note
 from agentlib.sink import sink_emit
-from agentlib.tools import turn_support
+from agentlib.tools import mcp_registry, turn_support
 from agentlib.tools.routing import preferred_web_search_tool
 
 from .deps import ConversationTurnDeps
@@ -589,6 +589,8 @@ def run_agent_conversation_turn(
                             )
                         elif tool == "call_python":
                             result = deps.call_python(params.get("code"), params.get("globals"))
+                        elif mcp_registry.is_mcp_tool(tool):
+                            result = deps.call_mcp_tool(tool, params if isinstance(params, dict) else {})
                         elif tool in deps.plugin_tool_handlers:
                             result = deps.plugin_tool_handlers[tool](params)
                         else:

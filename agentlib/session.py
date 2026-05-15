@@ -185,6 +185,7 @@ class AgentSession:
         python_delegate_line: Optional[Callable[..., dict]] = None,
         python_host_command: Optional[Callable[[dict], dict]] = None,
         python_enqueue_line: Optional[Callable[[str, str], dict]] = None,
+        host_app: Optional[object] = None,
     ):
         self.settings = settings
         self.verbose = int(verbose)
@@ -241,9 +242,10 @@ class AgentSession:
         self._deliverable_skip_mandatory_web = deliverable_skip_mandatory_web
         self._user_wants_written_deliverable = user_wants_written_deliverable
         self._interactive_turn_user_message = interactive_turn_user_message
-        # Each interactive session needs its own deps object so per-session state (like cwd for shell/filesystem tools)
-        # does not leak across embedded sessions / TUI lanes that share a cached AgentApp deps bundle.
-        self._conversation_turn_deps = copy.deepcopy(conversation_turn_deps)
+        # Shallow copy only: ``call_mcp_tool`` (and other callables) close over ``AgentApp``; after MCP sync the
+        # app may hold live ``StdioMcpSession`` objects with ``threading.Lock``, which ``deepcopy`` cannot handle.
+        # Per-session isolation is handled via ``replace(session_cwd=…)`` and ``_rebind_session_fs_tools``.
+        self._conversation_turn_deps = copy.copy(conversation_turn_deps)
         self.session_cwd = os.path.abspath(os.getcwd())
         self._conversation_turn_deps = replace(self._conversation_turn_deps, session_cwd=self.session_cwd)
         self._rebind_session_fs_tools()
@@ -287,6 +289,7 @@ class AgentSession:
         self.python_delegate_line = python_delegate_line
         self.python_host_command = python_host_command
         self.python_enqueue_line = python_enqueue_line
+        self._host_app = host_app
 
     def _resolve_session_path(self, raw: object) -> str:
         """Resolve a user/tool path against this session's cwd when relative."""
@@ -376,6 +379,154 @@ class AgentSession:
         self.session_cwd = target
         self._rebind_session_fs_tools()
         sink_print_compat(f"Working directory: {self.session_cwd}")
+        return SessionLineResult()
+
+    def _mcp_servers_normalized(self) -> list:
+        raw = self._settings_get(("agent", "mcp_servers"))
+        return raw if isinstance(raw, list) else []
+
+    @staticmethod
+    def _mcp_entry_name_key(rec: object) -> str:
+        if not isinstance(rec, dict):
+            return ""
+        return str(rec.get("name") or "").strip().lower().replace("-", "_")
+
+    def _mcp_refresh_connections(
+        self, *, connected_msg: str = "[mcp] Connections refreshed.", announce: bool = True
+    ) -> None:
+        host = getattr(self, "_host_app", None)
+        if host is None:
+            sink_print_compat("[mcp] Host app not linked — restart the REPL to reconnect MCP.")
+            return
+        try:
+            if self.settings.get_bool(("agent", "mcp_enabled"), False):
+                host.schedule_mcp_resync()
+                if announce:
+                    sink_print_compat(
+                        "[mcp] Reconnect scheduled in the background (per-server handshake can take a few seconds). "
+                        "Run `/mcp status` when you want to see tools and errors."
+                    )
+                return
+            connected = host.sync_mcp()
+            if connected:
+                sink_print_compat(connected_msg)
+            else:
+                sink_print_compat(
+                    "[mcp] MCP is disabled (agent.mcp_enabled=false); servers were not started. "
+                    "Run /mcp enable to connect and discover tools."
+                )
+        except Exception as e:
+            sink_print_compat(f"[mcp] refresh failed: {type(e).__name__}: {e}")
+
+    def _cmd_mcp(self, s: str) -> SessionLineResult:
+        """`/mcp` — configure Model Context Protocol servers (prefs-backed)."""
+        from agentlib.mcp.repl_cmd import MCP_REPL_HELP, parse_mcp_add_http_tokens, parse_mcp_add_stdio_tokens
+        from agentlib.tools import mcp_registry
+
+        try:
+            toks = shlex.split((s or "").strip())
+        except ValueError as e:
+            sink_print_compat(f"/mcp: {e}")
+            return SessionLineResult()
+        if len(toks) < 2:
+            sink_print_compat(MCP_REPL_HELP)
+            return SessionLineResult()
+        sub = toks[1].lower()
+        if sub in ("help", "-h", "--help"):
+            sink_print_compat(MCP_REPL_HELP)
+            return SessionLineResult()
+
+        if sub == "list":
+            enabled = self.settings.get_bool(("agent", "mcp_enabled"), False)
+            servers = self._mcp_servers_normalized()
+            sink_print_compat(
+                f"agent.mcp_enabled = {enabled}\nagent.mcp_servers =\n"
+                + json.dumps(servers, indent=2, ensure_ascii=False)
+            )
+            return SessionLineResult()
+
+        if sub == "status":
+            enabled = self.settings.get_bool(("agent", "mcp_enabled"), False)
+            servers = self._mcp_servers_normalized()
+            sink_print_compat(
+                f"agent.mcp_enabled = {enabled}\nagent.mcp_servers =\n"
+                + json.dumps(servers, indent=2, ensure_ascii=False)
+            )
+            errs = mcp_registry.last_connect_errors()
+            if errs:
+                sink_print_compat("Last sync errors:\n" + "\n".join(f"  - {x}" for x in errs))
+            else:
+                sink_print_compat("Last sync errors: (none recorded)")
+            n_tools = len(mcp_registry.all_ids())
+            sink_print_compat(f"Discovered MCP tools (this process): {n_tools}")
+            if not enabled and servers:
+                sink_print_compat(
+                    "(With MCP disabled, tool discovery is skipped — run /mcp enable, then /mcp status again.)"
+                )
+            return SessionLineResult()
+
+        if sub == "reload":
+            self._mcp_refresh_connections()
+            return SessionLineResult()
+
+        if sub == "enable":
+            self._settings_set(("agent", "mcp_enabled"), True)
+            sink_print_compat("agent.mcp_enabled = true (use /set save to persist).")
+            self._mcp_refresh_connections()
+            return SessionLineResult()
+
+        if sub == "disable":
+            self._settings_set(("agent", "mcp_enabled"), False)
+            sink_print_compat("agent.mcp_enabled = false (use /set save to persist).")
+            self._mcp_refresh_connections()
+            return SessionLineResult()
+
+        if sub == "remove":
+            if len(toks) < 3:
+                sink_print_compat("Usage: /mcp remove NAME")
+                return SessionLineResult()
+            target = self._mcp_entry_name_key({"name": toks[2]})
+            if not target:
+                sink_print_compat("/mcp remove: invalid NAME")
+                return SessionLineResult()
+            servers = self._mcp_servers_normalized()
+            new = [x for x in servers if self._mcp_entry_name_key(x) != target]
+            if len(new) == len(servers):
+                sink_print_compat(f"/mcp remove: no server named {toks[2]!r}")
+                return SessionLineResult()
+            self._settings_set(("agent", "mcp_servers"), new)
+            sink_print_compat(f"Removed MCP server {toks[2]!r}. Use /set save to persist.")
+            self._mcp_refresh_connections()
+            return SessionLineResult()
+
+        if sub == "add":
+            if len(toks) < 4:
+                sink_print_compat("Usage: /mcp add stdio … | /mcp add http …\nTry /mcp help")
+                return SessionLineResult()
+            kind = toks[2].lower()
+            if kind == "stdio":
+                spec, err = parse_mcp_add_stdio_tokens(toks)
+            elif kind == "http":
+                spec, err = parse_mcp_add_http_tokens(toks)
+            else:
+                sink_print_compat("/mcp add: transport must be stdio or http (see /mcp help)")
+                return SessionLineResult()
+            if spec is None:
+                sink_print_compat(err)
+                return SessionLineResult()
+            name_key = spec["name"]
+            servers = self._mcp_servers_normalized()
+            new = [x for x in servers if self._mcp_entry_name_key(x) != name_key]
+            new.append(spec)
+            self._settings_set(("agent", "mcp_servers"), new)
+            sink_print_compat(
+                f"MCP server {spec['name']!r} configured ({spec.get('transport')} upsert). "
+                "Use /set save to persist."
+            )
+            self._mcp_refresh_connections()
+            return SessionLineResult()
+
+        sink_print_compat(f"/mcp: unknown subcommand {toks[1]!r}. Try /mcp help")
         return SessionLineResult()
 
     def _cmd_compact(self, s: str) -> SessionLineResult:
@@ -1401,6 +1552,8 @@ class AgentSession:
             return self._cmd_repl_extensions(s)
         if cmd in ("/cd", "/chdir"):
             return self._cmd_cd(s)
+        if cmd == "/mcp" or low.startswith("/mcp "):
+            return self._cmd_mcp(s)
         if low.startswith("/run_command"):
             return self._cmd_run_command(s)
         if low.startswith("/call_python"):
@@ -1482,6 +1635,7 @@ class AgentSession:
                 "  /import FILE\n"
                 "  /context load|save|start_log FILE   (aliases: /load_context, /save_context)\n"
                 "  /load FILE.py  ·  /unload  ·  /extensions   (REPL extension modules)\n"
+                "  /mcp …          (Model Context Protocol servers — try /mcp help)\n"
                 "  /call_python …\n"
                 "  /run_command …\n"
                 "  ! CMD\n"
@@ -2563,6 +2717,15 @@ class AgentSession:
                     sink_print_compat(f"/set {key} set: {e}")
                     return SessionLineResult()
                 sink_print_compat(msg)
+                if (
+                    key == "agent"
+                    and getattr(self, "_host_app", None) is not None
+                    and raw_k.strip().lower().replace("-", "_") in ("mcp_enabled", "mcp_servers")
+                ):
+                    try:
+                        self._mcp_refresh_connections(connected_msg="[mcp] Reloaded MCP server connections.")
+                    except Exception as e:
+                        sink_print_compat(f"[mcp] reload failed: {e}")
                 return SessionLineResult()
             if sub in ("unset", "delete", "clear"):
                 if len(toks) < 4:
@@ -2574,6 +2737,15 @@ class AgentSession:
                     sink_print_compat(f"/set {key} unset: {e}")
                     return SessionLineResult()
                 sink_print_compat(msg)
+                if (
+                    key == "agent"
+                    and getattr(self, "_host_app", None) is not None
+                    and toks[3].strip().lower().replace("-", "_") in ("mcp_enabled", "mcp_servers")
+                ):
+                    try:
+                        self._mcp_refresh_connections(connected_msg="[mcp] Reloaded MCP server connections.")
+                    except Exception as e:
+                        sink_print_compat(f"[mcp] reload failed: {e}")
                 return SessionLineResult()
             sink_print_compat(f"Unknown /set {key} subcommand. Try: /set {key} show | set | unset | keys")
             return SessionLineResult()
@@ -2647,7 +2819,15 @@ class AgentSession:
             if len(toks) >= 3 and toks[2].lower() in ("reload", "refresh"):
                 self._registry.load_plugin_toolsets(self.tools_dir)
                 self._registry.register_aliases()
-                sink_print_compat(f"Reloaded plugin toolsets from {self.tools_dir!r}.")
+                if getattr(self, "_host_app", None) is not None:
+                    try:
+                        self._mcp_refresh_connections(announce=False)
+                    except Exception:
+                        pass
+                sink_print_compat(
+                    f"Reloaded plugin toolsets from {self.tools_dir!r}. "
+                    "If MCP is enabled, resync runs in the background."
+                )
                 return SessionLineResult()
             if len(toks) >= 4 and toks[2].lower() in ("describe", "desc", "help"):
                 tid = toks[3].strip()

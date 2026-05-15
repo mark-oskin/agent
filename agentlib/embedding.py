@@ -118,6 +118,8 @@ def build_embedded_session(
         except Exception:
             pass
 
+    app.sync_mcp()
+
     enabled_tools = set(st.get("enabled_tools") or set(app.registry.core_tools))
     enabled_toolsets = set(st.get("enabled_toolsets") or set())
     primary_profile = primary_profile if primary_profile is not None else (
@@ -288,6 +290,7 @@ def build_embedded_session(
         python_delegate_line=python_delegate_line,
         python_host_command=python_host_command,
         python_enqueue_line=python_enqueue_line,
+        host_app=app,
     )
     return app, session
 

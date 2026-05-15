@@ -53,6 +53,9 @@ DEFAULT_SETTINGS: dict = {
         "max_fetch_page_web": 15,
         # When True (default), PDF responses from fetch_page are converted to extracted text for the LLM.
         "fetch_page_pdf_to_text": True,
+        # Model Context Protocol: optional external tools via stdio or HTTP JSON-RPC.
+        "mcp_enabled": False,
+        "mcp_servers": [],
     },
     # Optional overrides for REPL extensions (``/set extensions <id> …``). Each key is an extension id;
     # defaults for an extension belong in that extension's module, not here.
@@ -330,6 +333,17 @@ class AgentSettings:
             v = int(float(text)) if text else 0
         elif isinstance(dv, float):
             v = float(text) if text else 0.0
+        elif isinstance(dv, list):
+            if not text.strip():
+                v = []
+            else:
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"invalid JSON array for {key!r}: {e}") from e
+                if not isinstance(parsed, list):
+                    raise ValueError(f"{key!r} must be a JSON array")
+                v = parsed
         else:
             v = text
         self.set((grp, key), v)

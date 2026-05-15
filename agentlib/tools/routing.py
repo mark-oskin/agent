@@ -4,6 +4,7 @@ import difflib
 import re
 from typing import AbstractSet, Optional
 
+from . import mcp_registry
 from .plugins import (
     PLUGIN_TOOL_HANDLERS,
     PLUGIN_TOOLSETS,
@@ -133,7 +134,11 @@ def canonicalize_user_tool_phrase(phrase: str) -> str:
 
 
 def all_known_tools() -> frozenset[str]:
-    return frozenset({tid for tid, _label, _aliases in CORE_TOOL_ENTRIES} | set(PLUGIN_TOOL_HANDLERS.keys()))
+    return frozenset(
+        {tid for tid, _label, _aliases in CORE_TOOL_ENTRIES}
+        | set(PLUGIN_TOOL_HANDLERS.keys())
+        | set(mcp_registry.all_ids())
+    )
 
 
 def register_tool_aliases() -> None:
@@ -237,6 +242,8 @@ def effective_enabled_tools_for_turn(
     active_ts = route_active_toolsets_for_request(user_query, enabled_toolsets)
     for ts in active_ts:
         base.update(plugin_tools_for_toolset(ts))
+    if mcp_registry.union_into_session_enabled():
+        base.update(mcp_registry.all_ids())
     base = base & set(all_known_tools())
     return frozenset(base)
 
@@ -260,6 +267,15 @@ def describe_tool_call_contract(tool_id: str) -> str:
     tid = (tool_id or "").strip()
     if not tid:
         return "Unknown tool."
+    if mcp_registry.is_mcp_tool(tid):
+        doc = mcp_registry.prompt_doc(tid)
+        out = [f"Tool: {tid} (MCP)"]
+        if doc:
+            out.append(doc)
+        else:
+            out.append("Contract: parameters JSON object per MCP inputSchema for this tool.")
+        out.append("Returns: string (tool output)")
+        return "\n".join(out)
     if tid in PLUGIN_TOOL_HANDLERS:
         ts = PLUGIN_TOOL_TO_TOOLSET.get(tid) or ""
         rec = PLUGIN_TOOLSETS.get(ts) or {}

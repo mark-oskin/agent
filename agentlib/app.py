@@ -26,7 +26,8 @@ import json
 import os
 import sys
 import platform
-from dataclasses import dataclass, replace
+import threading
+from dataclasses import dataclass, field, replace
 from typing import AbstractSet, Callable, Optional
 
 import requests
@@ -77,6 +78,9 @@ from agentlib.tools.registry import ToolRegistry
 from agentlib.tools.routing import preferred_web_search_tool
 from agentlib.tools.websearch import search_backend_banner_line, search_web_effective_max_results
 
+# Serialize background MCP reconnects (avoid storing a Lock on AgentApp — deepcopy used in tests).
+_MCP_RESYNC_LOCK = threading.Lock()
+
 
 @dataclass
 class AgentApp:
@@ -87,6 +91,8 @@ class AgentApp:
     _cached_turn_deps: Optional[ConversationTurnDeps] = None
     _repl_readline_installed: bool = False
     _last_ollama_usage: Optional[dict] = None
+    _mcp_cluster: Optional[object] = field(default=None, repr=False)
+    _mcp_resync_ticket: int = field(default=0, repr=False, init=False)
 
     # --- directories / defaults ---
 
@@ -231,6 +237,108 @@ class AgentApp:
             load_plugin_toolsets=lambda tools_dir=None: self.registry.load_plugin_toolsets(tools_dir),
             register_tool_aliases=self.registry.register_aliases,
         )
+
+    def sync_mcp(self) -> bool:
+        """(Re)connect MCP servers from prefs and refresh mcp_registry tool ids.
+
+        Returns False when ``agent.mcp_enabled`` is false (no subprocesses started).
+        """
+        from agentlib.mcp.cluster import McpCluster
+        from agentlib.tools import mcp_registry
+
+        self._cached_turn_deps = None
+        prev = getattr(self, "_mcp_cluster", None)
+        if prev is not None:
+            try:
+                prev.disconnect_all()
+            except Exception:
+                pass
+            self._mcp_cluster = None
+
+        if not self.settings_get_bool(("agent", "mcp_enabled"), False):
+            mcp_registry.install(None, prefs_enabled=False)
+            return False
+
+        cluster = McpCluster.build_from_settings(self.settings)
+        self._mcp_cluster = cluster
+        mcp_registry.install(cluster, prefs_enabled=True)
+        for err in cluster.connect_errors:
+            print(f"[mcp] {err}", file=sys.stderr)
+        return True
+
+    def schedule_mcp_resync(self) -> None:
+        """Reconnect MCP servers without blocking the caller (REPL-friendly).
+
+        Builds the new cluster before tearing down the previous one so existing MCP
+        tools stay available while a slow server handshakes. Coalesces rapid
+        ``/mcp`` changes via a monotonic ticket so only the latest resync applies.
+        """
+        from agentlib.mcp.cluster import McpCluster
+        from agentlib.tools import mcp_registry
+
+        self._mcp_resync_ticket += 1
+        ticket = self._mcp_resync_ticket
+
+        def worker() -> None:
+            with _MCP_RESYNC_LOCK:
+                if ticket != self._mcp_resync_ticket:
+                    return
+
+                self._cached_turn_deps = None
+
+                if not self.settings_get_bool(("agent", "mcp_enabled"), False):
+                    prev = getattr(self, "_mcp_cluster", None)
+                    self._mcp_cluster = None
+                    mcp_registry.install(None, prefs_enabled=False)
+                    if prev is not None:
+                        try:
+                            prev.disconnect_all()
+                        except Exception:
+                            pass
+                    if ticket == self._mcp_resync_ticket:
+                        print("[mcp] MCP disabled; server connections cleared.", file=sys.stderr, flush=True)
+                    return
+
+                try:
+                    cluster = McpCluster.build_from_settings(self.settings)
+                except Exception as e:
+                    if ticket == self._mcp_resync_ticket:
+                        print(f"[mcp] MCP sync failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                    return
+
+                if ticket != self._mcp_resync_ticket:
+                    try:
+                        cluster.disconnect_all()
+                    except Exception:
+                        pass
+                    return
+
+                prev = getattr(self, "_mcp_cluster", None)
+                self._mcp_cluster = cluster
+                mcp_registry.install(cluster, prefs_enabled=True)
+                if prev is not None:
+                    try:
+                        prev.disconnect_all()
+                    except Exception:
+                        pass
+                for err in cluster.connect_errors:
+                    print(f"[mcp] {err}", file=sys.stderr, flush=True)
+                if ticket == self._mcp_resync_ticket:
+                    n_tools = len(mcp_registry.all_ids())
+                    if cluster.connect_errors:
+                        print(
+                            "[mcp] Background reconnect finished (some servers failed; try `/mcp status`).",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[mcp] Background reconnect complete. {n_tools} MCP tool(s) available.",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+
+        threading.Thread(target=worker, daemon=True, name="mcp-resync").start()
 
     # --- JSON parsing helpers for skills ---
 
@@ -649,6 +757,11 @@ class AgentApp:
                 deliverable_reminder=deliverable_reminder,
                 tool_output_max=self.settings_get_int(("ollama", "tool_output_max"), 100000),
             ),
+            call_mcp_tool=lambda tid, p: (
+                self._mcp_cluster.invoke_composite(tid, p)
+                if getattr(self, "_mcp_cluster", None) is not None
+                else "MCP error: not initialized (enable agent.mcp_enabled and configure agent.mcp_servers)."
+            ),
         )
         if agent_progress is None:
             self._cached_turn_deps = deps
@@ -1010,6 +1123,7 @@ class AgentApp:
             python_delegate_line=None,
             python_host_command=None,
             python_enqueue_line=None,
+            host_app=self,
         )
 
         run_interactive_repl_loop(
@@ -1035,6 +1149,8 @@ class AgentApp:
             self.registry.register_aliases()
         except Exception:
             pass
+
+        self.sync_mcp()
 
         verbose0 = coerce_verbose_level(st.get("verbose", 0))
         second_opinion0 = bool(st["second_opinion_enabled"])
@@ -1199,6 +1315,8 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
         app0.registry.register_aliases()
     except Exception:
         pass
+
+    app0.sync_mcp()
 
     verbose0 = coerce_verbose_level(st.get("verbose", 0))
     second_opinion0 = bool(st["second_opinion_enabled"])

@@ -24,6 +24,7 @@ description: Topic map for persisted and session preferences; /set help is the l
 | **`/set second_opinion llm`** | Reviewer path: **`ollama [model]`** or **`hosted <base_url> <model> [api_key]`**. |
 | **`/set enable`** / **`/set disable`** | Features and tools by phrase: e.g. **`second_opinion`**, **`stream_thinking`**, **`verbose`**, or any known **tool id** / alias (see **`/set tools`**). |
 | **`/set tools`** | **`list`** (core + plugin toolsets), **`enable` / `disable` `<toolset>`**, **`reload`**, **`describe` `<tool-id>`** or toolset name. |
+| **`/mcp`** | Model Context Protocol — **`help`**, **`list`**, **`status`**, **`add`** (optional **`--framing ndjson`** for Python SDK stdio), **`remove`**, **`enable`** / **`disable`**, **`reload`**. See [Configuration & environment](environment.md#mcp-model-context-protocol). |
 | **`/set system_prompt`** | **`show`**, **`reset`**, **`pin`** (snapshot effective prompt), **`file`**, **`save`**, or inline text. |
 | **`/set prompt_template`** | **`list`**, **`show`**, **`use`**, **`default`**, **`set`**, **`delete`** — JSON templates under `prompt_templates_dir` / overlays. |
 | **`/set context`** | Context-window manager: **`show`**, **`on`/`off`**, **`tokens`**, **`trigger`**, **`target`**, **`keep_tail`**. Also see **`agent.disable_context_manager`** in prefs ([Configuration & environment](environment.md)). |

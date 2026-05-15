@@ -165,6 +165,16 @@ The agent can **compact** older transcript turns when a heuristic size threshold
 
 Web search result count is capped; configure via `~/.agent.json` / `/settings agent` where exposed. **Backend:** set **`agent.search_web_backend`** to **`ddg`** (default, DuckDuckGo HTML + instant answer), **`searxng`** (needs **`agent.searxng_url`**), or **`brave`** (Brave Search API — set **`agent.brave_search_api_key`**). See **[docs/environment.md](docs/environment.md)**.
 
+### MCP (Model Context Protocol) tools
+
+Optional **external tools** via MCP servers:
+
+- Use **`/mcp help`** in the REPL for **`list`**, **`status`**, **`add`**, **`remove`**, **`enable`** / **`disable`**, and **`reload`** (prefs keys **`agent.mcp_enabled`** and **`agent.mcp_servers`**). Full behavior, **stdio framing** (**`content-length`** vs **`ndjson`**), and examples: **[docs/environment.md](docs/environment.md#mcp-model-context-protocol)**.
+- **stdio:** subprocess + JSON-RPC. Default wire format is **Content-Length** framing (typical for **`npx`** / Node servers). Python MCP SDK / **FastMCP** servers need **`--framing ndjson`** (stored as **`stdio_framing`** in prefs).
+- **HTTP:** JSON-RPC POST to a URL (simple request/response).
+- Each MCP tool appears as **`mcp_<server>_<tool>`** in the model tool list when MCP is enabled.
+- After MCP-related prefs change in the REPL, resync runs **in the background** when MCP is enabled; use **`/mcp status`** or **`/set tools reload`** as documented in **environment.md**.
+
 ## Tools
 
 ### Built-in (core) tools

@@ -18,6 +18,7 @@ There is **no** `/help <topic>` router in the session: discovery is **`/help`** 
 | Try | What you get |
 |-----|----------------|
 | **`/set help`** | Short index of `/set` topics (same dispatcher as **`/settings help`**). |
+| **`/mcp help`** | MCP servers: add/remove/list; **`/mcp status`** for tools, errors, and **`mcp_enabled`**. Stdio framing: default **Content-Length**; Python SDK servers use **`--framing ndjson`**. See [Configuration & environment](environment.md#mcp-model-context-protocol). |
 | **`/while help`** | Full `/while` grammar and judge semantics. |
 | **`/compact help`** | Percent / word targets for LLM compression. |
 | **`/fork help`** · **`/send help`** (TUI) | Comma-splitting and quoting rules for multi-line payloads. |
@@ -32,6 +33,7 @@ Tool and toolset documentation in-session: **`/set tools describe <tool-id>`** (
 
 The printed list is intentionally short. These are still valid (see [REPL session & context](repl-session.md), [Settings](settings-repl.md), README):
 
+- **`/mcp help`** — configure Model Context Protocol servers (`list`, `add`, `remove`, **`--framing ndjson`** for Python SDK stdio, …).
 - **`/show`** (models, current primary/reviewer, …)
 - **`/skill`** …
 - **`/import FILE`** — injects file contents as the **next user turn** (different from **`/source`**, which runs lines as slash/input).

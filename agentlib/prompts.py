@@ -4,7 +4,7 @@ import os
 import platform
 from typing import AbstractSet, Callable, Optional
 
-from agentlib.tools import plugins, routing
+from agentlib.tools import mcp_registry, plugins, routing
 from agentlib.tools.routing import CORE_TOOL_ENTRIES, all_known_tools
 
 
@@ -95,6 +95,8 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
         doc = routing.core_tool_prompt_doc(tid)
         if not doc:
             doc = plugins.plugin_tool_prompt_doc(tid)
+        if not doc:
+            doc = mcp_registry.prompt_doc(tid)
         if not doc:
             # Plugin tools: keep docs minimal here; full contracts are available via /set tools describe <tool-id>.
             doc = f"{tid} — parameters: JSON object (tool-specific)."
