@@ -5,18 +5,30 @@ description: Plug in external tools from MCP servers over stdio or HTTP; REPL /m
 
 # MCP (Model Context Protocol)
 
-The agent can merge **external tools** from [Model Context Protocol](https://modelcontextprotocol.io/) servers into the same tool loop as built-ins and plugins. Each MCP tool is exposed to the model as **`mcp_<server>_<tool>`** (see **`/set tools describe`** when MCP is active).
+The agent can merge **external tools** from [Model Context Protocol](https://modelcontextprotocol.io/) servers into the same tool loop as built-ins and plugins. Each MCP tool is exposed to the model as **`mcp_<server>_<tool>`** (see **`/set tools describe`** when that id is in the session allowlist).
+
+## Process-wide vs per session
+
+| Layer | What it controls |
+|-------|------------------|
+| **`agent.mcp_enabled`** + **`agent.mcp_servers`** | One shared MCP connection per process (**`AgentApp`**): subprocesses / HTTP, tool discovery into **`mcp_registry`**. |
+| **This session's `enabled_tools`** | Which discovered **`mcp_*`** tools the model may call in **this** REPL lane or embed session. |
+
+**`/mcp enable`** connects servers for the whole process. **`/mcp session on`** enables all currently discovered MCP tool ids **in this session only**. **`/fork`** copies the parent's **`enabled_tools`** (including MCP ids). Other lanes are unaffected unless they run **`/mcp session on`** themselves.
+
+Use **`/set tools`** to see MCP tools with **`[on]`** / **`[off]`** per session, or **`/set enable`** / **`disable`** on individual **`mcp_*`** ids.
 
 ## REPL commands
 
 Use **`/mcp help`** for syntax. In short:
 
-- **`/mcp enable`** / **`disable`** — turn MCP on or off (**`agent.mcp_enabled`**). Tools are only started when MCP is enabled.
+- **`/mcp enable`** / **`disable`** — start or stop **shared** MCP servers (**`agent.mcp_enabled`**).
+- **`/mcp session on`** / **`off`** — add or remove all discovered **`mcp_*`** tools from **this session's** allowlist.
 - **`/mcp add stdio …`** / **`add http …`** — append or upsert a server entry in **`agent.mcp_servers`**.
-- **`/mcp list`** / **`status`** — show prefs, last errors, and how many tools were discovered in this process.
+- **`/mcp list`** / **`status`** — prefs, errors, discovered count, and how many MCP tools are on in this session.
 - **`/mcp remove NAME`**, **`reload`** — drop a server or schedule a reconnect.
 
-Persist changes with **`/set save`** (writes **`~/.agent.json`** or your **`--config`** file).
+Persist prefs with **`/set save`** (writes **`~/.agent.json`** or your **`--config`** file). Per-session **`enabled_tools`** are in-memory unless you save a context bundle that includes them.
 
 ## Transports
 

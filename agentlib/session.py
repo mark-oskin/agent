@@ -391,6 +391,28 @@ class AgentSession:
             return ""
         return str(rec.get("name") or "").strip().lower().replace("-", "_")
 
+    def _mcp_session_enabled_tool_ids(self) -> set[str]:
+        from agentlib.tools import mcp_registry
+
+        return {t for t in self.enabled_tools if mcp_registry.is_mcp_tool(t)}
+
+    def mcp_session_enable_tools(self) -> int:
+        """Add all discovered MCP tool ids to this session's ``enabled_tools``."""
+        from agentlib.tools import mcp_registry
+
+        ids = mcp_registry.all_ids()
+        before = len(self._mcp_session_enabled_tool_ids())
+        self.enabled_tools.update(ids)
+        return len(self._mcp_session_enabled_tool_ids()) - before
+
+    def mcp_session_disable_tools(self) -> int:
+        """Remove MCP tool ids from this session's ``enabled_tools``."""
+        from agentlib.tools import mcp_registry
+
+        removed = {t for t in self.enabled_tools if mcp_registry.is_mcp_tool(t)}
+        self.enabled_tools -= removed
+        return len(removed)
+
     def _mcp_refresh_connections(
         self, *, connected_msg: str = "[mcp] Connections refreshed.", announce: bool = True
     ) -> None:
@@ -458,11 +480,39 @@ class AgentSession:
             else:
                 sink_print_compat("Last sync errors: (none recorded)")
             n_tools = len(mcp_registry.all_ids())
+            sess_on = len(self._mcp_session_enabled_tool_ids())
             sink_print_compat(f"Discovered MCP tools (this process): {n_tools}")
+            sink_print_compat(
+                f"MCP tools enabled in this session: {sess_on}"
+                + (f" of {n_tools}" if n_tools else " (none discovered yet)")
+            )
             if not enabled and servers:
                 sink_print_compat(
                     "(With MCP disabled, tool discovery is skipped — run /mcp enable, then /mcp status again.)"
                 )
+            elif enabled and n_tools and sess_on == 0:
+                sink_print_compat(
+                    "(Servers are connected; this session cannot call MCP tools until /mcp session on.)"
+                )
+            return SessionLineResult()
+
+        if sub in ("session", "tools"):
+            if len(toks) < 3:
+                sink_print_compat("Usage: /mcp session on | off")
+                return SessionLineResult()
+            act = toks[2].lower()
+            if act in ("on", "enable", "true", "yes"):
+                added = self.mcp_session_enable_tools()
+                n = len(mcp_registry.all_ids())
+                sink_print_compat(
+                    f"MCP tools enabled for this session (+{added} id(s); {len(self._mcp_session_enabled_tool_ids())} of {n} discovered)."
+                )
+                return SessionLineResult()
+            if act in ("off", "disable", "false", "no"):
+                removed = self.mcp_session_disable_tools()
+                sink_print_compat(f"MCP tools disabled for this session (removed {removed} id(s) from enabled_tools).")
+                return SessionLineResult()
+            sink_print_compat("Usage: /mcp session on | off")
             return SessionLineResult()
 
         if sub == "reload":
@@ -471,13 +521,19 @@ class AgentSession:
 
         if sub == "enable":
             self._settings_set(("agent", "mcp_enabled"), True)
-            sink_print_compat("agent.mcp_enabled = true (use /set save to persist).")
+            sink_print_compat(
+                "agent.mcp_enabled = true (use /set save to persist). "
+                "Shared MCP servers will connect; run /mcp session on in each session that should use MCP tools."
+            )
             self._mcp_refresh_connections()
             return SessionLineResult()
 
         if sub == "disable":
             self._settings_set(("agent", "mcp_enabled"), False)
-            sink_print_compat("agent.mcp_enabled = false (use /set save to persist).")
+            sink_print_compat(
+                "agent.mcp_enabled = false (use /set save to persist). "
+                "Shared MCP connections cleared; per-session enabled_tools entries for mcp_* are unchanged."
+            )
             self._mcp_refresh_connections()
             return SessionLineResult()
 

@@ -76,6 +76,32 @@ def test_format_tool_result_text_blocks():
     assert "hello" in out and "world" in out
 
 
+def test_effective_enabled_tools_mcp_requires_session_allowlist():
+    from agentlib.tools import mcp_registry, routing
+
+    class FakeCluster:
+        tool_index = {"mcp_srv_demo": ("srv", "demo")}
+        prompt_docs = {"mcp_srv_demo": "demo tool"}
+        connect_errors = []
+
+    mcp_registry.install(FakeCluster(), prefs_enabled=True)
+    try:
+        et = routing.effective_enabled_tools_for_turn(
+            base_enabled_tools=frozenset(["search_web"]),
+            enabled_toolsets=frozenset(),
+            user_query="hi",
+        )
+        assert "mcp_srv_demo" not in et
+        et2 = routing.effective_enabled_tools_for_turn(
+            base_enabled_tools=frozenset(["search_web", "mcp_srv_demo"]),
+            enabled_toolsets=frozenset(),
+            user_query="hi",
+        )
+        assert "mcp_srv_demo" in et2
+    finally:
+        mcp_registry.clear()
+
+
 def test_mcp_registry_install_disabled():
     from agentlib.tools import mcp_registry
 

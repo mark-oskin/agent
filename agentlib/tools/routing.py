@@ -193,6 +193,13 @@ def format_settings_tools_list(enabled_tools: AbstractSet[str]) -> str:
     for internal, label, _aliases in CORE_TOOL_ENTRIES:
         on = "on" if internal in enabled_tools else "off"
         lines.append(f"  [{on}] {label}  ({internal})")
+    mcp_ids = sorted(mcp_registry.all_ids())
+    if mcp_ids:
+        lines.append("")
+        lines.append("MCP tools (this process; enable per session with /mcp session on):")
+        for tid in mcp_ids:
+            on = "on" if tid in enabled_tools else "off"
+            lines.append(f"  [{on}] {tid}")
     lines.append(
         "You can use plain phrases, e.g. /set disable web search  "
         "or  -disable_tool shell"
@@ -242,8 +249,8 @@ def effective_enabled_tools_for_turn(
     active_ts = route_active_toolsets_for_request(user_query, enabled_toolsets)
     for ts in active_ts:
         base.update(plugin_tools_for_toolset(ts))
-    if mcp_registry.union_into_session_enabled():
-        base.update(mcp_registry.all_ids())
+    # MCP tools are per-session via ``enabled_tools`` (not auto-unioned). Global ``agent.mcp_enabled``
+    # only starts shared subprocesses; each session opts in with ``/mcp session on`` or ``/set tools``.
     base = base & set(all_known_tools())
     return frozenset(base)
 

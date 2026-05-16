@@ -172,7 +172,7 @@ Optional **external tools** via MCP servers:
 - Use **`/mcp help`** in the REPL for **`list`**, **`status`**, **`add`**, **`remove`**, **`enable`** / **`disable`**, and **`reload`** (prefs keys **`agent.mcp_enabled`** and **`agent.mcp_servers`**). Full behavior, **stdio framing** (**`content-length`** vs **`ndjson`**), and examples: **[docs/environment.md](docs/environment.md#mcp-model-context-protocol)**.
 - **stdio:** subprocess + JSON-RPC. Default wire format is **Content-Length** framing (typical for **`npx`** / Node servers). Python MCP SDK / **FastMCP** servers need **`--framing ndjson`** (stored as **`stdio_framing`** in prefs).
 - **HTTP:** JSON-RPC POST to a URL (simple request/response).
-- Each MCP tool appears as **`mcp_<server>_<tool>`** in the model tool list when MCP is enabled.
+- Each MCP tool appears as **`mcp_<server>_<tool>`** when it is in **this session's** **`enabled_tools`** (shared servers via **`/mcp enable`**, per-session via **`/mcp session on`**; **`/fork`** copies the parent's set).
 - After MCP-related prefs change in the REPL, resync runs **in the background** when MCP is enabled; use **`/mcp status`** or **`/set tools reload`** as documented in **environment.md**.
 
 ## Tools

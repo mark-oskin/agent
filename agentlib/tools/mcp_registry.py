@@ -43,9 +43,14 @@ def all_ids() -> FrozenSet[str]:
     return _TOOL_IDS
 
 
-def union_into_session_enabled() -> bool:
-    """When True, discovered MCP tools are merged into the effective tool allowlist."""
+def global_mcp_prefs_enabled() -> bool:
+    """True when the last ``install()`` had MCP enabled in prefs (servers may be connected)."""
     return _UNION_ENABLED
+
+
+def union_into_session_enabled() -> bool:
+    """Deprecated alias for :func:`global_mcp_prefs_enabled` (name was misleading)."""
+    return global_mcp_prefs_enabled()
 
 
 def prompt_doc(tool_id: str) -> str:
