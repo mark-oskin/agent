@@ -25,7 +25,7 @@ Configure optional MCP servers **from the REPL** with **`/mcp`** (`help`, `list`
 
 **`agent.mcp_enabled`** must be **`true`** (via **`/mcp enable`** or **`/set agent set mcp_enabled true`**) before subprocesses start and tools are discovered. Adding a server only updates prefs; it does not enable MCP by itself.
 
-**Per session:** even with servers connected, the model only receives MCP tools that are in **this session's** **`enabled_tools`** (use **`/mcp session on`**, **`/mcp session off`**, or **`/set tools`**). **`/fork`** copies the parent's tool allowlist. See **[MCP (Model Context Protocol)](mcp.md)**.
+**Per session:** when servers are connected, discovered MCP tools are **on by default** in each session (**`/mcp session off`** to opt out). Individual **`mcp_*`** ids can still be toggled with **`/set tools`**. **`/fork`** copies the parent's allowlist and opt-out flag. See **[MCP (Model Context Protocol)](mcp.md)**.
 
 You can still edit JSON by hand or use **`/set agent set mcp_servers '…'`** if you prefer.
 

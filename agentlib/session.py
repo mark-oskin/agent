@@ -194,6 +194,10 @@ class AgentSession:
         self.session_save_path = save_context_path
         self.enabled_tools = set(enabled_tools)
         self.enabled_toolsets = set(enabled_toolsets)
+        # When False and agent.mcp_enabled, discovered mcp_* tools are merged into enabled_tools automatically.
+        self.mcp_tools_opt_out = False
+        # When True, /set and /mcp cannot change prefs, session tool allowlists, or MCP wiring for this session.
+        self.settings_locked = False
         self.primary_profile = primary_profile
         self.reviewer_hosted_profile = reviewer_hosted_profile
         self.reviewer_ollama_model = reviewer_ollama_model
@@ -396,19 +400,109 @@ class AgentSession:
 
         return {t for t in self.enabled_tools if mcp_registry.is_mcp_tool(t)}
 
-    def mcp_session_enable_tools(self) -> int:
-        """Add all discovered MCP tool ids to this session's ``enabled_tools``."""
+    _SETTINGS_LOCK_MSG = (
+        "Settings and MCP configuration are locked for this session "
+        "(lock is permanent; start a new session to change prefs)."
+    )
+
+    def _reject_if_settings_locked(self) -> Optional[SessionLineResult]:
+        if self.settings_locked:
+            sink_print_compat(self._SETTINGS_LOCK_MSG)
+            return SessionLineResult()
+        return None
+
+    @staticmethod
+    def _mcp_subcommand_read_only(sub: str) -> bool:
+        return sub in ("help", "-h", "--help", "list", "status")
+
+    @classmethod
+    def _set_subcommand_read_only(cls, key: str, toks: list[str]) -> bool:
+        key = key.lower().replace("-", "_")
+        n = len(toks)
+
+        def sub(i: int, default: str = "") -> str:
+            return toks[i].lower() if n > i else default
+
+        if key in ("help",):
+            return True
+        if key in ("ollama", "openai", "agent"):
+            if n < 3:
+                return True
+            return sub(2) in ("show", "list", "keys", "key", "help")
+        if key == "tools":
+            if n < 3:
+                return True
+            s2 = sub(2)
+            if s2 in ("list", "ls", "show"):
+                return True
+            if s2 in ("describe", "desc", "help") and n >= 4:
+                return True
+            return False
+        if key == "system_prompt":
+            if n < 3:
+                return True
+            return sub(2) == "show"
+        if key in ("prompt_template", "prompt_templates", "prompt"):
+            if n < 3:
+                return True
+            s2 = sub(2)
+            if s2 in ("help", "-h", "--help", "explain"):
+                return True
+            return s2 in ("list", "show")
+        if key in ("context", "context_manager", "context_window"):
+            if n < 3:
+                return True
+            return sub(2) == "show"
+        if key == "thinking":
+            if n < 3:
+                return True
+            return sub(2) == "show"
+        if key == "primary":
+            if n < 4:
+                return True
+            if sub(2) == "request_options":
+                if n < 4:
+                    return True
+                return sub(3) in ("show", "help", "-h", "--help")
+            return False
+        if key == "extensions":
+            if n < 3:
+                return True
+            a = sub(2)
+            if a in ("help", "-h", "--help", "show", "list"):
+                return True
+            if n >= 4 and sub(3) in ("show", "list"):
+                return True
+            return False
+        return False
+
+    def seed_mcp_tools_if_connected(self) -> int:
+        """Merge discovered MCP tool ids into ``enabled_tools`` when global MCP is on and session not opted out."""
         from agentlib.tools import mcp_registry
 
+        if self.settings_locked:
+            return 0
+        if self.mcp_tools_opt_out:
+            return 0
+        if not self.settings.get_bool(("agent", "mcp_enabled"), False):
+            return 0
         ids = mcp_registry.all_ids()
+        if not ids:
+            return 0
         before = len(self._mcp_session_enabled_tool_ids())
         self.enabled_tools.update(ids)
         return len(self._mcp_session_enabled_tool_ids()) - before
 
+    def mcp_session_enable_tools(self) -> int:
+        """Re-enable MCP tools for this session (all currently discovered ids)."""
+        self.mcp_tools_opt_out = False
+        return self.seed_mcp_tools_if_connected()
+
     def mcp_session_disable_tools(self) -> int:
-        """Remove MCP tool ids from this session's ``enabled_tools``."""
+        """Opt out of MCP tools for this session and remove mcp_* from ``enabled_tools``."""
         from agentlib.tools import mcp_registry
 
+        self.mcp_tools_opt_out = True
         removed = {t for t in self.enabled_tools if mcp_registry.is_mcp_tool(t)}
         self.enabled_tools -= removed
         return len(removed)
@@ -422,6 +516,7 @@ class AgentSession:
             return
         try:
             if self.settings.get_bool(("agent", "mcp_enabled"), False):
+                self.seed_mcp_tools_if_connected()
                 host.schedule_mcp_resync()
                 if announce:
                     sink_print_compat(
@@ -458,6 +553,11 @@ class AgentSession:
             sink_print_compat(MCP_REPL_HELP)
             return SessionLineResult()
 
+        if not self._mcp_subcommand_read_only(sub):
+            blocked = self._reject_if_settings_locked()
+            if blocked is not None:
+                return blocked
+
         if sub == "list":
             enabled = self.settings.get_bool(("agent", "mcp_enabled"), False)
             servers = self._mcp_servers_normalized()
@@ -490,10 +590,16 @@ class AgentSession:
                 sink_print_compat(
                     "(With MCP disabled, tool discovery is skipped — run /mcp enable, then /mcp status again.)"
                 )
-            elif enabled and n_tools and sess_on == 0:
-                sink_print_compat(
-                    "(Servers are connected; this session cannot call MCP tools until /mcp session on.)"
-                )
+            elif enabled and n_tools and not self.mcp_tools_opt_out and not self.settings_locked:
+                added = self.seed_mcp_tools_if_connected()
+                if added:
+                    sess_on = len(self._mcp_session_enabled_tool_ids())
+                    sink_print_compat(
+                        f"(Merged {added} newly discovered MCP tool(s) into this session; "
+                        f"now {sess_on} of {n_tools} enabled.)"
+                    )
+            elif enabled and n_tools and self.mcp_tools_opt_out and sess_on == 0:
+                sink_print_compat("(This session opted out of MCP tools — use /mcp session on to re-enable.)")
             return SessionLineResult()
 
         if sub in ("session", "tools"):
@@ -523,8 +629,12 @@ class AgentSession:
             self._settings_set(("agent", "mcp_enabled"), True)
             sink_print_compat(
                 "agent.mcp_enabled = true (use /set save to persist). "
-                "Shared MCP servers will connect; run /mcp session on in each session that should use MCP tools."
+                "Shared MCP servers will connect; this session enables discovered MCP tools by default "
+                "(use /mcp session off to opt out)."
             )
+            added = self.seed_mcp_tools_if_connected()
+            if added:
+                sink_print_compat(f"Enabled {added} MCP tool(s) in this session (already discovered).")
             self._mcp_refresh_connections()
             return SessionLineResult()
 
@@ -2733,8 +2843,32 @@ class AgentSession:
                 "  /set primary llm ollama|hosted …\n"
                 "  /set primary request_options show|set|unset|merge|replace|clear\n"
                 "  /set extensions show | /set extensions <id> show | set | unset …\n"
+                "  /set lock   (permanently freeze settings and MCP for this session)\n"
             )
             return SessionLineResult()
+
+        if key == "unlock":
+            sink_print_compat(
+                "There is no /set unlock — settings lock is permanent for this session. "
+                "Start a new session to change configuration."
+            )
+            return SessionLineResult()
+
+        if key == "lock":
+            if self.settings_locked:
+                sink_print_compat("Settings and MCP are already locked for this session.")
+            else:
+                self.settings_locked = True
+                sink_print_compat(
+                    "Settings and MCP configuration locked for this session "
+                    "(permanent; use a new session to reconfigure)."
+                )
+            return SessionLineResult()
+
+        if self.settings_locked and not self._set_subcommand_read_only(key, toks):
+            blocked = self._reject_if_settings_locked()
+            if blocked is not None:
+                return blocked
 
         if key == "extensions":
             return self._cmd_set_extensions(toks)

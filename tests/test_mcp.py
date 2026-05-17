@@ -76,6 +76,31 @@ def test_format_tool_result_text_blocks():
     assert "hello" in out and "world" in out
 
 
+def test_seed_mcp_tools_if_connected_respects_opt_out(monkeypatch):
+    from agentlib.tools import mcp_registry
+    from tests.harness import build_test_session
+
+    class FakeCluster:
+        tool_index = {"mcp_a_t1": ("a", "t1"), "mcp_a_t2": ("a", "t2")}
+        prompt_docs = {}
+        connect_errors = []
+
+    mcp_registry.install(FakeCluster(), prefs_enabled=True)
+    try:
+        _app, sess = build_test_session(monkeypatch)
+        sess.settings.set(("agent", "mcp_enabled"), True)
+        sess.enabled_tools = {"search_web"}
+        n = sess.seed_mcp_tools_if_connected()
+        assert n == 2
+        assert "mcp_a_t1" in sess.enabled_tools
+        sess.mcp_session_disable_tools()
+        assert sess.mcp_tools_opt_out
+        assert sess.seed_mcp_tools_if_connected() == 0
+        assert "mcp_a_t1" not in sess.enabled_tools
+    finally:
+        mcp_registry.clear()
+
+
 def test_effective_enabled_tools_mcp_requires_session_allowlist():
     from agentlib.tools import mcp_registry, routing
 

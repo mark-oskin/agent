@@ -1125,6 +1125,7 @@ class AgentApp:
             python_enqueue_line=None,
             host_app=self,
         )
+        session.seed_mcp_tools_if_connected()
 
         run_interactive_repl_loop(
             session,

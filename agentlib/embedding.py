@@ -23,6 +23,8 @@ def fork_embedded_session(parent_session: "AgentSession", *, app):
     session.messages = copy.deepcopy(parent_session.messages)
     session.enabled_tools = set(parent_session.enabled_tools)
     session.enabled_toolsets = set(parent_session.enabled_toolsets)
+    session.mcp_tools_opt_out = bool(getattr(parent_session, "mcp_tools_opt_out", False))
+    session.settings_locked = bool(getattr(parent_session, "settings_locked", False))
     session.second_opinion_on = bool(parent_session.second_opinion_on)
     session.cloud_ai_enabled = bool(parent_session.cloud_ai_enabled)
     session.session_save_path = None
@@ -292,5 +294,6 @@ def build_embedded_session(
         python_enqueue_line=python_enqueue_line,
         host_app=app,
     )
+    session.seed_mcp_tools_if_connected()
     return app, session
 

@@ -17,6 +17,7 @@ description: Topic map for persisted and session preferences; /set help is the l
 
 | Topic | What it does |
 |--------|----------------|
+| **`/set lock`** | Permanently freeze prefs, tool allowlists, prompts, context manager knobs, and **`/mcp`** wiring **for this session** (read-only **`show`** / **`list`** / **`status`** still work). There is no unlock — start a new session to reconfigure. Forked sessions inherit the parent lock state. |
 | **`/set save`** | Write prefs to disk. Optional **`full`** or **`--full`** for a complete snapshot instead of the default minimal delta. |
 | **`/set model`** | Local **Ollama** model tag (`ollama.model`) when the primary backend is Ollama. For hosted APIs, switch primary first (`/set primary llm hosted …`). |
 | **`/set primary llm`** | **`ollama`** (local) or **`hosted <base_url> <model> [api_key]`** — primary chat backend. Preserves `request_options` where applicable. |
