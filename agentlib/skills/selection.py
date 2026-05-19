@@ -1,6 +1,19 @@
 from __future__ import annotations
 
+import re
 from typing import AbstractSet, Callable, Optional, Tuple
+
+# Triggers shorter than this must match on word boundaries (avoids e.g. "py" inside "mcp").
+_SHORT_TRIGGER_MAX_LEN = 3
+
+
+def _trigger_matches_in_text(low: str, trigger: str) -> bool:
+    t = (trigger or "").lower().strip()
+    if not t:
+        return False
+    if len(t) <= _SHORT_TRIGGER_MAX_LEN:
+        return re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", low) is not None
+    return t in low
 
 
 def match_skill_detail(
@@ -22,7 +35,7 @@ def match_skill_detail(
             t = (str(tr) or "").lower().strip()
             if not t:
                 continue
-            if t in low and len(t) > best_len:
+            if _trigger_matches_in_text(low, t) and len(t) > best_len:
                 best_len = len(t)
                 best_sid = str(sid)
                 best_tr = t

@@ -400,6 +400,12 @@ class AgentSession:
 
         return {t for t in self.enabled_tools if mcp_registry.is_mcp_tool(t)}
 
+    def _match_skill_for_turn(self, user_query: str) -> tuple[Optional[str], Optional[str]]:
+        """Trigger-based skill match for normal turns; off unless ``agent.skill_auto_match_triggers``."""
+        if not self.settings.get_bool(("agent", "skill_auto_match_triggers"), False):
+            return None, None
+        return self._match_skill_detail(user_query, self.skills_map)
+
     _SETTINGS_LOCK_MSG = (
         "Settings and MCP configuration are locked for this session "
         "(lock is permanent; start a new session to change prefs)."
@@ -1085,7 +1091,7 @@ class AgentSession:
         """One normal REPL turn: append messages and run the agent loop."""
         today_str = self._today_str()
         deliverable_wanted = self._user_wants_written_deliverable(user_query)
-        sid0, tr0 = self._match_skill_detail(user_query, self.skills_map)
+        sid0, tr0 = self._match_skill_for_turn(user_query)
         et_turn0 = self._effective_enabled_tools_for_skill(
             frozenset(self.enabled_tools), self.skills_map, sid0
         )

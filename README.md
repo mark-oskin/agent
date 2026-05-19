@@ -236,7 +236,7 @@ A typical skill object includes:
 | Field | Purpose |
 |-------|---------|
 | `description` | Human-readable summary |
-| `triggers` | Words/phrases; used to **match** the user’s message to a skill |
+| `triggers` | Words/phrases; used to **match** the user’s message when trigger auto-match is enabled (see below) |
 | `tools` | Subset of tool **ids** the skill allows when active |
 | `prompt` | Extra system-style instructions injected when the skill runs |
 | `workflow` (optional) | `max_steps`, `planner_prompt`, `step_prompt` for a **multi-step** run |
@@ -247,7 +247,7 @@ A typical skill object includes:
 - `/skill <skill> <request>` — runs a specific skill id (no selection).
 - `/skill reuse <request>` — reuses the **last** selected skill id without re-running selection (good for follow-ups).
 
-One-shot mode can **auto-match** a skill from the user text using the same trigger machinery.
+Optional **trigger auto-match** on normal REPL turns: `/set agent set skill_auto_match_triggers true` then `/set save` (default **false**). When off, skills run only via `/skill …` commands.
 
 **Persisting** prompt templates, skills directory, and other session fields: `/settings save` writes `~/.agent.json` (or your `--config` file).
 

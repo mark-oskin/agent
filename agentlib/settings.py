@@ -53,6 +53,8 @@ DEFAULT_SETTINGS: dict = {
         "max_fetch_page_web": 15,
         # When True (default), PDF responses from fetch_page are converted to extracted text for the LLM.
         "fetch_page_pdf_to_text": True,
+        # When True, normal REPL turns auto-apply a skill whose trigger substring matches the user message.
+        "skill_auto_match_triggers": False,
         # Model Context Protocol: optional external tools via stdio or HTTP JSON-RPC.
         "mcp_enabled": False,
         "mcp_servers": [],

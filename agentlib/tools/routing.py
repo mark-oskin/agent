@@ -204,6 +204,10 @@ def format_settings_tools_list(enabled_tools: AbstractSet[str]) -> str:
         "You can use plain phrases, e.g. /set disable web search  "
         "or  -disable_tool shell"
     )
+    lines.append(
+        "Note: /skill or agent.skill_auto_match_triggers may narrow tools per message; "
+        "use /settings verbose 1 to see effective tools for a turn."
+    )
     return "\n".join(lines)
 
 
