@@ -118,29 +118,42 @@ def test_call_ollama_chat_routes_hosted_profile_to_openai_chat_completions(monke
     from agentlib.llm import calls as calls_mod
 
     got: dict = {}
+    payload_text = '{"action":"answer","answer":"hosted ok"}'
 
-    class _OkResp:
+    class _SseResp:
         status_code = 200
 
         def raise_for_status(self):
             return None
 
-        def json(self):
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": '{"action":"answer","answer":"hosted ok"}',
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def iter_content(self, chunk_size=65536, decode_unicode=False):
+            for ch in payload_text:
+                line = (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "choices": [
+                                {"delta": {"content": ch}, "finish_reason": None},
+                            ]
                         }
-                    }
-                ]
-            }
+                    )
+                    + "\n"
+                )
+                yield line.encode("utf-8")
+            yield b"data: [DONE]\n"
 
     def fake_post(url, json=None, **kwargs):
         got["url"] = url
         got["json"] = dict(json or {})
-        assert kwargs.get("stream") is not True
-        return _OkResp()
+        assert kwargs.get("stream") is True
+        assert got["json"].get("stream") is True
+        return _SseResp()
 
     monkeypatch.setattr(calls_mod.requests, "post", fake_post)
 
@@ -169,6 +182,12 @@ def test_call_ollama_chat_routes_hosted_profile_to_openai_chat_completions(monke
         format_ollama_usage_line=lambda _u: "",
         set_last_ollama_usage=lambda _u: None,
         call_hosted_agent_chat_impl=calls_mod.call_hosted_agent_chat,
+        merge_hosted_stream_chunks=lambda sse_iter, stream_chunks=False: streaming.merge_hosted_stream_chunks(
+            sse_iter,
+            stream_chunks=stream_chunks,
+            stream_user_visible=False,
+            agent_stream_thinking_enabled=lambda: False,
+        ),
     )
 
     assert got["url"] == "https://api.x.ai/v1/chat/completions"

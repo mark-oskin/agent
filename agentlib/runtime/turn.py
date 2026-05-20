@@ -145,6 +145,9 @@ def run_agent_conversation_turn(
     max_tool_calls_web: int = 15,
     max_fetch_page_web: int = 15,
 ) -> Tuple[bool, Optional[str]]:
+    from agentlib.llm import streaming as llm_streaming
+
+    llm_streaming.reset_assistant_answer_streamed()
     et = deps.coerce_enabled_tools(enabled_tools)
     mandatory_web_tool = preferred_web_search_tool(et)
     if web_required and mandatory_web_tool is None:
@@ -459,7 +462,7 @@ def run_agent_conversation_turn(
                         }
                     )
                     continue
-            if print_answer:
+            if print_answer and not llm_streaming.assistant_answer_was_streamed():
                 sink_emit({"type": "answer", "text": ans_out if ans_out is not None else ""})
             final_answer = ans_out if isinstance(ans_out, str) else str(ans_out)
             answered = True

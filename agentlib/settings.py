@@ -31,6 +31,8 @@ DEFAULT_SETTINGS: dict = {
         "thinking": False,
         "thinking_level": "",
         "stream_thinking": False,
+        # Stream assistant answer text incrementally during LLM generation (REPL/TUI).
+        "stream_assistant": True,
         "search_web_max_results": 5,
         "search_web_backend": "ddg",
         "brave_search_api_key": "",

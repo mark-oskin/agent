@@ -979,11 +979,14 @@ class AgentSession:
                     if isinstance(final_answer, str) and final_answer.strip()
                     else None
                 )
+                from agentlib.llm import streaming as llm_streaming
+
                 return {
                     "type": "turn",
                     "quit": False,
                     "answered": bool(answered),
                     "answer": final_answer,
+                    "answer_streamed": llm_streaming.assistant_answer_was_streamed(),
                 }
             with emit_sink_scope(emit):
                 answered, final_answer = self._execute_user_request(imp)
@@ -993,11 +996,14 @@ class AgentSession:
                     if isinstance(final_answer, str) and final_answer.strip()
                     else None
                 )
+                from agentlib.llm import streaming as llm_streaming
+
                 return {
                     "type": "turn",
                     "quit": False,
                     "answered": bool(answered),
                     "answer": final_answer,
+                    "answer_streamed": llm_streaming.assistant_answer_was_streamed(),
                 }
 
         if emit is None:
@@ -1018,11 +1024,14 @@ class AgentSession:
                 if isinstance(final_answer, str) and final_answer.strip()
                 else None
             )
+            from agentlib.llm import streaming as llm_streaming
+
             return {
                 "type": "turn",
                 "quit": False,
                 "answered": bool(answered),
                 "answer": final_answer,
+                "answer_streamed": llm_streaming.assistant_answer_was_streamed(),
             }
 
         with emit_sink_scope(emit):
@@ -1042,11 +1051,14 @@ class AgentSession:
                     if isinstance(final_answer, str) and final_answer.strip()
                     else None
                 )
+                from agentlib.llm import streaming as llm_streaming
+
                 payload = {
                     "type": "turn",
                     "quit": False,
                     "answered": bool(answered),
                     "answer": final_answer,
+                    "answer_streamed": llm_streaming.assistant_answer_was_streamed(),
                 }
             return payload
 
@@ -1089,6 +1101,9 @@ class AgentSession:
 
     def _execute_user_request(self, user_query: str) -> tuple[bool, Optional[str]]:
         """One normal REPL turn: append messages and run the agent loop."""
+        from agentlib.llm import streaming as llm_streaming
+
+        llm_streaming.reset_assistant_answer_streamed()
         today_str = self._today_str()
         deliverable_wanted = self._user_wants_written_deliverable(user_query)
         sid0, tr0 = self._match_skill_for_turn(user_query)
@@ -3432,6 +3447,18 @@ class AgentSession:
                 self.second_opinion_on = True
                 sink_print_compat("second_opinion enabled for this session.")
                 return SessionLineResult()
+            if feat in (
+                "stream_assistant",
+                "streamassistant",
+                "stream_answer",
+                "streamanswer",
+                "assistant_stream",
+            ):
+                self._settings_set(("agent", "stream_assistant"), True)
+                sink_print_compat(
+                    "stream_assistant enabled for this session (streams answer text during generation). Use /set save to persist."
+                )
+                return SessionLineResult()
             if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
                 self._settings_set(("agent", "stream_thinking"), True)
                 sink_print_compat(
@@ -3463,6 +3490,16 @@ class AgentSession:
             if feat == "second_opinion":
                 self.second_opinion_on = False
                 sink_print_compat("second_opinion disabled for this session.")
+                return SessionLineResult()
+            if feat in (
+                "stream_assistant",
+                "streamassistant",
+                "stream_answer",
+                "streamanswer",
+                "assistant_stream",
+            ):
+                self._settings_set(("agent", "stream_assistant"), False)
+                sink_print_compat("stream_assistant disabled for this session. Use /set save to persist.")
                 return SessionLineResult()
             if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
                 self._settings_set(("agent", "stream_thinking"), False)

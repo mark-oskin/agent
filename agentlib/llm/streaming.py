@@ -1,12 +1,28 @@
-"""Merge Ollama /api/chat streaming JSON lines into one assistant message."""
+"""Merge Ollama /api/chat and hosted OpenAI-style SSE streams into one assistant message."""
 
 from __future__ import annotations
 
 import codecs
 import json
+import re
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional, Tuple
 
+from agentlib.agent_json import _extract_json_string_field
 from agentlib.sink import sink_emit
+
+_assistant_answer_streamed: ContextVar[bool] = ContextVar("_assistant_answer_streamed", default=False)
+
+_TOOL_ACTION_RE = re.compile(r'"action"\s*:\s*"tool_call"', re.IGNORECASE)
+
+
+def reset_assistant_answer_streamed() -> None:
+    _assistant_answer_streamed.set(False)
+
+
+def assistant_answer_was_streamed() -> bool:
+    return bool(_assistant_answer_streamed.get())
 
 
 def iter_ollama_ndjson_lines_from_response(response) -> Iterator[str]:
@@ -38,6 +54,52 @@ def iter_ollama_ndjson_lines_from_response(response) -> Iterator[str]:
     tail = buf.rstrip("\r\n").strip()
     if tail:
         yield tail
+
+
+def iter_openai_sse_data_objects(response) -> Iterator[dict]:
+    """Yield parsed JSON objects from an OpenAI-style ``data: {...}`` SSE body."""
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    buf = ""
+    for chunk in response.iter_content(chunk_size=65536, decode_unicode=False):
+        if not chunk:
+            continue
+        if not isinstance(chunk, bytes):
+            chunk = bytes(chunk)
+        buf += decoder.decode(chunk, final=False)
+        while True:
+            idx = buf.find("\n")
+            if idx < 0:
+                break
+            line = buf[:idx].rstrip("\r")
+            buf = buf[idx + 1 :]
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                yield {"_sse_done": True}
+                return
+            if not payload:
+                continue
+            try:
+                yield json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+    buf += decoder.decode(b"", final=True)
+    for line in buf.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            yield {"_sse_done": True}
+            return
+        if not payload:
+            continue
+        try:
+            yield json.loads(payload)
+        except json.JSONDecodeError:
+            continue
 
 
 def merge_tool_arguments_delta(old_a, new_a):
@@ -116,10 +178,88 @@ def ollama_usage_from_chat_response(data: dict) -> Optional[dict]:
     return out or None
 
 
+def _merge_stream_content(acc: str, chunk: str) -> str:
+    """
+    Merge one streamed content fragment into accumulated message text.
+
+    Some backends send cumulative text (full message so far) rather than deltas;
+    naive ``acc += chunk`` duplicates content and can double visible answer text.
+    """
+    if not chunk:
+        return acc
+    if not acc:
+        return chunk
+    if chunk.startswith(acc):
+        return chunk
+    if acc.startswith(chunk):
+        return acc
+    return acc + chunk
+
+
+def _content_indicates_tool_call(content: str, tool_calls) -> bool:
+    if tool_calls:
+        return True
+    head = (content or "")[:4096]
+    if _TOOL_ACTION_RE.search(head):
+        return True
+    if re.search(r'"tool_calls"\s*:', head):
+        return True
+    return False
+
+
+@dataclass
+class _VisibleStreamState:
+    answer_emitted_len: int = 0
+    tool_mode: Optional[bool] = None
+    tool_progress_emitted: bool = False
+    streamed_content: bool = False
+
+
+def _emit_visible_answer_delta(content: str, state: _VisibleStreamState) -> None:
+    answer = _extract_json_string_field(content, "answer", allow_unterminated=True)
+    if answer is None:
+        return
+    if len(answer) <= state.answer_emitted_len:
+        return
+    delta = answer[state.answer_emitted_len :]
+    state.answer_emitted_len = len(answer)
+    if not delta:
+        return
+    sink_emit({"type": "answer", "text": delta, "end": "", "partial": True, "flush": True})
+    _assistant_answer_streamed.set(True)
+    state.streamed_content = True
+
+
+def _apply_content_chunk(
+    acc_content: str,
+    chunk: str,
+    *,
+    stream_chunks: bool,
+    stream_user_visible: bool,
+    state: _VisibleStreamState,
+    tool_calls,
+) -> None:
+    if stream_chunks:
+        sink_emit({"type": "output", "text": chunk, "end": "", "partial": True})
+        state.streamed_content = True
+    if not stream_user_visible or not chunk:
+        return
+    if state.tool_mode is None and _content_indicates_tool_call(acc_content, tool_calls):
+        state.tool_mode = True
+    if state.tool_mode:
+        if not state.tool_progress_emitted:
+            sink_emit({"type": "progress", "text": "Preparing tool call…"})
+            state.tool_progress_emitted = True
+        return
+    state.tool_mode = False
+    _emit_visible_answer_delta(acc_content, state)
+
+
 def merge_stream_message_chunks(
     lines_iter,
     *,
     stream_chunks: bool = False,
+    stream_user_visible: bool = False,
     agent_stream_thinking_enabled: Callable[[], bool],
     ollama_usage_from_chat_response_fn: Callable[[dict], Optional[dict]] = ollama_usage_from_chat_response,
 ) -> Tuple[dict, Optional[dict], bool]:
@@ -127,11 +267,11 @@ def merge_stream_message_chunks(
     acc = {"role": "assistant", "content": "", "thinking": ""}
     tool_calls = None
     usage: Optional[dict] = None
-    streamed_content = False
     show_thinking = agent_stream_thinking_enabled()
     thinking_started = False
     done_thinking_banner_printed = False
     saw_done = False
+    vis = _VisibleStreamState()
     for line in lines_iter:
         if not line:
             continue
@@ -152,13 +292,18 @@ def merge_stream_message_chunks(
             if show_thinking and thinking_started and not done_thinking_banner_printed:
                 sink_emit({"type": "thinking", "text": "\n\n[Done thinking]\n", "end": "", "partial": True})
                 done_thinking_banner_printed = True
-            if stream_chunks:
-                sink_emit({"type": "output", "text": chunk, "end": "", "partial": True})
-                streamed_content = True
-            acc["content"] += chunk
+            acc["content"] = _merge_stream_content(acc["content"], chunk)
+            _apply_content_chunk(
+                acc["content"],
+                chunk,
+                stream_chunks=stream_chunks,
+                stream_user_visible=stream_user_visible,
+                state=vis,
+                tool_calls=tool_calls,
+            )
         if msg.get("thinking"):
             tchunk = msg["thinking"]
-            acc["thinking"] += tchunk
+            acc["thinking"] = _merge_stream_content(acc["thinking"], tchunk)
             if show_thinking:
                 if not thinking_started:
                     sink_emit({"type": "thinking", "text": "\n[Thinking]\n", "end": "", "partial": True})
@@ -166,6 +311,8 @@ def merge_stream_message_chunks(
                 sink_emit({"type": "thinking", "text": tchunk, "end": "", "partial": True})
         if msg.get("tool_calls"):
             tool_calls = merge_partial_tool_calls(tool_calls, msg["tool_calls"])
+            if stream_user_visible and vis.tool_mode is not False:
+                vis.tool_mode = True
         if data.get("done"):
             saw_done = True
             u = ollama_usage_from_chat_response_fn(data)
@@ -182,4 +329,68 @@ def merge_stream_message_chunks(
         )
     if tool_calls is not None:
         acc["tool_calls"] = tool_calls
-    return acc, usage, streamed_content
+    if stream_user_visible and vis.answer_emitted_len > 0:
+        sink_emit({"type": "output", "text": "", "end": "\n", "flush": True})
+    return acc, usage, vis.streamed_content
+
+
+def merge_hosted_stream_chunks(
+    sse_iter,
+    *,
+    stream_chunks: bool = False,
+    stream_user_visible: bool = False,
+    agent_stream_thinking_enabled: Callable[[], bool],
+) -> Tuple[dict, Optional[dict], bool]:
+    """Merge OpenAI-style chat completion SSE into one assistant message dict."""
+    acc = {"role": "assistant", "content": "", "thinking": ""}
+    tool_calls = None
+    show_thinking = agent_stream_thinking_enabled()
+    thinking_started = False
+    done_thinking_banner_printed = False
+    vis = _VisibleStreamState()
+    for data in sse_iter:
+        if not isinstance(data, dict):
+            continue
+        if data.get("_sse_done"):
+            break
+        choices = data.get("choices") or []
+        if not choices:
+            continue
+        choice0 = choices[0] if isinstance(choices[0], dict) else {}
+        delta = choice0.get("delta") or {}
+        if not isinstance(delta, dict):
+            delta = {}
+        chunk = delta.get("content") or ""
+        if chunk:
+            if show_thinking and thinking_started and not done_thinking_banner_printed:
+                sink_emit({"type": "thinking", "text": "\n\n[Done thinking]\n", "end": "", "partial": True})
+                done_thinking_banner_printed = True
+            acc["content"] = _merge_stream_content(acc["content"], chunk)
+            _apply_content_chunk(
+                acc["content"],
+                chunk,
+                stream_chunks=stream_chunks,
+                stream_user_visible=stream_user_visible,
+                state=vis,
+                tool_calls=tool_calls,
+            )
+        for think_key in ("reasoning_content", "thinking"):
+            tchunk = delta.get(think_key) or ""
+            if tchunk:
+                acc["thinking"] = _merge_stream_content(acc["thinking"], tchunk)
+                if show_thinking:
+                    if not thinking_started:
+                        sink_emit({"type": "thinking", "text": "\n[Thinking]\n", "end": "", "partial": True})
+                        thinking_started = True
+                    sink_emit({"type": "thinking", "text": tchunk, "end": "", "partial": True})
+        if delta.get("tool_calls"):
+            tool_calls = merge_partial_tool_calls(tool_calls, delta["tool_calls"])
+            if stream_user_visible:
+                vis.tool_mode = True
+        if choice0.get("finish_reason") is not None:
+            break
+    if tool_calls is not None:
+        acc["tool_calls"] = tool_calls
+    if stream_user_visible and vis.answer_emitted_len > 0:
+        sink_emit({"type": "output", "text": "", "end": "\n", "flush": True})
+    return acc, None, vis.streamed_content

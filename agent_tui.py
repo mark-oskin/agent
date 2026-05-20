@@ -463,13 +463,6 @@ class AgentTuiApp(App[None]):
         height: 1fr;
         layout: vertical;
     }
-    .stream_box {
-        height: auto;
-        max-height: 35%;
-        border: heavy $boost;
-        padding: 0 1;
-        background: $panel;
-    }
     .chat_log {
         height: 1fr;
         min-height: 8;
@@ -523,7 +516,10 @@ class AgentTuiApp(App[None]):
         self._sessions: List = []
         self._embed_app = None
 
-        self._stream_buf: Dict[int, str] = {}
+        self._chat_live_buf: Dict[int, str] = {}
+        self._chat_stream_open: Dict[int, bool] = {}
+        # RichLog.lines index where the in-progress assistant block starts (one write() may add many lines).
+        self._chat_stream_line_start: Dict[int, int] = {}
         self._thinking_buf: Dict[int, str] = {}
         self._thinking_follow: Dict[int, bool] = {}
         self._lane_labels: List[str] = [label for label, _ in self._specs]
@@ -531,7 +527,6 @@ class AgentTuiApp(App[None]):
         self._lane_verticals: List[Vertical] = []
         self._thinking_widgets: List[Static] = []
         self._activity_logs: List[RichLog] = []
-        self._stream_widgets: List[Static] = []
         self._chat_logs: List[RichLog] = []
         self._prompt_hist_lines: Dict[int, List[str]] = {}
         self._prompt_hist_idx: Dict[int, Optional[int]] = {}
@@ -556,13 +551,13 @@ class AgentTuiApp(App[None]):
                                 wrap=True,
                             )
                         with Vertical(classes="bottom_lane"):
-                            yield Static("", classes="stream_box", id=f"stream-{i}")
                             yield RichLog(
                                 classes="chat_log",
                                 id=f"chat-{i}",
                                 highlight=False,
                                 markup=True,
                                 wrap=True,
+                                auto_scroll=True,
                             )
             with Vertical(id="sidebar"):
                 yield Static("Agents", id="sidebar_title")
@@ -626,13 +621,13 @@ class AgentTuiApp(App[None]):
             # Enable cross-lane tool in TUI sessions (tool policy + prompt docs).
             sess.enabled_toolsets.add("lanes")
             sess.enabled_tools.add("agent_send")
-            self._stream_buf[i] = ""
+            self._chat_live_buf[i] = ""
+            self._chat_stream_open[i] = False
             self._thinking_buf[i] = ""
             self._thinking_follow[i] = False
             self._lane_verticals.append(self.query_one(f"#lane-{i}", Vertical))
             self._thinking_widgets.append(self.query_one(f"#thinking-{i}", Static))
             self._activity_logs.append(self.query_one(f"#activity-{i}", RichLog))
-            self._stream_widgets.append(self.query_one(f"#stream-{i}", Static))
             self._chat_logs.append(self.query_one(f"#chat-{i}", RichLog))
             chat = self._chat_logs[-1]
             hint = (
@@ -793,21 +788,20 @@ class AgentTuiApp(App[None]):
             wrap=True,
         )
         activity_wrap = Vertical(thinking, activity, classes="activity_wrap")
-        stream = Static("", classes="stream_box", id=f"stream-{idx}")
         chat = RichLog(
             classes="chat_log",
             id=f"chat-{idx}",
             highlight=False,
             markup=True,
             wrap=True,
+            auto_scroll=True,
         )
-        bottom = Vertical(stream, chat, classes="bottom_lane")
+        bottom = Vertical(chat, classes="bottom_lane")
         lane_cls = "lane-pane hidden" if hidden else "lane-pane"
         lane = Vertical(activity_wrap, bottom, classes=lane_cls, id=f"lane-{idx}")
         self._lane_verticals.append(lane)
         self._thinking_widgets.append(thinking)
         self._activity_logs.append(activity)
-        self._stream_widgets.append(stream)
         self._chat_logs.append(chat)
         container = self.query_one("#lanes_container", Vertical)
         container.mount(lane)
@@ -839,7 +833,8 @@ class AgentTuiApp(App[None]):
 
         self._lane_labels.append(name)
         self._sessions.append(new_sess)
-        self._stream_buf[new_idx] = ""
+        self._chat_live_buf[new_idx] = ""
+        self._chat_stream_open[new_idx] = False
         self._thinking_buf[new_idx] = ""
         self._thinking_follow[new_idx] = False
         self._n += 1
@@ -1151,9 +1146,12 @@ class AgentTuiApp(App[None]):
         da._line_cache.clear()
         da.refresh()
 
-        ss = self._stream_widgets[src]
-        ds = self._stream_widgets[dst]
-        ds.update(ss.content)
+        self._chat_live_buf[dst] = self._chat_live_buf.get(src, "")
+        self._chat_stream_open[dst] = self._chat_stream_open.get(src, False)
+        if src in self._chat_stream_line_start:
+            self._chat_stream_line_start[dst] = self._chat_stream_line_start[src]
+        else:
+            self._chat_stream_line_start.pop(dst, None)
 
         st = self._thinking_widgets[src]
         dt = self._thinking_widgets[dst]
@@ -1173,13 +1171,22 @@ class AgentTuiApp(App[None]):
             line = self._sidebar_line_for_agent(self._lane_labels[k], self._sessions[k])
             ol.replace_option_prompt_at_index(k, line)
 
-            self._stream_buf[k] = self._stream_buf[last]
+            self._chat_live_buf[k] = self._chat_live_buf[last]
+            self._chat_stream_open[k] = self._chat_stream_open.get(last, False)
+            if last in self._chat_stream_line_start:
+                self._chat_stream_line_start[k] = self._chat_stream_line_start[last]
+            else:
+                self._chat_stream_line_start.pop(k, None)
             self._thinking_buf[k] = self._thinking_buf[last]
             self._thinking_follow[k] = self._thinking_follow[last]
 
         self._sessions.pop()
         self._lane_labels.pop()
-        del self._stream_buf[last]
+        del self._chat_live_buf[last]
+        self._chat_stream_open.pop(last, None)
+        self._chat_stream_open.pop(k, None)
+        self._chat_stream_line_start.pop(last, None)
+        self._chat_stream_line_start.pop(k, None)
         del self._thinking_buf[last]
         del self._thinking_follow[last]
 
@@ -1199,7 +1206,6 @@ class AgentTuiApp(App[None]):
 
         self._thinking_widgets.pop()
         self._activity_logs.pop()
-        self._stream_widgets.pop()
         self._chat_logs.pop()
 
         ol.remove_option_at_index(last)
@@ -1285,13 +1291,55 @@ class AgentTuiApp(App[None]):
         self._lane_worker_threads[lane] = th
         th.start()
 
+    def _reset_chat_live_answer(self, lane: int) -> None:
+        self._chat_live_buf[lane] = ""
+        self._chat_stream_open[lane] = False
+        self._chat_stream_line_start.pop(lane, None)
+
+    def _chat_truncate_live_block(self, lane: int) -> None:
+        """Remove all RichLog lines belonging to the current in-progress assistant reply."""
+        chat = self._chat_logs[lane]
+        start = self._chat_stream_line_start.get(lane)
+        if start is None or start >= len(chat.lines):
+            return
+        del chat.lines[start:]
+        chat._line_cache.clear()
+        chat.refresh()
+
+    def _chat_rewrite_live_answer(self, lane: int) -> None:
+        buf = self._chat_live_buf.get(lane, "")
+        chat = self._chat_logs[lane]
+        if self._chat_stream_open.get(lane):
+            self._chat_truncate_live_block(lane)
+        else:
+            self._chat_stream_line_start[lane] = len(chat.lines)
+        self._chat_stream_open[lane] = True
+        chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(buf)}"))
+        chat.refresh()
+
+    def _chat_append_answer_delta(self, lane: int, delta: str) -> None:
+        if not delta:
+            return
+        buf = self._chat_live_buf.get(lane, "")
+        if buf.endswith(delta):
+            return
+        self._chat_live_buf[lane] = buf + delta
+        self._chat_rewrite_live_answer(lane)
+
+    def _chat_close_live_answer(self, lane: int) -> None:
+        """End a streamed reply without re-printing it (already shown via partial updates)."""
+        if not self._chat_stream_open.get(lane):
+            return
+        chat = self._chat_logs[lane]
+        if self._chat_live_buf.get(lane, "").strip():
+            chat.write(Text("\n"), scroll_end=True)
+        self._reset_chat_live_answer(lane)
+
     def _prepare_turn_ui(self, lane: int, line: str) -> None:
         chat = self._chat_logs[lane]
-        stream_w = self._stream_widgets[lane]
         thinking_live = self._thinking_widgets[lane]
         chat.write(Text.from_markup(f"[bold green]You[/bold green]\n{escape(line)}\n"))
-        self._stream_buf[lane] = ""
-        stream_w.update("")
+        self._reset_chat_live_answer(lane)
         self._thinking_buf[lane] = ""
         thinking_live.update("")
 
@@ -1332,7 +1380,6 @@ class AgentTuiApp(App[None]):
 
         activity = self._activity_logs[lane]
         thinking_live = self._thinking_widgets[lane]
-        stream_w = self._stream_widgets[lane]
         chat = self._chat_logs[lane]
 
         if t == "thinking":
@@ -1355,19 +1402,18 @@ class AgentTuiApp(App[None]):
             return
 
         if t == "answer":
+            if partial:
+                self._chat_append_answer_delta(lane, text)
+                return
+            if self._chat_stream_open.get(lane):
+                self._chat_live_buf[lane] = text
+                self._chat_close_live_answer(lane)
+                return
             chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(text)}\n"))
             return
 
         if t == "output":
             if partial:
-                self._stream_buf[lane] += text
-                buf = self._stream_buf[lane]
-                if buf:
-                    stream_w.update(
-                        Text.from_markup(
-                            f"[bold]Assistant[/bold] [dim](stream)[/dim]\n{escape(buf)}"
-                        )
-                    )
                 return
             if self._thinking_follow.get(lane):
                 activity.write(Text.from_markup(f"[dim]{escape(text)}[/dim]"))
@@ -1452,7 +1498,7 @@ class AgentTuiApp(App[None]):
         self._set_lane_busy(lane, False)
         activity = self._activity_logs[lane]
         activity.write(Text.from_markup(f"[bold red]Turn error[/bold red]\n{escape(tb)}"))
-        self._stream_widgets[lane].update("")
+        self._reset_chat_live_answer(lane)
         self._thinking_buf[lane] = ""
         self._thinking_widgets[lane].update("")
 
@@ -1460,8 +1506,7 @@ class AgentTuiApp(App[None]):
         """Worker raised KeyboardInterrupt (user confirmed cancel on the interrupt prompt)."""
         self._lane_turn_queues.pop(lane, None)
         self._feedback_chat(lane, "[yellow][Cancelled][/yellow]")
-        self._stream_buf[lane] = ""
-        self._stream_widgets[lane].update("")
+        self._reset_chat_live_answer(lane)
         self._thinking_buf[lane] = ""
         self._thinking_follow[lane] = False
         self._thinking_widgets[lane].update("")
@@ -1493,18 +1538,14 @@ class AgentTuiApp(App[None]):
                 return
 
             if res.get("type") == "turn":
-                ans = res.get("answer")
-                if isinstance(ans, str) and ans.strip():
-                    chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(ans)}\n"))
-                elif self._stream_buf.get(lane, "").strip():
-                    chat.write(
-                        Text.from_markup(
-                            f"[bold cyan]Assistant[/bold cyan]\n{escape(self._stream_buf[lane])}\n"
-                        )
-                    )
+                if res.get("answer_streamed"):
+                    self._chat_close_live_answer(lane)
+                else:
+                    ans = res.get("answer")
+                    if isinstance(ans, str) and ans.strip():
+                        chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(ans)}\n"))
         finally:
-            self._stream_buf[lane] = ""
-            self._stream_widgets[lane].update("")
+            self._reset_chat_live_answer(lane)
             if self._thinking_buf.get(lane, "").strip():
                 self._activity_logs[lane].write(
                     Text.from_markup(f"[dim]{escape(self._thinking_buf[lane].strip())}[/dim]")

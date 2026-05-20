@@ -394,14 +394,32 @@ class AgentApp:
 
     # --- LLM calls (overridable in tests by monkeypatching these methods) ---
 
+    def _stream_user_visible_enabled(self) -> bool:
+        from agentlib.sink import emit_sink_active
+
+        return bool(
+            self.settings_get_bool(("agent", "stream_assistant"), True) or emit_sink_active()
+        )
+
     def merge_stream_message_chunks(self, lines_iter, *, stream_chunks: bool = False):
         return streaming.merge_stream_message_chunks(
             lines_iter,
             stream_chunks=stream_chunks,
+            stream_user_visible=self._stream_user_visible_enabled() and not stream_chunks,
             agent_stream_thinking_enabled=lambda: bool(
                 self.settings_get_bool(("agent", "stream_thinking"), False)
             ),
             ollama_usage_from_chat_response_fn=streaming.ollama_usage_from_chat_response,
+        )
+
+    def merge_hosted_stream_chunks(self, sse_iter, *, stream_chunks: bool = False):
+        return streaming.merge_hosted_stream_chunks(
+            sse_iter,
+            stream_chunks=stream_chunks,
+            stream_user_visible=self._stream_user_visible_enabled() and not stream_chunks,
+            agent_stream_thinking_enabled=lambda: bool(
+                self.settings_get_bool(("agent", "stream_thinking"), False)
+            ),
         )
 
     def call_ollama_chat(
@@ -427,6 +445,7 @@ class AgentApp:
             format_ollama_usage_line=llm_usage.format_ollama_usage_line,
             set_last_ollama_usage=self._set_last_ollama_usage,
             call_hosted_agent_chat_impl=call_hosted_agent_chat,
+            merge_hosted_stream_chunks=self.merge_hosted_stream_chunks,
         )
 
     def call_ollama_plaintext(self, messages: list, model: str) -> str:

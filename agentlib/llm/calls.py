@@ -239,6 +239,9 @@ def call_hosted_agent_chat(
     message_to_agent_json_text: Callable[[dict, Optional[AbstractSet[str]]], str],
     verbose_emit_final_agent_readable: Callable[[str], None],
     request_options: Optional[dict] = None,
+    merge_hosted_stream_chunks: Optional[
+        Callable[..., Tuple[dict, Optional[dict], bool]]
+    ] = None,
 ) -> str:
     """Hosted primary agent: same JSON contract as Ollama /api/chat + format json."""
     key = (api_key or "").strip()
@@ -250,16 +253,30 @@ def call_hosted_agent_chat(
     body = {
         "model": model,
         "messages": messages,
-        "stream": False,
+        "stream": True,
     }
     merge_hosted_request_options(body, request_options or {}, default_temperature=0.3)
     _emit_full_llm_prompts_if_verbose(messages, verbose=verbose, backend="hosted", model=model, format_json=False)
+    stream_debug = verbose >= 2
+    if merge_hosted_stream_chunks is not None:
+        merge_fn = merge_hosted_stream_chunks
+    else:
+
+        def merge_fn(sse_iter, *, stream_chunks: bool = False):
+            return llm_streaming.merge_hosted_stream_chunks(
+                sse_iter,
+                stream_chunks=stream_chunks,
+                stream_user_visible=False,
+                agent_stream_thinking_enabled=lambda: False,
+            )
+
     try:
-        r = requests.post(url, json=body, headers=headers, timeout=600)
-        r.raise_for_status()
-        data = r.json()
-        choice0 = (data.get("choices") or [{}])[0]
-        msg = choice0.get("message") or {}
+        with requests.post(url, json=body, headers=headers, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            msg, _, _ = merge_fn(
+                llm_streaming.iter_openai_sse_data_objects(r),
+                stream_chunks=stream_debug,
+            )
         text = message_to_agent_json_text(msg, enabled_tools).strip()
         if not text:
             return json.dumps({"action": "answer", "answer": "No response from model."})
@@ -289,6 +306,9 @@ def call_ollama_chat(
     format_ollama_usage_line: Callable[[dict], str],
     set_last_ollama_usage: Callable[[Optional[dict]], None],
     call_hosted_agent_chat_impl: Callable[..., str],
+    merge_hosted_stream_chunks: Optional[
+        Callable[..., Tuple[dict, Optional[dict], bool]]
+    ] = None,
 ) -> str:
     """
     Agent chat: local Ollama JSON /api/chat, or hosted OpenAI-compatible chat.completions.
@@ -306,6 +326,7 @@ def call_ollama_chat(
             message_to_agent_json_text=message_to_agent_json_text,
             verbose_emit_final_agent_readable=verbose_emit_final_agent_readable,
             request_options=dict(getattr(prof, "request_options", None) or {}),
+            merge_hosted_stream_chunks=merge_hosted_stream_chunks,
         )
 
     base = (ollama_base_url or "").rstrip("/")

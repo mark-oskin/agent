@@ -57,8 +57,9 @@ def run_interactive_repl_loop(
         if isinstance(pref, str) and pref.strip():
             print(pref)
         # For normal turns, `execute_line` returns the answer in the payload.
-        ans = res.get("answer")
-        if isinstance(ans, str) and ans.strip():
-            print(ans)
+        if not res.get("answer_streamed"):
+            ans = res.get("answer")
+            if isinstance(ans, str) and ans.strip():
+                print(ans)
 
     flush_repl_history()
