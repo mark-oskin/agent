@@ -82,10 +82,12 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from agentlib.llm.gen_rate import GenRateTracker, estimate_tokens_from_text
 from agentlib.tui_parse import (
     parse_fork_background_command,
     parse_fork_command,
@@ -520,6 +522,10 @@ class AgentTuiApp(App[None]):
         self._chat_stream_open: Dict[int, bool] = {}
         # RichLog.lines index where the in-progress assistant block starts (one write() may add many lines).
         self._chat_stream_line_start: Dict[int, int] = {}
+        self._lane_gen_tok_s: Dict[int, float] = {}
+        self._lane_rate_tracker: Dict[int, GenRateTracker] = {}
+        self._lane_gen_rate_paint_at: Dict[int, float] = {}
+        self._header_gen_rate_interval_s = 1.0
         self._thinking_buf: Dict[int, str] = {}
         self._thinking_follow: Dict[int, bool] = {}
         self._lane_labels: List[str] = [label for label, _ in self._specs]
@@ -585,6 +591,7 @@ class AgentTuiApp(App[None]):
         from tools import lanes as lanes_tools
 
         self.title = "Agent TUI"
+        self.sub_title = ""
         ol = self.query_one("#agent_list", OptionList)
         ol.highlighted = 0
 
@@ -1335,11 +1342,64 @@ class AgentTuiApp(App[None]):
             chat.write(Text("\n"), scroll_end=True)
         self._reset_chat_live_answer(lane)
 
+    def _clear_lane_gen_rate(self, lane: int) -> None:
+        self._lane_gen_tok_s.pop(lane, None)
+        self._lane_rate_tracker.pop(lane, None)
+        self._lane_gen_rate_paint_at.pop(lane, None)
+        if lane == self._active_lane:
+            self._refresh_header_gen_rate()
+
+    def _maybe_paint_header_gen_rate(self, lane: int, *, force: bool = False) -> None:
+        """Refresh header tok/s at most once per second (UI thread)."""
+        if lane != self._active_lane:
+            return
+        if not force and lane not in self._busy_lanes:
+            return
+        now = time.monotonic()
+        last = self._lane_gen_rate_paint_at.get(lane, 0.0)
+        if not force and (now - last) < self._header_gen_rate_interval_s:
+            return
+        self._lane_gen_rate_paint_at[lane] = now
+        tr = self._lane_rate_tracker.get(lane)
+        if tr is not None:
+            rate = tr.sample_interval(min_elapsed=0.2 if force else self._header_gen_rate_interval_s * 0.9)
+            if rate is not None:
+                self._lane_gen_tok_s[lane] = rate
+        measuring = lane not in self._lane_gen_tok_s
+        self._refresh_header_gen_rate(lane, measuring=measuring)
+
+    def _track_gen_rate_delta(self, lane: int, delta_text: str) -> None:
+        """Accumulate streamed answer tokens (rate sampled on header refresh cadence)."""
+        if not delta_text or lane not in self._busy_lanes:
+            return
+        buf = self._chat_live_buf.get(lane, "")
+        if buf.endswith(delta_text):
+            return
+        tr = self._lane_rate_tracker.get(lane)
+        if tr is None:
+            tr = GenRateTracker()
+            self._lane_rate_tracker[lane] = tr
+        tr.add_tokens(estimate_tokens_from_text(delta_text))
+        self._maybe_paint_header_gen_rate(lane)
+
+    def _refresh_header_gen_rate(self, lane: Optional[int] = None, *, measuring: bool = False) -> None:
+        """Show interval-sampled tok/s in the header title (top-left)."""
+        ln = self._active_lane if lane is None else lane
+        base = "Agent TUI"
+        if ln in self._busy_lanes and ln in self._lane_gen_tok_s:
+            self.title = f"{base} · {self._lane_gen_tok_s[ln]:.1f} tok/s"
+        elif ln in self._busy_lanes and measuring and ln == self._active_lane:
+            self.title = f"{base} · … tok/s"
+        elif ln == self._active_lane:
+            self.title = base
+        self.sub_title = ""
+
     def _prepare_turn_ui(self, lane: int, line: str) -> None:
         chat = self._chat_logs[lane]
         thinking_live = self._thinking_widgets[lane]
         chat.write(Text.from_markup(f"[bold green]You[/bold green]\n{escape(line)}\n"))
         self._reset_chat_live_answer(lane)
+        self._clear_lane_gen_rate(lane)
         self._thinking_buf[lane] = ""
         thinking_live.update("")
 
@@ -1348,6 +1408,7 @@ class AgentTuiApp(App[None]):
         self._active_lane = index
         for i in range(self._n):
             self._lane_verticals[i].set_classes(f"lane-pane{' hidden' if i != index else ''}")
+        self._refresh_header_gen_rate()
 
     def _feedback_chat(self, lane: int, markup: str) -> None:
         """Transient slash / REPL command text in the chat log (same band as ``/show`` via sink)."""
@@ -1367,6 +1428,7 @@ class AgentTuiApp(App[None]):
 
     def _dispatch_emit(self, lane: int, ev: dict) -> None:
         t = ev.get("type") or "output"
+
         text = ev.get("text")
         if text is None:
             text = ""
@@ -1403,6 +1465,7 @@ class AgentTuiApp(App[None]):
 
         if t == "answer":
             if partial:
+                self._track_gen_rate_delta(lane, text)
                 self._chat_append_answer_delta(lane, text)
                 return
             if self._chat_stream_open.get(lane):
@@ -1436,8 +1499,15 @@ class AgentTuiApp(App[None]):
     def _set_lane_busy(self, lane: int, busy: bool) -> None:
         if busy:
             self._busy_lanes.add(lane)
+            if lane == self._active_lane:
+                self._lane_gen_rate_paint_at.pop(lane, None)
+                self._maybe_paint_header_gen_rate(lane, force=True)
         else:
+            if lane == self._active_lane:
+                self._maybe_paint_header_gen_rate(lane, force=True)
             self._busy_lanes.discard(lane)
+            if lane == self._active_lane:
+                self._refresh_header_gen_rate(lane)
         self._sync_prompt_enabled()
 
     def action_submit_prompt_message(self) -> None:
@@ -1499,6 +1569,7 @@ class AgentTuiApp(App[None]):
         activity = self._activity_logs[lane]
         activity.write(Text.from_markup(f"[bold red]Turn error[/bold red]\n{escape(tb)}"))
         self._reset_chat_live_answer(lane)
+        self._clear_lane_gen_rate(lane)
         self._thinking_buf[lane] = ""
         self._thinking_widgets[lane].update("")
 
@@ -1507,6 +1578,7 @@ class AgentTuiApp(App[None]):
         self._lane_turn_queues.pop(lane, None)
         self._feedback_chat(lane, "[yellow][Cancelled][/yellow]")
         self._reset_chat_live_answer(lane)
+        self._clear_lane_gen_rate(lane)
         self._thinking_buf[lane] = ""
         self._thinking_follow[lane] = False
         self._thinking_widgets[lane].update("")
@@ -1546,6 +1618,7 @@ class AgentTuiApp(App[None]):
                         chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(ans)}\n"))
         finally:
             self._reset_chat_live_answer(lane)
+            self._clear_lane_gen_rate(lane)
             if self._thinking_buf.get(lane, "").strip():
                 self._activity_logs[lane].write(
                     Text.from_markup(f"[dim]{escape(self._thinking_buf[lane].strip())}[/dim]")

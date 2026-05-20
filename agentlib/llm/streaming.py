@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional, Tuple
 
 from agentlib.agent_json import _extract_json_string_field
+from agentlib.llm.gen_rate import GenRateTracker, estimate_tokens_from_text
 from agentlib.sink import sink_emit
 
 _assistant_answer_streamed: ContextVar[bool] = ContextVar("_assistant_answer_streamed", default=False)
@@ -213,9 +214,51 @@ class _VisibleStreamState:
     tool_mode: Optional[bool] = None
     tool_progress_emitted: bool = False
     streamed_content: bool = False
+    gen_rate: GenRateTracker = field(default_factory=GenRateTracker)
+    last_eval_count: int = 0
+    has_ollama_eval: bool = False
 
 
-def _emit_visible_answer_delta(content: str, state: _VisibleStreamState) -> None:
+def _emit_gen_rate(state: _VisibleStreamState, *, stream_user_visible: bool) -> None:
+    if not stream_user_visible:
+        return
+    rate = state.gen_rate.sample_interval(min_elapsed=0.2)
+    if rate is not None:
+        sink_emit({"type": "gen_rate", "tok_per_sec": rate})
+
+
+def _record_gen_tokens(
+    state: _VisibleStreamState, n: int, *, stream_user_visible: bool
+) -> None:
+    if not stream_user_visible or n <= 0:
+        return
+    state.gen_rate.add_tokens(n)
+
+
+def _record_ollama_eval_from_chunk(
+    data: dict,
+    state: _VisibleStreamState,
+    *,
+    stream_user_visible: bool,
+    ollama_usage_from_chat_response_fn: Callable[[dict], Optional[dict]],
+) -> None:
+    if not stream_user_visible:
+        return
+    usage = ollama_usage_from_chat_response_fn(data)
+    if not usage or "eval_count" not in usage:
+        return
+    ec = usage["eval_count"]
+    if not isinstance(ec, int) or ec < state.last_eval_count:
+        return
+    delta = ec - state.last_eval_count
+    state.last_eval_count = ec
+    state.has_ollama_eval = True
+    _record_gen_tokens(state, delta, stream_user_visible=stream_user_visible)
+
+
+def _emit_visible_answer_delta(
+    content: str, state: _VisibleStreamState, *, stream_user_visible: bool
+) -> None:
     answer = _extract_json_string_field(content, "answer", allow_unterminated=True)
     if answer is None:
         return
@@ -228,6 +271,12 @@ def _emit_visible_answer_delta(content: str, state: _VisibleStreamState) -> None
     sink_emit({"type": "answer", "text": delta, "end": "", "partial": True, "flush": True})
     _assistant_answer_streamed.set(True)
     state.streamed_content = True
+    if not state.has_ollama_eval and not state.tool_mode:
+        _record_gen_tokens(
+            state,
+            estimate_tokens_from_text(delta),
+            stream_user_visible=stream_user_visible,
+        )
 
 
 def _apply_content_chunk(
@@ -252,7 +301,7 @@ def _apply_content_chunk(
             state.tool_progress_emitted = True
         return
     state.tool_mode = False
-    _emit_visible_answer_delta(acc_content, state)
+    _emit_visible_answer_delta(acc_content, state, stream_user_visible=stream_user_visible)
 
 
 def merge_stream_message_chunks(
@@ -286,6 +335,12 @@ def merge_stream_message_chunks(
                 }
             )
             continue
+        _record_ollama_eval_from_chunk(
+            data,
+            vis,
+            stream_user_visible=stream_user_visible,
+            ollama_usage_from_chat_response_fn=ollama_usage_from_chat_response_fn,
+        )
         msg = data.get("message") or {}
         if msg.get("content"):
             chunk = msg["content"]
@@ -318,6 +373,7 @@ def merge_stream_message_chunks(
             u = ollama_usage_from_chat_response_fn(data)
             if u:
                 usage = u
+            _emit_gen_rate(vis, stream_user_visible=stream_user_visible)
             break
     if not saw_done:
         sink_emit(
@@ -388,6 +444,7 @@ def merge_hosted_stream_chunks(
             if stream_user_visible:
                 vis.tool_mode = True
         if choice0.get("finish_reason") is not None:
+            _emit_gen_rate(vis, stream_user_visible=stream_user_visible)
             break
     if tool_calls is not None:
         acc["tool_calls"] = tool_calls
