@@ -49,6 +49,8 @@ Run a shell command locally like the agent ``run_command`` tool: ``/run_command 
 
 Clipboard: ``/clipboard copy|copy all|paste`` (`paste` loads the clipboard into your prompt so you can edit before Enter). Session JSON: ``/context load|save|start_log FILE`` (``/save_context`` is a one-shot snapshot; ``start_log`` enables auto-save after each turn). Extensions: ``/load FILE.py`` (``register_repl``), ``/unload``, ``/extensions``.
 
+**Mouse:** drag in the chat or activity log to select text (within that pane only); releasing the button copies to the clipboard (macOS Terminal usually does not pass **Cmd+C** through). **Ctrl+C** or **Ctrl+Shift+C** also copies when idle; **Cmd+C** works in terminals that forward it (iTerm, Ghostty, WezTerm). The prompt uses normal editor copy/paste (**Ctrl+V** / **Cmd+V** to paste).
+
 Prompt history is **per lane**: **↑** / **↓** when the cursor is on the **first / last** line recall prior messages (like the CLI);
 otherwise they move inside the editor. **Ctrl+↑** / **Ctrl+↓** always recall (even mid‑multiline). **Enter** sends the message (same idea as the single-line input).
 For an extra line inside the box use **Shift+Enter** or **Ctrl+J**, or paste multiline text; content scrolls vertically
@@ -88,6 +90,12 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from agentlib.llm.gen_rate import GenRateTracker, estimate_tokens_from_text
+from agentlib.tui_widgets import (
+    AgentScreen,
+    NoSelectStatic,
+    SelectableRichLog,
+    is_copy_selection_key,
+)
 from agentlib.tui_parse import (
     parse_fork_background_command,
     parse_fork_command,
@@ -292,6 +300,14 @@ class PromptTextArea(TextArea):
 
     async def _on_key(self, event: events.Key) -> None:
         key = event.key
+        if is_copy_selection_key(key):
+            event.stop()
+            event.prevent_default()
+            try:
+                self.app.action_copy_mouse_selection()
+            except SkipAction:
+                pass
+            return
         if key == "enter":
             event.stop()
             event.prevent_default()
@@ -419,6 +435,13 @@ class AgentTuiApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+c", "interrupt_prompt", "", show=False, priority=True),
+        Binding(
+            "ctrl+shift+c,super+c,meta+c",
+            "copy_mouse_selection",
+            "Copy",
+            show=False,
+            priority=True,
+        ),
         # Up/Down are used by the multiline prompt; use Ctrl+arrows for per-lane history.
         Binding("ctrl+up", "prompt_hist_prev", "", show=False, priority=True),
         Binding("ctrl+down", "prompt_hist_next", "", show=False, priority=True),
@@ -539,13 +562,16 @@ class AgentTuiApp(App[None]):
         # Parallel per-lane widgets (compose mounts synchronously; dynamic fork mounts are deferred).
         self._lane_verticals: List[Vertical] = []
         self._thinking_widgets: List[Static] = []
-        self._activity_logs: List[RichLog] = []
-        self._chat_logs: List[RichLog] = []
+        self._activity_logs: List[SelectableRichLog] = []
+        self._chat_logs: List[SelectableRichLog] = []
         self._prompt_hist_lines: Dict[int, List[str]] = {}
         self._prompt_hist_idx: Dict[int, Optional[int]] = {}
         self._lane_worker_threads: Dict[int, threading.Thread] = {}
         # Case-folded label of the first `--agent` slot (default "Agent 1"): shares ~/.agent_repl_history with the CLI.
         self._startup_agent_label_key: str = self._lane_labels[0].casefold().strip()
+
+    def get_default_screen(self) -> Screen:
+        return AgentScreen(id="_default")
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True, icon="", id="app_header")
@@ -555,8 +581,8 @@ class AgentTuiApp(App[None]):
                     hidden = "" if i == 0 else " hidden"
                     with Vertical(classes=f"lane-pane{hidden}", id=f"lane-{i}"):
                         with Vertical(classes="activity_wrap"):
-                            yield Static("", classes="thinking_live", id=f"thinking-{i}")
-                            yield RichLog(
+                            yield NoSelectStatic("", classes="thinking_live", id=f"thinking-{i}")
+                            yield SelectableRichLog(
                                 classes="activity_log",
                                 id=f"activity-{i}",
                                 highlight=False,
@@ -564,7 +590,7 @@ class AgentTuiApp(App[None]):
                                 wrap=True,
                             )
                         with Vertical(classes="bottom_lane"):
-                            yield RichLog(
+                            yield SelectableRichLog(
                                 classes="chat_log",
                                 id=f"chat-{i}",
                                 highlight=False,
@@ -573,7 +599,7 @@ class AgentTuiApp(App[None]):
                                 auto_scroll=True,
                             )
             with Vertical(id="sidebar"):
-                yield Static("Agents", id="sidebar_title")
+                yield NoSelectStatic("Agents", id="sidebar_title")
                 opts = []
                 for i, (label, model_part) in enumerate(self._specs):
                     line = f"{label}" if not model_part else f"{label}\n  {model_part}"
@@ -601,6 +627,10 @@ class AgentTuiApp(App[None]):
         self.sub_title = ""
         header_icon = self.query_one("#app_header", Header).query_one(HeaderIcon)
         header_icon.disabled = True
+        self.query_one("#app_header", Header).ALLOW_SELECT = False
+        self.query_one(Footer).ALLOW_SELECT = False
+        for node in self.query(OptionList):
+            node.ALLOW_SELECT = False
         ol = self.query_one("#agent_list", OptionList)
         ol.highlighted = 0
 
@@ -643,8 +673,8 @@ class AgentTuiApp(App[None]):
             self._thinking_follow[i] = False
             self._lane_verticals.append(self.query_one(f"#lane-{i}", Vertical))
             self._thinking_widgets.append(self.query_one(f"#thinking-{i}", Static))
-            self._activity_logs.append(self.query_one(f"#activity-{i}", RichLog))
-            self._chat_logs.append(self.query_one(f"#chat-{i}", RichLog))
+            self._activity_logs.append(self.query_one(f"#activity-{i}", SelectableRichLog))
+            self._chat_logs.append(self.query_one(f"#chat-{i}", SelectableRichLog))
             chat = self._chat_logs[-1]
             hint = (
                 f"[bold]{escape(label)}[/bold]"
@@ -706,7 +736,7 @@ class AgentTuiApp(App[None]):
         super().exit(result, return_code=return_code, message=message)
 
     def action_interrupt_prompt(self) -> None:
-        """Ctrl+C: while a turn is running, open a prompt; confirm cancel with Ctrl+C again."""
+        """Ctrl+C: cancel busy turn, or copy selection when idle."""
         # App-level ctrl+c binding runs before the modal's on_key; do not no-op here or the
         # second Ctrl+C never reaches dismiss(True).
         if isinstance(self.screen, _BusyInterruptScreen):
@@ -719,7 +749,33 @@ class AgentTuiApp(App[None]):
                 callback=lambda r, ln=lane: self._on_busy_interrupt_result(ln, r),
             )
             return
-        App.action_help_quit(self)
+        self.action_copy_mouse_selection()
+
+    async def on_event(self, event: events.Event) -> None:
+        if isinstance(event, events.Key) and not event.is_forwarded:
+            if is_copy_selection_key(event.key):
+                for log in self.query(SelectableRichLog):
+                    if log.has_text_selection() and log.copy_selection_to_clipboard():
+                        return
+        await super().on_event(event)
+
+    def action_copy_mouse_selection(self) -> None:
+        """Copy log selection or prompt selection to the OS clipboard."""
+        from agentlib.clipboard_io import ClipboardError, clipboard_write_text
+
+        for log in self.query(SelectableRichLog):
+            if log.copy_selection_to_clipboard():
+                return
+        pr = self.query_one("#prompt", TextArea)
+        if self.screen.focused is pr:
+            text = pr.selected_text
+            if text:
+                try:
+                    clipboard_write_text(text)
+                except ClipboardError as e:
+                    self.notify(str(e), title="Clipboard", severity="error", timeout=4)
+                return
+        raise SkipAction()
 
     def _on_busy_interrupt_result(self, lane: int, result: Optional[bool]) -> None:
         if result is not True:
@@ -794,9 +850,9 @@ class AgentTuiApp(App[None]):
         except Exception:
             pass
 
-    def _mount_lane_widgets(self, idx: int, *, hidden: bool) -> RichLog:
+    def _mount_lane_widgets(self, idx: int, *, hidden: bool) -> SelectableRichLog:
         thinking = Static("", classes="thinking_live", id=f"thinking-{idx}")
-        activity = RichLog(
+        activity = SelectableRichLog(
             classes="activity_log",
             id=f"activity-{idx}",
             highlight=False,
@@ -804,7 +860,7 @@ class AgentTuiApp(App[None]):
             wrap=True,
         )
         activity_wrap = Vertical(thinking, activity, classes="activity_wrap")
-        chat = RichLog(
+        chat = SelectableRichLog(
             classes="chat_log",
             id=f"chat-{idx}",
             highlight=False,
