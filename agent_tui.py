@@ -1,7 +1,8 @@
 #!/usr/bin/env -S uv run python3
 """
-Terminal UI for multiple embedded agents: pick an agent on the right; each has its own
-thinking/tools strip, transcript, and shared prefs-backed wiring.
+Terminal UI for multiple embedded agents: pick an agent on the right; each lane has a
+main transcript plus an optional large thinking panel (shown only while reasoning).
+Tool and status lines go to the transcript.
 
 Requires: ``uv sync --extra tui`` then::
 
@@ -49,7 +50,7 @@ Run a shell command locally like the agent ``run_command`` tool: ``/run_command 
 
 Clipboard: ``/clipboard copy|copy all|paste`` (`paste` loads the clipboard into your prompt so you can edit before Enter). Session JSON: ``/context load|save|start_log FILE`` (``/save_context`` is a one-shot snapshot; ``start_log`` enables auto-save after each turn). Extensions: ``/load FILE.py`` (``register_repl``), ``/unload``, ``/extensions``.
 
-**Mouse:** drag in the chat or activity log to select text (within that pane only); releasing the button copies to the clipboard (macOS Terminal usually does not pass **Cmd+C** through). **Ctrl+C** or **Ctrl+Shift+C** also copies when idle; **Cmd+C** works in terminals that forward it (iTerm, Ghostty, WezTerm). The prompt uses normal editor copy/paste (**Ctrl+V** / **Cmd+V** to paste).
+**Mouse:** drag in the chat or thinking log to select text (within that pane only); releasing the button copies to the clipboard (macOS Terminal usually does not pass **Cmd+C** through). **Ctrl+C** or **Ctrl+Shift+C** also copies when idle; **Cmd+C** works in terminals that forward it (iTerm, Ghostty, WezTerm). The prompt uses normal editor copy/paste (**Ctrl+V** / **Cmd+V** to paste).
 
 Prompt history is **per lane**: **↑** / **↓** when the cursor is on the **first / last** line recall prior messages (like the CLI);
 otherwise they move inside the editor. **Ctrl+↑** / **Ctrl+↓** always recall (even mid‑multiline). **Enter** sends the message (same idea as the single-line input).
@@ -473,31 +474,39 @@ class AgentTuiApp(App[None]):
     .lane-pane.hidden {
         display: none;
     }
-    .activity_wrap {
-        height: 25%;
-        min-height: 5;
+    .thinking_panel {
+        display: none;
+        height: 0;
+        min-height: 0;
+        layout: vertical;
         border: tall $accent;
         background: $surface;
-        layout: vertical;
     }
-    .thinking_live {
-        height: auto;
-        max-height: 55%;
+    .lane-pane.thinking_open .thinking_panel {
+        display: block;
+        height: 67%;
+        min-height: 10;
+    }
+    .thinking_title {
+        height: 1;
         padding: 0 1;
-        background: $surface;
+        text-style: bold dim;
     }
-    .activity_log {
+    .thinking_log {
         height: 1fr;
-        min-height: 3;
-        border-top: solid $accent;
+        min-height: 6;
     }
-    .bottom_lane {
+    .chat_lane {
         height: 1fr;
         layout: vertical;
+        min-height: 8;
+    }
+    .lane-pane.thinking_open .chat_lane {
+        height: 33%;
+        min-height: 6;
     }
     .chat_log {
         height: 1fr;
-        min-height: 8;
         border: tall $surface;
         background: $background;
     }
@@ -561,8 +570,7 @@ class AgentTuiApp(App[None]):
         self._lane_labels: List[str] = [label for label, _ in self._specs]
         # Parallel per-lane widgets (compose mounts synchronously; dynamic fork mounts are deferred).
         self._lane_verticals: List[Vertical] = []
-        self._thinking_widgets: List[Static] = []
-        self._activity_logs: List[SelectableRichLog] = []
+        self._thinking_logs: List[SelectableRichLog] = []
         self._chat_logs: List[SelectableRichLog] = []
         self._prompt_hist_lines: Dict[int, List[str]] = {}
         self._prompt_hist_idx: Dict[int, Optional[int]] = {}
@@ -580,16 +588,17 @@ class AgentTuiApp(App[None]):
                 for i in range(self._n):
                     hidden = "" if i == 0 else " hidden"
                     with Vertical(classes=f"lane-pane{hidden}", id=f"lane-{i}"):
-                        with Vertical(classes="activity_wrap"):
-                            yield NoSelectStatic("", classes="thinking_live", id=f"thinking-{i}")
+                        with Vertical(classes="thinking_panel", id=f"thinking-panel-{i}"):
+                            yield NoSelectStatic("Thinking", classes="thinking_title")
                             yield SelectableRichLog(
-                                classes="activity_log",
-                                id=f"activity-{i}",
+                                classes="thinking_log",
+                                id=f"thinking-{i}",
                                 highlight=False,
                                 markup=True,
                                 wrap=True,
+                                auto_scroll=True,
                             )
-                        with Vertical(classes="bottom_lane"):
+                        with Vertical(classes="chat_lane", id=f"chat-lane-{i}"):
                             yield SelectableRichLog(
                                 classes="chat_log",
                                 id=f"chat-{i}",
@@ -672,8 +681,7 @@ class AgentTuiApp(App[None]):
             self._thinking_buf[i] = ""
             self._thinking_follow[i] = False
             self._lane_verticals.append(self.query_one(f"#lane-{i}", Vertical))
-            self._thinking_widgets.append(self.query_one(f"#thinking-{i}", Static))
-            self._activity_logs.append(self.query_one(f"#activity-{i}", SelectableRichLog))
+            self._thinking_logs.append(self.query_one(f"#thinking-{i}", SelectableRichLog))
             self._chat_logs.append(self.query_one(f"#chat-{i}", SelectableRichLog))
             chat = self._chat_logs[-1]
             hint = (
@@ -851,15 +859,19 @@ class AgentTuiApp(App[None]):
             pass
 
     def _mount_lane_widgets(self, idx: int, *, hidden: bool) -> SelectableRichLog:
-        thinking = Static("", classes="thinking_live", id=f"thinking-{idx}")
-        activity = SelectableRichLog(
-            classes="activity_log",
-            id=f"activity-{idx}",
-            highlight=False,
-            markup=True,
-            wrap=True,
+        thinking_panel = Vertical(
+            NoSelectStatic("Thinking", classes="thinking_title"),
+            SelectableRichLog(
+                classes="thinking_log",
+                id=f"thinking-{idx}",
+                highlight=False,
+                markup=True,
+                wrap=True,
+                auto_scroll=True,
+            ),
+            classes="thinking_panel",
+            id=f"thinking-panel-{idx}",
         )
-        activity_wrap = Vertical(thinking, activity, classes="activity_wrap")
         chat = SelectableRichLog(
             classes="chat_log",
             id=f"chat-{idx}",
@@ -868,16 +880,39 @@ class AgentTuiApp(App[None]):
             wrap=True,
             auto_scroll=True,
         )
-        bottom = Vertical(chat, classes="bottom_lane")
+        chat_lane = Vertical(chat, classes="chat_lane", id=f"chat-lane-{idx}")
         lane_cls = "lane-pane hidden" if hidden else "lane-pane"
-        lane = Vertical(activity_wrap, bottom, classes=lane_cls, id=f"lane-{idx}")
+        lane = Vertical(thinking_panel, chat_lane, classes=lane_cls, id=f"lane-{idx}")
         self._lane_verticals.append(lane)
-        self._thinking_widgets.append(thinking)
-        self._activity_logs.append(activity)
+        self._thinking_logs.append(thinking_panel.query_one(f"#thinking-{idx}", SelectableRichLog))
         self._chat_logs.append(chat)
         container = self.query_one("#lanes_container", Vertical)
         container.mount(lane)
         return chat
+
+    @staticmethod
+    def _thinking_display_text(buf: str) -> str:
+        s = buf
+        for marker in ("[Thinking]", "[Done thinking]"):
+            s = s.replace(marker, "")
+        return s.strip()
+
+    def _sync_thinking_log(self, lane: int) -> None:
+        log = self._thinking_logs[lane]
+        text = self._thinking_display_text(self._thinking_buf.get(lane, ""))
+        log.clear()
+        if text:
+            log.write(Text.from_markup(f"[dim]{escape(text)}[/dim]"))
+
+    def _show_thinking_panel(self, lane: int) -> None:
+        lane_node = self._lane_verticals[lane]
+        if "thinking_open" not in lane_node.classes:
+            lane_node.add_class("thinking_open")
+
+    def _hide_thinking_panel(self, lane: int) -> None:
+        lane_node = self._lane_verticals[lane]
+        lane_node.remove_class("thinking_open")
+        self._thinking_logs[lane].clear()
 
     def _fork_new_lane(
         self,
@@ -1208,15 +1243,19 @@ class AgentTuiApp(App[None]):
         dchat._line_cache.clear()
         dchat.refresh()
 
-        sa = self._activity_logs[src]
-        da = self._activity_logs[dst]
-        da.clear()
-        da.lines.extend(list(sa.lines))
-        da._widest_line_width = sa._widest_line_width
-        da._start_line = sa._start_line
-        da.virtual_size = sa.virtual_size
-        da._line_cache.clear()
-        da.refresh()
+        st = self._thinking_logs[src]
+        dt = self._thinking_logs[dst]
+        dt.clear()
+        dt.lines.extend(list(st.lines))
+        dt._widest_line_width = st._widest_line_width
+        dt._start_line = st._start_line
+        dt.virtual_size = st.virtual_size
+        dt._line_cache.clear()
+        dt.refresh()
+        if "thinking_open" in self._lane_verticals[src].classes:
+            self._lane_verticals[dst].add_class("thinking_open")
+        else:
+            self._lane_verticals[dst].remove_class("thinking_open")
 
         self._chat_live_buf[dst] = self._chat_live_buf.get(src, "")
         self._chat_stream_open[dst] = self._chat_stream_open.get(src, False)
@@ -1224,10 +1263,6 @@ class AgentTuiApp(App[None]):
             self._chat_stream_line_start[dst] = self._chat_stream_line_start[src]
         else:
             self._chat_stream_line_start.pop(dst, None)
-
-        st = self._thinking_widgets[src]
-        dt = self._thinking_widgets[dst]
-        dt.update(st.content)
 
     def _kill_lane_at(self, k: int) -> None:
         """Remove lane index ``k``; compact indices by swapping last lane into ``k`` when needed."""
@@ -1276,8 +1311,7 @@ class AgentTuiApp(App[None]):
         lane_widget = self._lane_verticals.pop()
         lane_widget.remove()
 
-        self._thinking_widgets.pop()
-        self._activity_logs.pop()
+        self._thinking_logs.pop()
         self._chat_logs.pop()
 
         ol.remove_option_at_index(last)
@@ -1392,6 +1426,7 @@ class AgentTuiApp(App[None]):
     def _chat_append_answer_delta(self, lane: int, delta: str) -> None:
         if not delta:
             return
+        self._hide_thinking_panel(lane)
         buf = self._chat_live_buf.get(lane, "")
         if buf.endswith(delta):
             return
@@ -1473,18 +1508,22 @@ class AgentTuiApp(App[None]):
 
     def _prepare_turn_ui(self, lane: int, line: str) -> None:
         chat = self._chat_logs[lane]
-        thinking_live = self._thinking_widgets[lane]
         chat.write(Text.from_markup(f"[bold green]You[/bold green]\n{escape(line)}\n"))
         self._reset_chat_live_answer(lane)
         self._reset_lane_gen_rate_tracker(lane)
         self._thinking_buf[lane] = ""
-        thinking_live.update("")
+        self._thinking_follow[lane] = False
+        self._hide_thinking_panel(lane)
 
     def _show_lane(self, index: int) -> None:
         index = max(0, min(index, self._n - 1))
         self._active_lane = index
         for i in range(self._n):
-            self._lane_verticals[i].set_classes(f"lane-pane{' hidden' if i != index else ''}")
+            lane_node = self._lane_verticals[i]
+            if i != index:
+                lane_node.add_class("hidden")
+            else:
+                lane_node.remove_class("hidden")
         self._refresh_header_gen_rate()
 
     def _feedback_chat(self, lane: int, markup: str) -> None:
@@ -1517,30 +1556,31 @@ class AgentTuiApp(App[None]):
         if not text and end == "\n" and not partial:
             return
 
-        activity = self._activity_logs[lane]
-        thinking_live = self._thinking_widgets[lane]
         chat = self._chat_logs[lane]
 
         if t == "thinking":
             if "[Thinking]" in text:
                 self._thinking_follow[lane] = True
                 self._thinking_buf[lane] = ""
+                self._show_thinking_panel(lane)
+                self._thinking_logs[lane].clear()
             self._thinking_buf[lane] += text
             if "[Done thinking]" in text:
                 self._thinking_follow[lane] = False
-                activity.write(Text.from_markup(f"[dim]{escape(self._thinking_buf[lane].strip())}[/dim]"))
-                self._thinking_buf[lane] = ""
-                thinking_live.update("")
+                self._sync_thinking_log(lane)
                 return
-            thinking_live.update(Text.from_markup(f"[dim]{escape(self._thinking_buf[lane])}[/dim]"))
+            if self._thinking_display_text(self._thinking_buf[lane]):
+                self._show_thinking_panel(lane)
+                self._sync_thinking_log(lane)
             return
 
         if t in ("progress", "warning", "stderr", "debug", "error"):
             style = "yellow" if t == "warning" else "red" if t == "error" else "dim"
-            activity.write(Text.from_markup(f"[{style}]{escape(text)}[/{style}]"))
+            chat.write(Text.from_markup(f"[{style}]{escape(text)}[/{style}]"))
             return
 
         if t == "answer":
+            self._hide_thinking_panel(lane)
             if partial:
                 self._track_gen_rate_delta(lane, text)
                 self._chat_append_answer_delta(lane, text)
@@ -1555,16 +1595,13 @@ class AgentTuiApp(App[None]):
         if t == "output":
             if partial:
                 return
-            if self._thinking_follow.get(lane):
-                activity.write(Text.from_markup(f"[dim]{escape(text)}[/dim]"))
-                return
             if _is_activity_output_line(text):
-                activity.write(Text(escape(text)))
+                chat.write(Text(escape(text)))
             else:
                 chat.write(Text.from_markup(f"[dim]{escape(text)}[/dim]"))
             return
 
-        activity.write(Text.from_markup(f"[magenta]{t}[/magenta] {escape(text)}"))
+        chat.write(Text.from_markup(f"[magenta]{t}[/magenta] {escape(text)}"))
 
     def _sync_prompt_enabled(self) -> None:
         pr = self.query_one("#prompt", TextArea)
@@ -1643,11 +1680,11 @@ class AgentTuiApp(App[None]):
 
     def _turn_error(self, lane: int, tb: str) -> None:
         self._set_lane_busy(lane, False)
-        activity = self._activity_logs[lane]
-        activity.write(Text.from_markup(f"[bold red]Turn error[/bold red]\n{escape(tb)}"))
+        self._chat_logs[lane].write(Text.from_markup(f"[bold red]Turn error[/bold red]\n{escape(tb)}"))
         self._reset_chat_live_answer(lane)
         self._thinking_buf[lane] = ""
-        self._thinking_widgets[lane].update("")
+        self._thinking_follow[lane] = False
+        self._hide_thinking_panel(lane)
 
     def _turn_cancelled(self, lane: int) -> None:
         """Worker raised KeyboardInterrupt (user confirmed cancel on the interrupt prompt)."""
@@ -1656,7 +1693,7 @@ class AgentTuiApp(App[None]):
         self._reset_chat_live_answer(lane)
         self._thinking_buf[lane] = ""
         self._thinking_follow[lane] = False
-        self._thinking_widgets[lane].update("")
+        self._hide_thinking_panel(lane)
         self._set_lane_busy(lane, False)
 
     def _turn_done(self, lane: int, res: dict) -> None:
@@ -1693,12 +1730,9 @@ class AgentTuiApp(App[None]):
                         chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(ans)}\n"))
         finally:
             self._reset_chat_live_answer(lane)
-            if self._thinking_buf.get(lane, "").strip():
-                self._activity_logs[lane].write(
-                    Text.from_markup(f"[dim]{escape(self._thinking_buf[lane].strip())}[/dim]")
-                )
             self._thinking_buf[lane] = ""
-            self._thinking_widgets[lane].update("")
+            self._thinking_follow[lane] = False
+            self._hide_thinking_panel(lane)
             if finalize_busy:
                 self._set_lane_busy(lane, False)
                 self._drain_lane_queue(lane)
