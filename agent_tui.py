@@ -525,6 +525,10 @@ class AgentTuiApp(App[None]):
     }
     #agent_list {
         height: 1fr;
+        overflow-x: hidden;
+    }
+    #agent_list > .option-list--option {
+        text-overflow: ellipsis;
     }
     /* TextArea draws a tall border (~2 rows); outer height must include it or only ~1 text row fits. */
     #prompt {
@@ -609,11 +613,11 @@ class AgentTuiApp(App[None]):
                             )
             with Vertical(id="sidebar"):
                 yield NoSelectStatic("Agents", id="sidebar_title")
-                opts = []
-                for i, (label, model_part) in enumerate(self._specs):
-                    line = f"{label}" if not model_part else f"{label}\n  {model_part}"
-                    opts.append(Option(line, id=f"agent-{i}"))
-                yield OptionList(*opts, id="agent_list")
+                opts = [
+                    Option(self._sidebar_line_for_lane(i), id=f"agent-{i}")
+                    for i in range(self._n)
+                ]
+                yield OptionList(*opts, id="agent_list", compact=True)
         yield PromptTextArea(
             "",
             id="prompt",
@@ -834,27 +838,30 @@ class AgentTuiApp(App[None]):
             self._prompt_hist_idx[lane] = nxt
             _set_prompt_text(pr, hist[nxt])
 
-    def _sidebar_line_for_agent(self, label: str, session) -> str:
-        from agentlib.llm.profile import effective_ollama_model_from_profile
+    _SIDEBAR_IDLE_ICON = "○"
+    _SIDEBAR_BUSY_ICON = "●"
+    _SIDEBAR_MAX_CHARS = 24
 
-        pp = session.primary_profile
-        if pp is None:
-            return label
-        if getattr(pp, "backend", "") == "hosted":
-            model_part = (getattr(pp, "model", None) or "") or "hosted"
-        else:
-            assert self._embed_app is not None
-            model_part = effective_ollama_model_from_profile(pp, self._embed_app.ollama_model())
-        return label if not str(model_part).strip() else f"{label}\n  {model_part}"
+    def _sidebar_line_for_lane(self, lane: int, *, label: Optional[str] = None) -> str:
+        """One-line sidebar label: status icon + agent name (no model, no wrap)."""
+        label = label if label is not None else self._lane_labels[lane]
+        busy = lane in self._busy_lanes
+        icon = self._SIDEBAR_BUSY_ICON if busy else self._SIDEBAR_IDLE_ICON
+        prefix = f"{icon} "
+        max_label = max(1, self._SIDEBAR_MAX_CHARS - len(prefix))
+        if len(label) > max_label:
+            label = label[: max_label - 1] + "…"
+        if busy:
+            return f"[bold yellow]{icon}[/bold yellow] {escape(label)}"
+        return f"[dim]{icon}[/dim] {escape(label)}"
 
     def _refresh_sidebar_lane(self, lane: int) -> None:
-        """Update sidebar option text from ``session.primary_profile`` (e.g. after ``/set`` changes model)."""
+        """Update sidebar option text (agent name + idle/busy icon)."""
         if lane < 0 or lane >= self._n:
             return
         try:
             ol = self.query_one("#agent_list", OptionList)
-            line = self._sidebar_line_for_agent(self._lane_labels[lane], self._sessions[lane])
-            ol.replace_option_prompt_at_index(lane, line)
+            ol.replace_option_prompt_at_index(lane, self._sidebar_line_for_lane(lane))
         except Exception:
             pass
 
@@ -949,9 +956,8 @@ class AgentTuiApp(App[None]):
 
         chat = self._mount_lane_widgets(new_idx, hidden=not switch_to_new)
         ol = self.query_one("#agent_list", OptionList)
-        ol.add_option(Option(self._sidebar_line_for_agent(name, new_sess), id=f"agent-{new_idx}"))
-
         self._lane_labels.append(name)
+        ol.add_option(Option(self._sidebar_line_for_lane(new_idx), id=f"agent-{new_idx}"))
         self._sessions.append(new_sess)
         self._chat_live_buf[new_idx] = ""
         self._chat_stream_open[new_idx] = False
@@ -1288,8 +1294,7 @@ class AgentTuiApp(App[None]):
             self._lane_labels[k] = self._lane_labels[last]
             self._sync_lane_visual_from(last, k)
 
-            line = self._sidebar_line_for_agent(self._lane_labels[k], self._sessions[k])
-            ol.replace_option_prompt_at_index(k, line)
+            ol.replace_option_prompt_at_index(k, self._sidebar_line_for_lane(k))
 
             self._chat_live_buf[k] = self._chat_live_buf[last]
             self._chat_stream_open[k] = self._chat_stream_open.get(last, False)
@@ -1643,6 +1648,7 @@ class AgentTuiApp(App[None]):
             self._busy_lanes.discard(lane)
             if lane == self._active_lane:
                 self._refresh_header_gen_rate(lane)
+        self._refresh_sidebar_lane(lane)
         self._sync_prompt_enabled()
 
     def action_submit_prompt_message(self) -> None:
