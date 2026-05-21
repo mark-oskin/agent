@@ -67,3 +67,27 @@ def test_merge_stream_emits_gen_rate_with_ollama_eval_count(monkeypatch):
     )
     rates = [e["tok_per_sec"] for e in emitted if e.get("type") == "gen_rate"]
     assert all(isinstance(r, (int, float)) and r >= 0 for r in rates)
+
+
+def test_record_thinking_chunk_tokens_for_gen_rate():
+    vis = llm_streaming._VisibleStreamState()
+    llm_streaming._record_thinking_chunk_tokens(
+        "reasoning tokens here",
+        vis,
+        stream_user_visible=True,
+    )
+    time.sleep(0.3)
+    rate = vis.gen_rate.sample_interval(min_elapsed=0.2)
+    assert rate is not None
+    assert rate > 0
+
+
+def test_record_thinking_skipped_when_ollama_eval_count_active():
+    vis = llm_streaming._VisibleStreamState()
+    vis.has_ollama_eval = True
+    llm_streaming._record_thinking_chunk_tokens(
+        "should not count",
+        vis,
+        stream_user_visible=True,
+    )
+    assert vis.gen_rate._tokens_in_period == 0

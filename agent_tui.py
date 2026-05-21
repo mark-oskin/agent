@@ -904,15 +904,28 @@ class AgentTuiApp(App[None]):
         if text:
             log.write(Text.from_markup(f"[dim]{escape(text)}[/dim]"))
 
+    def _scroll_chat_to_end(self, lane: int) -> None:
+        """Keep chat pinned to latest line after lane layout height changes."""
+        chat = self._chat_logs[lane]
+
+        def _scroll() -> None:
+            chat.scroll_end(animate=False, immediate=True, x_axis=False)
+
+        self.call_after_refresh(_scroll)
+
     def _show_thinking_panel(self, lane: int) -> None:
         lane_node = self._lane_verticals[lane]
         if "thinking_open" not in lane_node.classes:
             lane_node.add_class("thinking_open")
+            self._scroll_chat_to_end(lane)
 
     def _hide_thinking_panel(self, lane: int) -> None:
         lane_node = self._lane_verticals[lane]
+        was_open = "thinking_open" in lane_node.classes
         lane_node.remove_class("thinking_open")
         self._thinking_logs[lane].clear()
+        if was_open:
+            self._scroll_chat_to_end(lane)
 
     def _fork_new_lane(
         self,
@@ -1420,7 +1433,10 @@ class AgentTuiApp(App[None]):
         else:
             self._chat_stream_line_start[lane] = len(chat.lines)
         self._chat_stream_open[lane] = True
-        chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(buf)}"))
+        chat.write(
+            Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(buf)}"),
+            scroll_end=True,
+        )
         chat.refresh()
 
     def _chat_append_answer_delta(self, lane: int, delta: str) -> None:
@@ -1565,6 +1581,11 @@ class AgentTuiApp(App[None]):
                 self._show_thinking_panel(lane)
                 self._thinking_logs[lane].clear()
             self._thinking_buf[lane] += text
+            rate_delta = text
+            for marker in ("[Thinking]", "[Done thinking]"):
+                rate_delta = rate_delta.replace(marker, "")
+            if rate_delta:
+                self._track_gen_rate_delta(lane, rate_delta)
             if "[Done thinking]" in text:
                 self._thinking_follow[lane] = False
                 self._sync_thinking_log(lane)

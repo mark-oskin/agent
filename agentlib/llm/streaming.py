@@ -235,6 +235,19 @@ def _record_gen_tokens(
     state.gen_rate.add_tokens(n)
 
 
+def _record_thinking_chunk_tokens(
+    tchunk: str, state: _VisibleStreamState, *, stream_user_visible: bool
+) -> None:
+    """Count streamed reasoning tokens toward gen rate (Ollama eval_count already tracks)."""
+    if not tchunk or state.has_ollama_eval:
+        return
+    _record_gen_tokens(
+        state,
+        estimate_tokens_from_text(tchunk),
+        stream_user_visible=stream_user_visible,
+    )
+
+
 def _record_ollama_eval_from_chunk(
     data: dict,
     state: _VisibleStreamState,
@@ -364,6 +377,7 @@ def merge_stream_message_chunks(
                     sink_emit({"type": "thinking", "text": "\n[Thinking]\n", "end": "", "partial": True})
                     thinking_started = True
                 sink_emit({"type": "thinking", "text": tchunk, "end": "", "partial": True})
+            _record_thinking_chunk_tokens(tchunk, vis, stream_user_visible=stream_user_visible)
         if msg.get("tool_calls"):
             tool_calls = merge_partial_tool_calls(tool_calls, msg["tool_calls"])
             if stream_user_visible and vis.tool_mode is not False:
@@ -439,6 +453,7 @@ def merge_hosted_stream_chunks(
                         sink_emit({"type": "thinking", "text": "\n[Thinking]\n", "end": "", "partial": True})
                         thinking_started = True
                     sink_emit({"type": "thinking", "text": tchunk, "end": "", "partial": True})
+                _record_thinking_chunk_tokens(tchunk, vis, stream_user_visible=stream_user_visible)
         if delta.get("tool_calls"):
             tool_calls = merge_partial_tool_calls(tool_calls, delta["tool_calls"])
             if stream_user_visible:
