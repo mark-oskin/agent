@@ -86,6 +86,8 @@ def sink_emit(ev: dict) -> None:
             payload["end"] = end
         if ev.get("partial"):
             payload["partial"] = True
+        if ev.get("full_snapshot"):
+            payload["full_snapshot"] = True
         fn(payload)
         return
 
@@ -99,10 +101,35 @@ def sink_emit(ev: dict) -> None:
         print_turn_final_answer(text)
         return
 
+    if typ == "answer_reset":
+        _cli_answer_stream_buf.set("")
+        return
+
     if typ == "answer" and ev.get("partial"):
+        buf = _cli_answer_stream_buf.get()
+        if ev.get("full_snapshot"):
+            if text == buf:
+                return
+            if not text.startswith(buf):
+                if _cli_draft_header_printed.get() and buf:
+                    print(file=fil, flush=flush)
+                if not _cli_draft_header_printed.get():
+                    print(f"{DRAFT_LABEL}\n", end="", file=fil, flush=flush)
+                    _cli_draft_header_printed.set(True)
+                print(text, end=end, file=fil, flush=flush)
+            else:
+                delta = text[len(buf) :]
+                if not delta:
+                    return
+                if not _cli_draft_header_printed.get():
+                    print(f"{DRAFT_LABEL}\n", end="", file=fil, flush=flush)
+                    _cli_draft_header_printed.set(True)
+                print(delta, end=end, file=fil, flush=flush)
+            _cli_answer_stream_buf.set(text)
+            return
+
         from agentlib.llm.streaming import merge_visible_answer_text
 
-        buf = _cli_answer_stream_buf.get()
         merged = merge_visible_answer_text(buf, text)
         if merged == buf:
             return

@@ -45,16 +45,56 @@ def test_stream_restart_does_not_bleed_glued_json_into_draft(monkeypatch):
         stream_user_visible=True,
         agent_stream_thinking_enabled=lambda: False,
     )
-    draft_parts: list[str] = []
+    answer_text = ""
     for e in emitted:
         if e.get("type") == "answer_reset":
-            draft_parts = []
+            answer_text = ""
         elif e.get("type") == "answer":
-            draft_parts.append(e.get("text", ""))
-    answer_text = "".join(draft_parts)
+            answer_text = e.get("text", "")
     assert answer_text == "Email two"
     assert '"action"' not in answer_text
     assert any(e.get("type") == "answer_reset" for e in emitted)
+
+
+def test_stream_answer_rewrite_resets_draft(monkeypatch):
+    """When the in-flight answer text is rewritten, Draft must not keep stale prefixes."""
+    emitted: list[dict] = []
+
+    def cap(ev: dict) -> None:
+        emitted.append(dict(ev))
+
+    monkeypatch.setattr(llm_streaming, "sink_emit", cap)
+    llm_streaming.reset_assistant_answer_streamed()
+
+    lines = [
+        json.dumps(
+            {
+                "message": {
+                    "content": '{"action":"answer","answer":": noreply@cs.w"}',
+                },
+                "done": False,
+            }
+        ),
+        json.dumps(
+            {
+                "message": {
+                    "content": '{"action":"answer","answer":"Here are your emails"}',
+                },
+                "done": True,
+            }
+        ),
+    ]
+    llm_streaming.merge_stream_message_chunks(
+        iter(lines),
+        stream_user_visible=True,
+        agent_stream_thinking_enabled=lambda: False,
+    )
+    answer_events = [e for e in emitted if e.get("type") == "answer"]
+    assert answer_events
+    assert all(e.get("full_snapshot") for e in answer_events)
+    assert answer_events[-1]["text"] == "Here are your emails"
+    assert any(e.get("type") == "answer_reset" for e in emitted)
+    assert ": noreply" not in answer_events[-1]["text"]
 
 
 def test_merge_stream_content_cumulative_only():
@@ -110,7 +150,8 @@ def test_merge_stream_emits_partial_answer_events(monkeypatch):
     answer_events = [e for e in emitted if e.get("type") == "answer"]
     assert answer_events
     assert all(e.get("partial") for e in answer_events)
-    assert "".join(e.get("text", "") for e in answer_events) == "Hello"
+    assert all(e.get("full_snapshot") for e in answer_events)
+    assert answer_events[-1]["text"] == "Hello"
     assert llm_streaming.assistant_answer_was_streamed()
 
 
@@ -166,7 +207,8 @@ def test_merge_stream_cumulative_chunks_do_not_double_answer(monkeypatch):
     )
     assert msg["content"] == full
     assert streamed is True
-    assert "".join(e.get("text", "") for e in emitted if e.get("type") == "answer") == "4"
+    answer_events = [e for e in emitted if e.get("type") == "answer"]
+    assert answer_events[-1]["text"] == "4"
 
 
 def test_merge_hosted_stream_accumulates_answer(monkeypatch):
@@ -197,4 +239,5 @@ def test_merge_hosted_stream_accumulates_answer(monkeypatch):
     assert msg["content"] == content
     assert usage is None
     assert streamed is True
-    assert "".join(e.get("text", "") for e in emitted if e.get("type") == "answer") == "Hi"
+    answer_events = [e for e in emitted if e.get("type") == "answer"]
+    assert answer_events[-1]["text"] == "Hi"

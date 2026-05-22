@@ -261,6 +261,7 @@ def _content_indicates_tool_call(content: str, tool_calls) -> bool:
 @dataclass
 class _VisibleStreamState:
     answer_emitted_len: int = 0
+    answer_emitted_snapshot: str = ""
     tool_mode: Optional[bool] = None
     tool_progress_emitted: bool = False
     streamed_content: bool = False
@@ -272,6 +273,7 @@ class _VisibleStreamState:
     def reset_answer_stream(self, *, stream_user_visible: bool = False) -> None:
         """Forget Draft deltas after the model restarts its JSON object."""
         self.answer_emitted_len = 0
+        self.answer_emitted_snapshot = ""
         self.tool_mode = None
         self.tool_progress_emitted = False
         if stream_user_visible:
@@ -336,15 +338,31 @@ def _emit_visible_answer_delta(
     )
     if answer is None:
         return
-    if len(answer) < state.answer_emitted_len:
-        state.reset_answer_stream()
+    if state.answer_emitted_len > 0:
+        if len(answer) < state.answer_emitted_len:
+            state.reset_answer_stream(stream_user_visible=stream_user_visible)
+        elif (
+            state.answer_emitted_snapshot
+            and not answer.startswith(state.answer_emitted_snapshot)
+        ):
+            state.reset_answer_stream(stream_user_visible=stream_user_visible)
     if len(answer) <= state.answer_emitted_len:
         return
     delta = answer[state.answer_emitted_len :]
     state.answer_emitted_len = len(answer)
+    state.answer_emitted_snapshot = answer
     if not delta:
         return
-    sink_emit({"type": "answer", "text": delta, "end": "", "partial": True, "flush": True})
+    sink_emit(
+        {
+            "type": "answer",
+            "text": answer,
+            "end": "",
+            "partial": True,
+            "flush": True,
+            "full_snapshot": True,
+        }
+    )
     _assistant_answer_streamed.set(True)
     state.streamed_content = True
     if not state.has_ollama_eval and not state.tool_mode:

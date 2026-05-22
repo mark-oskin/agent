@@ -1455,6 +1455,13 @@ class AgentTuiApp(App[None]):
             scroll_end=True,
         )
 
+    def _chat_set_live_answer_snapshot(self, lane: int, text: str) -> None:
+        if text == self._chat_live_buf.get(lane, ""):
+            return
+        self._hide_thinking_panel(lane)
+        self._chat_live_buf[lane] = text
+        self._chat_rewrite_live_draft(lane)
+
     def _chat_append_answer_delta(self, lane: int, delta: str) -> None:
         if not delta:
             return
@@ -1632,8 +1639,16 @@ class AgentTuiApp(App[None]):
         if t == "answer":
             self._hide_thinking_panel(lane)
             if partial:
-                self._track_gen_rate_delta(lane, text)
-                self._chat_append_answer_delta(lane, text)
+                if ev.get("full_snapshot"):
+                    prev = self._chat_live_buf.get(lane, "")
+                    if text.startswith(prev):
+                        self._track_gen_rate_delta(lane, text[len(prev) :])
+                    elif text != prev:
+                        self._track_gen_rate_delta(lane, text)
+                    self._chat_set_live_answer_snapshot(lane, text)
+                else:
+                    self._track_gen_rate_delta(lane, text)
+                    self._chat_append_answer_delta(lane, text)
                 return
             self._write_final_answer_block(lane, text)
             return
