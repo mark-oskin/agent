@@ -5,6 +5,27 @@ from __future__ import annotations
 import json
 
 from agentlib.llm import streaming as llm_streaming
+from agentlib.llm.streaming import merge_stream_content, merge_visible_answer_text
+
+
+def test_merge_stream_content_cumulative_only():
+    assert merge_stream_content("2 + 2 = ", "2 + 2 = 4") == "2 + 2 = 4"
+    assert merge_stream_content("2 + 2 = 4", "2 + 2 = 4") == "2 + 2 = 4"
+    assert merge_stream_content("Hello", "Hel") == "Hello"
+    # Must not drop JSON substrings that repeat inside partial tool-call bodies.
+    acc = '{"action":"tool_call","tool":"search_web"'
+    chunk = "tool_call"
+    assert merge_stream_content(acc, chunk) == acc + chunk
+
+
+def test_merge_visible_answer_text_overlapping_prefix():
+    assert merge_visible_answer_text("Donald Trump.", "The current President") == (
+        "Donald Trump.The current President"
+    )
+    assert merge_visible_answer_text("Hello", "lo world") == "Hello world"
+    assert merge_visible_answer_text("2 + 2 equals 4. ", "+ 2 equals 4.") == "2 + 2 equals 4. "
+    assert merge_visible_answer_text("2 + 2 equals 4.", " equals 4.") == "2 + 2 equals 4."
+    assert merge_visible_answer_text("2 +", " 2") == "2 + 2"
 
 
 def test_merge_stream_emits_partial_answer_events(monkeypatch):

@@ -19,11 +19,16 @@ _TOOL_ACTION_RE = re.compile(r'"action"\s*:\s*"tool_call"', re.IGNORECASE)
 
 
 def reset_assistant_answer_streamed() -> None:
+    from agentlib.sink import reset_cli_answer_display
+
     _assistant_answer_streamed.set(False)
+    reset_cli_answer_display()
 
 
 def assistant_answer_was_streamed() -> bool:
-    return bool(_assistant_answer_streamed.get())
+    from agentlib.sink import cli_answer_display_nonempty
+
+    return bool(_assistant_answer_streamed.get()) or cli_answer_display_nonempty()
 
 
 def iter_ollama_ndjson_lines_from_response(response) -> Iterator[str]:
@@ -179,12 +184,12 @@ def ollama_usage_from_chat_response(data: dict) -> Optional[dict]:
     return out or None
 
 
-def _merge_stream_content(acc: str, chunk: str) -> str:
+def merge_stream_content(acc: str, chunk: str) -> str:
     """
-    Merge one streamed content fragment into accumulated message text.
+    Merge streamed LLM message fragments (JSON bodies, thinking text).
 
-    Some backends send cumulative text (full message so far) rather than deltas;
-    naive ``acc += chunk`` duplicates content and can double visible answer text.
+    Conservative rules only — do not drop chunks that happen to appear as
+    substrings elsewhere in partial JSON (e.g. ``tool_call``).
     """
     if not chunk:
         return acc
@@ -195,6 +200,36 @@ def _merge_stream_content(acc: str, chunk: str) -> str:
     if acc.startswith(chunk):
         return acc
     return acc + chunk
+
+
+def merge_visible_answer_text(acc: str, chunk: str) -> str:
+    """
+    Merge user-visible answer tokens for live TUI/REPL display.
+
+    Handles cumulative chunks, suffix-prefix overlap, and model restarts
+    (e.g. acc ``2 + 2 equals 4. `` plus chunk ``+ 2 equals 4.``).
+    """
+    if not chunk:
+        return acc
+    if not acc:
+        return chunk
+    if chunk.startswith(acc):
+        return chunk
+    if acc.startswith(chunk):
+        return acc
+    if acc.endswith(chunk):
+        return acc
+    max_k = min(len(acc), len(chunk))
+    for k in range(max_k, 1, -1):
+        if acc[-k:] == chunk[:k]:
+            return acc + chunk[k:]
+    if len(chunk) >= 4 and chunk in acc:
+        return acc
+    return acc + chunk
+
+
+def _merge_stream_content(acc: str, chunk: str) -> str:
+    return merge_stream_content(acc, chunk)
 
 
 def _content_indicates_tool_call(content: str, tool_calls) -> bool:

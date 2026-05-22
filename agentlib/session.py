@@ -152,7 +152,7 @@ class AgentSession:
         route_requires_websearch: Callable[..., Optional[str]],
         deliverable_skip_mandatory_web: Callable[[str], bool],
         user_wants_written_deliverable: Callable[[str], bool],
-        interactive_turn_user_message: Callable[..., str],
+        prepare_agent_turn_messages: Callable[..., tuple],
         conversation_turn_deps: ConversationTurnDeps,
         save_context_bundle: Callable[..., None],
         load_context_messages: Callable[[str], list],
@@ -245,7 +245,7 @@ class AgentSession:
         self._route_requires_websearch = route_requires_websearch
         self._deliverable_skip_mandatory_web = deliverable_skip_mandatory_web
         self._user_wants_written_deliverable = user_wants_written_deliverable
-        self._interactive_turn_user_message = interactive_turn_user_message
+        self._prepare_agent_turn_messages = prepare_agent_turn_messages
         # Shallow copy only: ``call_mcp_tool`` (and other callables) close over ``AgentApp``; after MCP sync the
         # app may hold live ``StdioMcpSession`` objects with ``threading.Lock``, which ``deepcopy`` cannot handle.
         # Per-session isolation is handled via ``replace(session_cwd=…)`` and ``_rebind_session_fs_tools``.
@@ -1140,7 +1140,7 @@ class AgentSession:
         if self._deliverable_skip_mandatory_web(user_query):
             router_query = None
         web_required = bool(router_query)
-        turn_msg = self._interactive_turn_user_message(
+        agent_system_message, turn_user = self._prepare_agent_turn_messages(
             user_query,
             today_str,
             self.second_opinion_on,
@@ -1152,7 +1152,7 @@ class AgentSession:
             system_instruction_override=self.session_system_prompt,
             skill_suffix=sprompt0,
         )
-        self.messages.append({"role": "user", "content": turn_msg})
+        self.messages.append({"role": "user", "content": turn_user})
         _mw = preferred_web_search_tool(et_turn)
         if router_query and _mw:
             self.messages.append(
@@ -1187,6 +1187,7 @@ class AgentSession:
             max_agent_steps_web=msw,
             max_tool_calls_web=mtcw,
             max_fetch_page_web=mfpw,
+            agent_system_message=agent_system_message,
         )
         if self.session_save_path:
             try:
@@ -1300,7 +1301,7 @@ class AgentSession:
                     tit_one += "…"
                 self._agent_progress(f"Workflow step {i}/{len(steps)}: {tit_one}")
                 sprompt0 = skill_prompt
-                turn_msg = self._interactive_turn_user_message(
+                step_system, step_user_msg = self._prepare_agent_turn_messages(
                     step_user,
                     today_str,
                     self.second_opinion_on,
@@ -1312,7 +1313,7 @@ class AgentSession:
                     system_instruction_override=self.session_system_prompt,
                     skill_suffix=sprompt0,
                 )
-                self.messages.append({"role": "user", "content": turn_msg})
+                self.messages.append({"role": "user", "content": step_user_msg})
                 _mw_step = preferred_web_search_tool(et_step)
                 if router_query and _mw_step and i == 1:
                     self.messages.append(
@@ -1347,6 +1348,7 @@ class AgentSession:
                     max_agent_steps_web=msw,
                     max_tool_calls_web=mtcw,
                     max_fetch_page_web=mfpw,
+                    agent_system_message=step_system,
                 )
                 self._agent_progress(f"Step {i}/{len(steps)} finished.")
                 if final_answer:
@@ -1362,7 +1364,7 @@ class AgentSession:
             return
 
         self._agent_progress("Running a single agent turn with the selected skill…")
-        turn_msg = self._interactive_turn_user_message(
+        skill_system, skill_user = self._prepare_agent_turn_messages(
             req,
             today_str,
             self.second_opinion_on,
@@ -1374,7 +1376,7 @@ class AgentSession:
             system_instruction_override=self.session_system_prompt,
             skill_suffix=skill_prompt,
         )
-        self.messages.append({"role": "user", "content": turn_msg})
+        self.messages.append({"role": "user", "content": skill_user})
         _mw2 = preferred_web_search_tool(et_turn)
         if router_query and _mw2:
             self.messages.append(
@@ -1408,6 +1410,7 @@ class AgentSession:
             max_agent_steps_web=msw,
             max_tool_calls_web=mtcw,
             max_fetch_page_web=mfpw,
+            agent_system_message=skill_system,
         )
 
     def _repl_register_extension_command(self, key: str, handler: Callable[..., SessionLineResult]) -> None:
@@ -2718,8 +2721,10 @@ class AgentSession:
         except (OSError, ValueError, json.JSONDecodeError) as e:
             sink_print_compat(f"Context load error: {e}")
             return SessionLineResult()
-        self.messages[:] = loaded
-        sink_print_compat(f"Loaded {len(loaded)} message(s) from {path!r}.")
+        from agentlib import prompts
+
+        self.messages[:] = prompts.normalize_transcript_messages(loaded)
+        sink_print_compat(f"Loaded {len(self.messages)} message(s) from {path!r}.")
         return SessionLineResult()
 
     def _context_snapshot_save_path(self, path: str) -> SessionLineResult:

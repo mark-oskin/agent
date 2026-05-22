@@ -1430,7 +1430,7 @@ class AgentTuiApp(App[None]):
         chat._line_cache.clear()
         chat.refresh()
 
-    def _chat_rewrite_live_answer(self, lane: int) -> None:
+    def _chat_rewrite_live_draft(self, lane: int) -> None:
         buf = self._chat_live_buf.get(lane, "")
         chat = self._chat_logs[lane]
         if self._chat_stream_open.get(lane):
@@ -1439,20 +1439,34 @@ class AgentTuiApp(App[None]):
             self._chat_stream_line_start[lane] = len(chat.lines)
         self._chat_stream_open[lane] = True
         chat.write(
-            Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(buf)}"),
+            Text.from_markup(f"[bold dim]Draft[/bold dim]\n{escape(buf)}"),
             scroll_end=True,
         )
         chat.refresh()
+
+    def _write_final_answer_block(self, lane: int, text: str) -> None:
+        body = (text or "").strip()
+        if not body:
+            return
+        self._chat_close_live_answer(lane)
+        chat = self._chat_logs[lane]
+        chat.write(
+            Text.from_markup(f"[bold green]Final[/bold green]\n{escape(body)}\n"),
+            scroll_end=True,
+        )
 
     def _chat_append_answer_delta(self, lane: int, delta: str) -> None:
         if not delta:
             return
         self._hide_thinking_panel(lane)
+        from agentlib.llm.streaming import merge_visible_answer_text
+
         buf = self._chat_live_buf.get(lane, "")
-        if buf.endswith(delta):
+        merged = merge_visible_answer_text(buf, delta)
+        if merged == buf:
             return
-        self._chat_live_buf[lane] = buf + delta
-        self._chat_rewrite_live_answer(lane)
+        self._chat_live_buf[lane] = merged
+        self._chat_rewrite_live_draft(lane)
 
     def _chat_close_live_answer(self, lane: int) -> None:
         """End a streamed reply without re-printing it (already shown via partial updates)."""
@@ -1605,17 +1619,18 @@ class AgentTuiApp(App[None]):
             chat.write(Text.from_markup(f"[{style}]{escape(text)}[/{style}]"))
             return
 
+        if t == "final_answer":
+            self._hide_thinking_panel(lane)
+            self._write_final_answer_block(lane, text)
+            return
+
         if t == "answer":
             self._hide_thinking_panel(lane)
             if partial:
                 self._track_gen_rate_delta(lane, text)
                 self._chat_append_answer_delta(lane, text)
                 return
-            if self._chat_stream_open.get(lane):
-                self._chat_live_buf[lane] = text
-                self._chat_close_live_answer(lane)
-                return
-            chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(text)}\n"))
+            self._write_final_answer_block(lane, text)
             return
 
         if t == "output":
@@ -1749,12 +1764,9 @@ class AgentTuiApp(App[None]):
                 return
 
             if res.get("type") == "turn":
-                if res.get("answer_streamed"):
-                    self._chat_close_live_answer(lane)
-                else:
-                    ans = res.get("answer")
-                    if isinstance(ans, str) and ans.strip():
-                        chat.write(Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(ans)}\n"))
+                ans = res.get("answer")
+                if isinstance(ans, str) and ans.strip():
+                    self._write_final_answer_block(lane, ans)
         finally:
             self._reset_chat_live_answer(lane)
             self._thinking_buf[lane] = ""

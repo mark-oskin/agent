@@ -191,6 +191,115 @@ def runner_instruction_bits(
     return " ".join(bits) if bits else ""
 
 
+_JSON_ONLY_TAIL = "Respond with JSON only. No other text."
+
+
+def build_agent_system_message(
+    *,
+    today_str: str,
+    second_opinion: bool,
+    cloud: bool,
+    primary_profile,
+    reviewer_ollama_model: Optional[str],
+    reviewer_hosted_profile,
+    enabled_tools: Optional[AbstractSet[str]],
+    system_instruction_override: Optional[str],
+    skill_suffix: Optional[str],
+    ollama_model: str,
+    hosted_review_ready: Callable[[bool, object], bool],
+    tool_policy_runner_text: Callable[[Optional[AbstractSet[str]]], str],
+) -> str:
+    """Agent contract + runner context; sent once per LLM API call (not stored in transcript)."""
+    si = effective_system_instruction_text_for_tools(system_instruction_override, enabled_tools)
+    suff = (skill_suffix or "").strip()
+    if suff:
+        si = si + "\n\n--- Active skill ---\n" + suff
+    os_line = platform.platform()
+    block = (
+        f"{si}\n\n"
+        f"Today's date (system clock): {today_str}\n\n"
+        f"User operating system: {os_line}\n\n"
+        f"{_JSON_ONLY_TAIL}"
+    )
+    ri = runner_instruction_bits(
+        second_opinion=second_opinion,
+        cloud=cloud,
+        primary_profile=primary_profile,
+        reviewer_hosted_profile=reviewer_hosted_profile,
+        reviewer_ollama_model=reviewer_ollama_model,
+        enabled_tools=enabled_tools,
+        ollama_model=ollama_model,
+        hosted_review_ready=hosted_review_ready,
+        tool_policy_runner_text=tool_policy_runner_text,
+    )
+    if ri:
+        block += "\n\n" + ri
+    return block
+
+
+def interactive_turn_user_content(user_query: str, *, continuation: bool = False) -> str:
+    """User turn text stored in session transcript (no system instructions)."""
+    uq = (user_query or "").strip()
+    if continuation:
+        return f"New user request:\n{uq}"
+    return f"User request:\n{uq}"
+
+
+def strip_legacy_agent_turn_user_content(content: str) -> str:
+    """
+    Older sessions embedded the full system prompt in user messages.
+    Extract the user request portion when loading legacy transcripts.
+    """
+    text = (content or "").strip()
+    if not text:
+        return text
+    if not text.startswith("You are a universal agent"):
+        return content
+    for marker in ("New user request:\n", "User request:\n", "User request: "):
+        idx = text.rfind(marker)
+        if idx < 0:
+            continue
+        tail = text[idx + len(marker) :].strip()
+        for suffix in (
+            f"\n\n{_JSON_ONLY_TAIL}",
+            f"\n{_JSON_ONLY_TAIL}",
+            _JSON_ONLY_TAIL,
+            "\n\nContinue the conversation. Respond with JSON only. No other text.",
+        ):
+            if tail.endswith(suffix):
+                tail = tail[: -len(suffix)].strip()
+        if tail:
+            return f"{marker}{tail}" if marker.startswith("New") else f"User request:\n{tail}"
+    return content
+
+
+def normalize_transcript_messages(messages: list) -> list:
+    """Normalize loaded/saved transcripts to slim user lines (no embedded system prompt)."""
+    out: list = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = (m.get("role") or "").strip().lower()
+        content = m.get("content")
+        if content is None:
+            content = ""
+        elif not isinstance(content, str):
+            content = str(content)
+        if role == "user":
+            content = strip_legacy_agent_turn_user_content(content)
+        out.append({"role": role, "content": content})
+    return out
+
+
+def messages_for_agent_api_call(transcript: list, system_content: str) -> list:
+    """Prepend one system message; normalize legacy user lines for API payload."""
+    conv = normalize_transcript_messages(transcript)
+    system = (system_content or "").strip()
+    if not system:
+        return conv
+    return [{"role": "system", "content": system}] + conv
+
+
 def interactive_turn_user_message(
     *,
     user_query: str,
@@ -207,30 +316,21 @@ def interactive_turn_user_message(
     hosted_review_ready: Callable[[bool, object], bool],
     tool_policy_runner_text: Callable[[Optional[AbstractSet[str]]], str],
 ) -> str:
-    si = effective_system_instruction_text_for_tools(system_instruction_override, enabled_tools)
-    suff = (skill_suffix or "").strip()
-    if suff:
-        si = si + "\n\n--- Active skill ---\n" + suff
-    os_line = platform.platform()
-    block = (
-        f"{si}\n\n"
-        f"Today's date (system clock): {today_str}\n\n"
-        f"User operating system: {os_line}\n\n"
-        f"User request:\n{user_query}\n\n"
-        "Respond with JSON only. No other text."
-    )
-    ri = runner_instruction_bits(
+    """Legacy combined turn block (system + user). Prefer build_agent_system_message + user_content."""
+    system = build_agent_system_message(
+        today_str=today_str,
         second_opinion=second_opinion,
         cloud=cloud,
         primary_profile=primary_profile,
-        reviewer_hosted_profile=reviewer_hosted_profile,
         reviewer_ollama_model=reviewer_ollama_model,
+        reviewer_hosted_profile=reviewer_hosted_profile,
         enabled_tools=enabled_tools,
+        system_instruction_override=system_instruction_override,
+        skill_suffix=skill_suffix,
         ollama_model=ollama_model,
         hosted_review_ready=hosted_review_ready,
         tool_policy_runner_text=tool_policy_runner_text,
     )
-    if ri:
-        block += "\n\n" + ri
-    return block
+    user = interactive_turn_user_content(user_query)
+    return f"{system}\n\n{user}"
 

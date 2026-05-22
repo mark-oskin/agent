@@ -6,6 +6,7 @@ import re
 from typing import AbstractSet, Any, Optional, Tuple
 
 from agentlib.agent_json import consume_last_json_parse_note
+from agentlib.prompts import messages_for_agent_api_call
 from agentlib.sink import sink_emit
 from agentlib.tools import mcp_registry, turn_support
 from agentlib.tools.routing import preferred_web_search_tool
@@ -144,6 +145,7 @@ def run_agent_conversation_turn(
     max_agent_steps_web: int = 15,
     max_tool_calls_web: int = 15,
     max_fetch_page_web: int = 15,
+    agent_system_message: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     from agentlib.llm import streaming as llm_streaming
 
@@ -180,8 +182,9 @@ def run_agent_conversation_turn(
             verbose=verbose,
             context_cfg=context_cfg,
         )
+        api_messages = messages_for_agent_api_call(messages, agent_system_message or "")
         response_text = deps.call_ollama_chat(
-            messages, primary_profile, et, verbose=verbose
+            api_messages, primary_profile, et, verbose=verbose
         )
         response_data = deps.parse_agent_json(response_text)
         note = consume_last_json_parse_note()

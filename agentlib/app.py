@@ -1023,7 +1023,7 @@ class AgentApp:
                 return describe_llm_profile_short(hosted)
             return f"ollama ({(ollama_model or self.ollama_second_opinion_model())!r})"
 
-        def interactive_turn_user_message(
+        def prepare_agent_turn_messages(
             user_query: str,
             today_str: str,
             second_opinion: bool,
@@ -1035,24 +1035,26 @@ class AgentApp:
             enabled_tools=None,
             system_instruction_override: Optional[str] = None,
             skill_suffix: Optional[str] = None,
-        ) -> str:
-            return prompts.interactive_turn_user_message(
-                user_query=user_query,
+            continuation: bool = False,
+        ) -> tuple:
+            prof = primary_profile or default_primary_llm_profile()
+            kw = dict(
                 today_str=today_str,
                 second_opinion=second_opinion,
                 cloud=cloud,
-                primary_profile=primary_profile or default_primary_llm_profile(),
+                primary_profile=prof,
                 reviewer_ollama_model=reviewer_ollama_model,
                 reviewer_hosted_profile=reviewer_hosted_profile,
                 enabled_tools=enabled_tools,
                 system_instruction_override=system_instruction_override,
                 skill_suffix=skill_suffix,
-                ollama_model=effective_ollama_model_from_profile(
-                    primary_profile or default_primary_llm_profile(), self.ollama_model()
-                ),
+                ollama_model=effective_ollama_model_from_profile(prof, self.ollama_model()),
                 hosted_review_ready=hosted_review_ready,
                 tool_policy_runner_text=self.registry.tool_policy_runner_text,
             )
+            system = prompts.build_agent_system_message(**kw)
+            user = prompts.interactive_turn_user_content(user_query, continuation=continuation)
+            return system, user
 
         def call_while_judge(condition: str, messages: list, *, primary_profile, verbose: int) -> int:
             return call_while_condition_judge(
@@ -1108,7 +1110,7 @@ class AgentApp:
             route_requires_websearch=self.route_requires_websearch,
             deliverable_skip_mandatory_web=deliverable_skip_mandatory_web,
             user_wants_written_deliverable=user_wants_written_deliverable,
-            interactive_turn_user_message=interactive_turn_user_message,
+            prepare_agent_turn_messages=prepare_agent_turn_messages,
             conversation_turn_deps=self.conversation_turn_deps(),
             save_context_bundle=save_context_bundle,
             load_context_messages=load_context_messages,
@@ -1234,10 +1236,23 @@ class AgentApp:
             )
             return
 
-        # One-shot: keep legacy behavior for now by calling the shared runtime directly.
+        # One-shot CLI turn (system message injected per LLM call, not stored in transcript).
         user_query = " ".join(query_parts)
         today_str = datetime.date.today().strftime("%Y-%m-%d (%A)")
-        messages = [{"role": "user", "content": user_query}]
+        agent_system = cli_build_agent_system_message(
+            self,
+            today_str=today_str,
+            second_opinion_enabled=second_opinion_enabled,
+            cloud_ai_enabled=cloud_ai_enabled,
+            primary_profile=parsed.primary_profile,
+            reviewer_ollama_model=reviewer_ollama_model,
+            reviewer_hosted_profile=reviewer_hosted_profile,
+            enabled_tools=frozenset(enabled_tools),
+            system_instruction_override=st.get("system_prompt"),
+        )
+        messages = [
+            {"role": "user", "content": prompts.interactive_turn_user_content(user_query)},
+        ]
         lb_ms, lb_msw, lb_mtcw, lb_mfpw = self.agent_loop_budget()
         answered, final_answer = run_agent_conversation_turn(
             messages,
@@ -1260,10 +1275,13 @@ class AgentApp:
             max_agent_steps_web=lb_msw,
             max_tool_calls_web=lb_mtcw,
             max_fetch_page_web=lb_mfpw,
+            agent_system_message=agent_system,
         )
         _ = answered
         if final_answer:
-            print(final_answer)
+            from agentlib.sink import print_turn_final_answer
+
+            print_turn_final_answer(final_answer)
         if save_context_path:
             try:
                 save_context_bundle(save_context_path, messages, user_query, final_answer, answered)
@@ -1280,17 +1298,7 @@ def default_app() -> AgentApp:
     return AgentApp(settings=settings, registry=registry, project_dir=project_dir)
 
 
-def _runner_instruction_bits(
-    app: "AgentApp",
-    second_opinion_enabled: bool,
-    cloud_ai_enabled: bool,
-    *,
-    primary_profile,
-    reviewer_ollama_model: Optional[str],
-    reviewer_hosted_profile: Optional[LlmProfile],
-    enabled_tools: AbstractSet[str],
-    tool_policy_runner_text: Callable[[Optional[AbstractSet[str]]], str],
-) -> str:
+def _cli_hosted_review_ready(app: "AgentApp") -> Callable[[bool, object], bool]:
     def hosted_review_ready(cloud: bool, reviewer) -> bool:
         if cloud and app.settings.get_str(("openai", "api_key"), "").strip():
             return True
@@ -1302,6 +1310,49 @@ def _runner_instruction_bits(
             return True
         return False
 
+    return hosted_review_ready
+
+
+def cli_build_agent_system_message(
+    app: "AgentApp",
+    *,
+    today_str: str,
+    second_opinion_enabled: bool,
+    cloud_ai_enabled: bool,
+    primary_profile,
+    reviewer_ollama_model: Optional[str],
+    reviewer_hosted_profile: Optional[LlmProfile],
+    enabled_tools: AbstractSet[str],
+    system_instruction_override: Optional[str] = None,
+    skill_suffix: Optional[str] = None,
+) -> str:
+    return prompts.build_agent_system_message(
+        today_str=today_str,
+        second_opinion=second_opinion_enabled,
+        cloud=cloud_ai_enabled,
+        primary_profile=primary_profile,
+        reviewer_ollama_model=reviewer_ollama_model,
+        reviewer_hosted_profile=reviewer_hosted_profile,
+        enabled_tools=enabled_tools,
+        system_instruction_override=system_instruction_override,
+        skill_suffix=skill_suffix,
+        ollama_model=effective_ollama_model_from_profile(primary_profile, app.ollama_model()),
+        hosted_review_ready=_cli_hosted_review_ready(app),
+        tool_policy_runner_text=app.registry.tool_policy_runner_text,
+    )
+
+
+def _runner_instruction_bits(
+    app: "AgentApp",
+    second_opinion_enabled: bool,
+    cloud_ai_enabled: bool,
+    *,
+    primary_profile,
+    reviewer_ollama_model: Optional[str],
+    reviewer_hosted_profile: Optional[LlmProfile],
+    enabled_tools: AbstractSet[str],
+    tool_policy_runner_text: Callable[[Optional[AbstractSet[str]]], str],
+) -> str:
     return prompts.runner_instruction_bits(
         second_opinion=second_opinion_enabled,
         cloud=cloud_ai_enabled,
@@ -1310,7 +1361,7 @@ def _runner_instruction_bits(
         reviewer_ollama_model=reviewer_ollama_model,
         enabled_tools=enabled_tools,
         ollama_model=app.ollama_model(),
-        hosted_review_ready=hosted_review_ready,
+        hosted_review_ready=_cli_hosted_review_ready(app),
         tool_policy_runner_text=tool_policy_runner_text,
     )
 
@@ -1430,45 +1481,37 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
                 )
                 return
 
-    si0 = prompts.effective_system_instruction_text_for_tools(sys_prompt_override, frozenset(enabled_tools))
-    os_line = platform.platform()
-    first_user = (
-        f"{si0}\n\n"
-        f"Today's date (system clock): {today_str}\n\n"
-        f"User operating system: {os_line}\n\n"
-        f"User request: {user_query}\n\n"
-        "Respond with JSON only. No other text."
-    )
-    ri = _runner_instruction_bits(
+    agent_system = cli_build_agent_system_message(
         app0,
-        second_opinion_enabled,
-        cloud_ai_enabled,
+        today_str=today_str,
+        second_opinion_enabled=second_opinion_enabled,
+        cloud_ai_enabled=cloud_ai_enabled,
         primary_profile=primary_profile,
         reviewer_ollama_model=reviewer_ollama_model,
         reviewer_hosted_profile=reviewer_hosted_profile,
         enabled_tools=frozenset(enabled_tools),
-        tool_policy_runner_text=app0.registry.tool_policy_runner_text,
+        system_instruction_override=sys_prompt_override,
     )
-    if ri:
-        first_user += "\n\n" + ri
 
     if load_context_path:
         try:
-            messages = load_context_messages(load_context_path)
+            messages = prompts.normalize_transcript_messages(load_context_messages(load_context_path))
         except Exception as e:
             print(f"Error loading context: {e}")
             return
-        cont = (
-            f"Today's date (system clock): {today_str}\n\n"
-            f"User operating system: {os_line}\n\n"
-            f"New user request:\n{user_query}\n\n"
-            "Continue the conversation. Respond with JSON only. No other text."
+        messages.append(
+            {
+                "role": "user",
+                "content": prompts.interactive_turn_user_content(user_query, continuation=True),
+            }
         )
-        if ri:
-            cont += "\n\n" + ri
-        messages.append({"role": "user", "content": cont})
     else:
-        messages = [{"role": "user", "content": first_user}]
+        messages = [
+            {
+                "role": "user",
+                "content": prompts.interactive_turn_user_content(user_query),
+            }
+        ]
 
     router_query = app0.route_requires_websearch(
         user_query, today_str, primary_profile, frozenset(enabled_tools), transcript_messages=messages
@@ -1511,9 +1554,12 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
         max_agent_steps_web=lb_msw,
         max_tool_calls_web=lb_mtcw,
         max_fetch_page_web=lb_mfpw,
+        agent_system_message=agent_system,
     )
     if final_answer:
-        print(final_answer)
+        from agentlib.sink import print_turn_final_answer
+
+        print_turn_final_answer(final_answer)
 
     if save_context_path:
         try:

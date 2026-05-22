@@ -94,7 +94,7 @@ def build_test_session(
             return True
         return False
 
-    def interactive_turn_user_message(
+    def prepare_agent_turn_messages(
         user_query: str,
         today_str: str,
         second_opinion: bool,
@@ -106,13 +106,14 @@ def build_test_session(
         enabled_tools=None,
         system_instruction_override: Optional[str] = None,
         skill_suffix: Optional[str] = None,
-    ) -> str:
-        return prompts.interactive_turn_user_message(
-            user_query=user_query,
+        continuation: bool = False,
+    ) -> tuple:
+        prof = primary_profile or default_primary_llm_profile()
+        kw = dict(
             today_str=today_str,
             second_opinion=second_opinion,
             cloud=cloud,
-            primary_profile=primary_profile or default_primary_llm_profile(),
+            primary_profile=prof,
             reviewer_ollama_model=reviewer_ollama_model,
             reviewer_hosted_profile=reviewer_hosted_profile,
             enabled_tools=enabled_tools,
@@ -121,6 +122,10 @@ def build_test_session(
             ollama_model=app.ollama_model(),
             hosted_review_ready=hosted_review_ready,
             tool_policy_runner_text=app.registry.tool_policy_runner_text,
+        )
+        return (
+            prompts.build_agent_system_message(**kw),
+            prompts.interactive_turn_user_content(user_query, continuation=continuation),
         )
 
     def call_while_judge(condition: str, messages: list, *, primary_profile, verbose: int) -> int:
@@ -171,7 +176,7 @@ def build_test_session(
         route_requires_websearch=app.route_requires_websearch,
         deliverable_skip_mandatory_web=lambda _q: False,
         user_wants_written_deliverable=lambda _q: False,
-        interactive_turn_user_message=interactive_turn_user_message,
+        prepare_agent_turn_messages=prepare_agent_turn_messages,
         conversation_turn_deps=app.conversation_turn_deps(),
         save_context_bundle=save_context_bundle,
         load_context_messages=load_context_messages,
@@ -235,6 +240,20 @@ def build_agent_json_deps(app) -> object:
         coerce_enabled_tools=app.registry.coerce_enabled_tools,
         merge_tool_param_aliases=turn_support.merge_tool_param_aliases,
     )
+
+
+def normalize_cli_stdout_for_tests(stdout: str) -> str:
+    """Strip Draft/Final labels so tests can assert on answer body only."""
+    s = (stdout or "").strip()
+    if not s:
+        return s
+    from agentlib.sink import DRAFT_LABEL, FINAL_LABEL
+
+    if FINAL_LABEL in s:
+        return s.split(FINAL_LABEL, 1)[-1].strip()
+    if s.startswith(DRAFT_LABEL):
+        return s.split(DRAFT_LABEL, 1)[-1].strip()
+    return s
 
 
 def run_main(
@@ -351,7 +370,7 @@ def run_main(
     buf = io.StringIO()
     with redirect_stdout(buf):
         app_main(argv, app=app)
-    return buf.getvalue().strip()
+    return normalize_cli_stdout_for_tests(buf.getvalue())
 
 
 def j(**kwargs: Any) -> str:

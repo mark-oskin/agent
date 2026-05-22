@@ -56,10 +56,11 @@ def run_interactive_repl_loop(
         pref = res.get("prefill_prompt")
         if isinstance(pref, str) and pref.strip():
             print(pref)
-        # For normal turns, `execute_line` returns the answer in the payload.
-        if not res.get("answer_streamed"):
+        if res.get("type") == "turn":
+            from agentlib.sink import print_turn_final_answer
+
             ans = res.get("answer")
             if isinstance(ans, str) and ans.strip():
-                print(ans)
+                print_turn_final_answer(ans)
 
     flush_repl_history()

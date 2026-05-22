@@ -156,7 +156,7 @@ def build_embedded_session(
             return True
         return False
 
-    def interactive_turn_user_message(
+    def prepare_agent_turn_messages(
         user_query: str,
         today_str: str,
         second_opinion: bool,
@@ -168,25 +168,28 @@ def build_embedded_session(
         enabled_tools=None,
         system_instruction_override: Optional[str] = None,
         skill_suffix: Optional[str] = None,
-    ) -> str:
+        continuation: bool = False,
+    ) -> tuple:
         from agentlib import prompts
 
-        return prompts.interactive_turn_user_message(
-            user_query=user_query,
+        prof = primary_profile or default_primary_llm_profile()
+        kw = dict(
             today_str=today_str,
             second_opinion=second_opinion,
             cloud=cloud,
-            primary_profile=primary_profile or default_primary_llm_profile(),
+            primary_profile=prof,
             reviewer_ollama_model=reviewer_ollama_model,
             reviewer_hosted_profile=reviewer_hosted_profile,
             enabled_tools=enabled_tools,
             system_instruction_override=system_instruction_override,
             skill_suffix=skill_suffix,
-            ollama_model=effective_ollama_model_from_profile(
-                primary_profile or default_primary_llm_profile(), app.ollama_model()
-            ),
+            ollama_model=effective_ollama_model_from_profile(prof, app.ollama_model()),
             hosted_review_ready=hosted_review_ready,
             tool_policy_runner_text=app.registry.tool_policy_runner_text,
+        )
+        return (
+            prompts.build_agent_system_message(**kw),
+            prompts.interactive_turn_user_content(user_query, continuation=continuation),
         )
 
     def call_while_judge(condition: str, messages: list, *, primary_profile, verbose: int) -> int:
@@ -257,7 +260,7 @@ def build_embedded_session(
         route_requires_websearch=app.route_requires_websearch,
         deliverable_skip_mandatory_web=deliverable_skip_mandatory_web,
         user_wants_written_deliverable=user_wants_written_deliverable,
-        interactive_turn_user_message=interactive_turn_user_message,
+        prepare_agent_turn_messages=prepare_agent_turn_messages,
         conversation_turn_deps=app.conversation_turn_deps(),
         save_context_bundle=save_context_bundle,
         load_context_messages=load_context_messages,
