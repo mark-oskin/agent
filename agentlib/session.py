@@ -2844,6 +2844,39 @@ class AgentSession:
         sink_print_compat("Unknown /set extensions subcommand. Try: show | set | unset")
         return SessionLineResult()
 
+    def _set_tool_or_toolset(self, phrase: str, *, enable: bool) -> bool:
+        """Enable or disable a core/plugin tool id or a plugin toolset by phrase. Returns True if handled."""
+        nm = phrase.strip().lower()
+        if not nm:
+            sink_print_compat("Usage: /set tools <tool or toolset> enable|disable")
+            return True
+        plugin_toolsets = self._registry.plugin_toolsets
+        if nm in plugin_toolsets:
+            if enable:
+                self.enabled_toolsets.add(nm)
+                for tid in self._registry.plugin_tools_for_toolset(nm):
+                    self.enabled_tools.add(tid)
+                sink_print_compat(
+                    f"Toolset enabled: {nm!r} (tools may be routed per request). Use /set save to persist."
+                )
+            else:
+                self.enabled_toolsets.discard(nm)
+                for tid in self._registry.plugin_tools_for_toolset(nm):
+                    self.enabled_tools.discard(tid)
+                sink_print_compat(f"Toolset disabled: {nm!r}. Use /set save to persist.")
+            return True
+        tn = self._registry.normalize_tool_name(phrase)
+        if tn:
+            if enable:
+                self.enabled_tools.add(tn)
+                sink_print_compat(f"Tool enabled: {tn}")
+            else:
+                self.enabled_tools.discard(tn)
+                sink_print_compat(f"Tool disabled: {tn}")
+            return True
+        sink_print_compat(self._registry.format_unknown_tool_hint(phrase))
+        return True
+
     def _cmd_settings(self, s: str) -> SessionLineResult:
         try:
             toks = shlex.split(s)
@@ -2859,8 +2892,9 @@ class AgentSession:
                 "Usage:\n"
                 "  /set save\n"
                 "  /set model <ollama-model>   (local Ollama only; for hosted/Grok use /set primary llm hosted …)\n"
-                "  /set enable|disable <feature/tool>\n"
-                "  /set tools ...\n"
+                "  /set enable|disable <feature>   (second_opinion, stream_thinking, verbose, …)\n"
+                "  /set tools <tool|toolset> enable|disable\n"
+                "  /set tools list|reload|describe …\n"
                 "  /set system_prompt ...\n"
                 "  /set prompt_template ...\n"
                 "  /set context ...\n"
@@ -3002,35 +3036,20 @@ class AgentSession:
                             elif tid not in self.enabled_tools:
                                 reason = " (tool disabled)"
                             lines.append(f"       - {'on' if td_on else 'off'} {tid}{reason}")
-                    lines.append("Enable a toolset:  /set tools enable <toolset>")
-                    lines.append("Disable a toolset: /set tools disable <toolset>")
+                    lines.append("Enable:  /set tools <tool or toolset> enable   (e.g. /set tools web search enable)")
+                    lines.append("Disable: /set tools <tool or toolset> disable")
                     lines.append("Reload plugins:    /set tools reload")
-                    lines.append("Describe a tool:   /set tools describe <tool-id>")
+                    lines.append("Describe:          /set tools describe <tool-id>")
                     sink_print_compat("\n".join(lines))
                 return SessionLineResult()
-            if len(toks) >= 4 and toks[2].lower() in ("enable", "on"):
-                nm = toks[3].strip().lower()
-                plugin_toolsets = self._registry.plugin_toolsets
-                if nm in plugin_toolsets:
-                    self.enabled_toolsets.add(nm)
-                    for tid in self._registry.plugin_tools_for_toolset(nm):
-                        self.enabled_tools.add(tid)
-                    sink_print_compat(
-                        f"Toolset enabled: {nm!r} (tools may be routed per request). Use /set save to persist."
-                    )
-                else:
-                    sink_print_compat(f"Unknown toolset {nm!r}. Try: /set tools")
+            _tool_actions = frozenset({"enable", "disable", "on", "off"})
+            if len(toks) >= 4 and toks[2].lower() in _tool_actions:
+                phrase = " ".join(toks[3:])
+                self._set_tool_or_toolset(phrase, enable=toks[2].lower() in ("enable", "on"))
                 return SessionLineResult()
-            if len(toks) >= 4 and toks[2].lower() in ("disable", "off"):
-                nm = toks[3].strip().lower()
-                plugin_toolsets = self._registry.plugin_toolsets
-                if nm in plugin_toolsets:
-                    self.enabled_toolsets.discard(nm)
-                    for tid in self._registry.plugin_tools_for_toolset(nm):
-                        self.enabled_tools.discard(tid)
-                    sink_print_compat(f"Toolset disabled: {nm!r}. Use /set save to persist.")
-                else:
-                    sink_print_compat(f"Unknown toolset {nm!r}. Try: /set tools")
+            if len(toks) >= 4 and toks[-1].lower() in _tool_actions:
+                phrase = " ".join(toks[2:-1])
+                self._set_tool_or_toolset(phrase, enable=toks[-1].lower() in ("enable", "on"))
                 return SessionLineResult()
             if len(toks) >= 3 and toks[2].lower() in ("reload", "refresh"):
                 self._registry.load_plugin_toolsets(self.tools_dir)
@@ -3062,7 +3081,9 @@ class AgentSession:
                     return SessionLineResult()
                 sink_print_compat(self._registry.describe_tool_call_contract(tid))
                 return SessionLineResult()
-            sink_print_compat("Usage: /set tools [list] | enable <toolset> | disable <toolset>")
+            sink_print_compat(
+                "Usage: /set tools [list] | <tool or toolset> enable|disable | reload | describe <id>"
+            )
             return SessionLineResult()
 
         if key == "system_prompt":
@@ -3441,12 +3462,15 @@ class AgentSession:
         if key == "enable":
             if len(toks) < 3:
                 sink_print_compat(
-                    "Usage: /set enable second_opinion|<tool or phrase>\n"
-                    "  Examples: /set enable web search   /set enable shell   /set enable stream_thinking\n"
-                    "  See: /set tools"
+                    "Usage: /set enable <feature>\n"
+                    "  Examples: /set enable second_opinion   /set enable stream_thinking\n"
+                    "  Tools: /set tools <tool or phrase> enable   (see /set tools)"
                 )
                 return SessionLineResult()
             phrase = " ".join(toks[2:])
+            if self._registry.normalize_tool_name(phrase):
+                self._set_tool_or_toolset(phrase, enable=True)
+                return SessionLineResult()
             feat = self._registry.canonicalize_user_tool_phrase(phrase)
             if feat == "second_opinion":
                 self.second_opinion_on = True
@@ -3474,23 +3498,21 @@ class AgentSession:
                 self.verbose = 2
                 sink_print_compat(self._verbose_ack_message(self.verbose))
                 return SessionLineResult()
-            tn = self._registry.normalize_tool_name(phrase)
-            if tn:
-                self.enabled_tools.add(tn)
-                sink_print_compat(f"Tool enabled: {tn}")
-                return SessionLineResult()
             sink_print_compat(self._registry.format_unknown_tool_hint(phrase))
             return SessionLineResult()
 
         if key == "disable":
             if len(toks) < 3:
                 sink_print_compat(
-                    "Usage: /set disable second_opinion|<tool or phrase>\n"
-                    "  Examples: /set disable web search   /set disable shell   /set disable stream_thinking\n"
-                    "  See: /set tools"
+                    "Usage: /set disable <feature>\n"
+                    "  Examples: /set disable second_opinion   /set disable stream_thinking\n"
+                    "  Tools: /set tools <tool or phrase> disable   (see /set tools)"
                 )
                 return SessionLineResult()
             phrase = " ".join(toks[2:])
+            if self._registry.normalize_tool_name(phrase):
+                self._set_tool_or_toolset(phrase, enable=False)
+                return SessionLineResult()
             feat = self._registry.canonicalize_user_tool_phrase(phrase)
             if feat == "second_opinion":
                 self.second_opinion_on = False
@@ -3513,11 +3535,6 @@ class AgentSession:
             if feat == "verbose":
                 self.verbose = 0
                 sink_print_compat(self._verbose_ack_message(self.verbose))
-                return SessionLineResult()
-            tn = self._registry.normalize_tool_name(phrase)
-            if tn:
-                self.enabled_tools.discard(tn)
-                sink_print_compat(f"Tool disabled: {tn}")
                 return SessionLineResult()
             sink_print_compat(self._registry.format_unknown_tool_hint(phrase))
             return SessionLineResult()

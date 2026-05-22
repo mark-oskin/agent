@@ -23,8 +23,8 @@ description: Topic map for persisted and session preferences; /set help is the l
 | **`/set primary llm`** | **`ollama`** (local) or **`hosted <base_url> <model> [api_key]`** — primary chat backend. Preserves `request_options` where applicable. |
 | **`/set primary request_options`** | Per-primary sampling / generation map: **`show`**, **`clear`**, **`set`**, **`unset`**, **`merge`**, **`replace`** (JSON objects). |
 | **`/set second_opinion llm`** | Reviewer path: **`ollama [model]`** or **`hosted <base_url> <model> [api_key]`**. |
-| **`/set enable`** / **`/set disable`** | Features and tools by phrase: e.g. **`second_opinion`**, **`stream_thinking`**, **`verbose`**, or any known **tool id** / alias (see **`/set tools`**). |
-| **`/set tools`** | **`list`** (core + plugin toolsets), **`enable` / `disable` `<toolset>`**, **`reload`**, **`describe` `<tool-id>`** or toolset name. |
+| **`/set enable`** / **`/set disable`** | Session **features** only: **`second_opinion`**, **`stream_thinking`**, **`stream_assistant`**, **`verbose`**. Tool ids still work here but prefer **`/set tools …`**. |
+| **`/set tools`** | **`list`**, **`<tool or toolset> enable|disable`**, **`reload`**, **`describe` `<tool-id>`** (or toolset name). |
 | **`/mcp`** | Model Context Protocol — **`help`**, **`list`**, **`status`**, **`add`** (optional **`--framing ndjson`** for Python SDK stdio), **`remove`**, **`enable`** / **`disable`**, **`reload`**. See [Configuration & environment](environment.md#mcp-model-context-protocol). |
 | **`/set system_prompt`** | **`show`**, **`reset`**, **`pin`** (snapshot effective prompt), **`file`**, **`save`**, or inline text. |
 | **`/set prompt_template`** | **`list`**, **`show`**, **`use`**, **`default`**, **`set`**, **`delete`** — JSON templates under `prompt_templates_dir` / overlays. |

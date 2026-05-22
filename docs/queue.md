@@ -25,7 +25,7 @@ The toolset id is **`queue`**. It is **off** until you enable it (same rules as 
 **REPL (typical):**
 
 ```text
-/settings tools enable queue
+/set tools queue enable
 ```
 
 **Notes:**
@@ -128,7 +128,7 @@ Order is stable until you add more items or clear/replace the list.
 ## Unloading
 
 - **Extension:** `/unload` removes REPL slash handlers from loaded extension modules (see [REPL extensions](repl-extensions.md)).
-- **Toolset:** disable with **`/settings tools disable queue`** (or adjust enabled toolsets in your config).
+- **Toolset:** disable with **`/set tools queue disable`** (or adjust enabled toolsets in your config).
 
 ---
 

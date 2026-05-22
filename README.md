@@ -198,7 +198,7 @@ These are always defined by the agent; you can **disable** ones you do not want 
 
 Aliases exist for natural phrasing (e.g. “web search” → `search_web`); the REPL suggests names if you mistype one. Full table and parameter lines: **[docs/core-tools.md](docs/core-tools.md)**.
 
-**REPL:** `/settings tools` lists core tools and **plugin** toolsets. `/settings enable …` / `/settings disable …` accept a tool id or a phrase.
+**REPL:** `/set tools` lists core tools and **plugin** toolsets. `/set tools <tool or toolset> enable|disable` toggles them; `/set enable` / `/set disable` are for session features (second opinion, streaming, verbose).
 
 **CLI:** `-enable-tool` / `-disable-tool` (same ids).
 
@@ -211,7 +211,7 @@ Extra tools ship as **Python modules** in a **tools directory**:
 
 Each plugin file defines a **`TOOLSET`** dict: `name`, `description`, optional `triggers` (keywords or `regex:…` patterns), and a list of tools (`id`, `description`, `aliases`, `handler`).
 
-- **Enabling:** `/settings tools enable <toolset>` turns on a toolset and its tools. Toolsets are **off** until you enable them.
+- **Enabling:** `/set tools <toolset> enable` turns on a toolset and its tools. Toolsets are **off** until you enable them.
 - **Routing:** If **multiple** toolsets are enabled, the agent tries to **expose only** toolsets whose triggers match the current user request (keeps the tool list smaller). If only **one** toolset is enabled, it is always considered active for that request. If nothing matches, enabled toolsets are all considered (fallback).
 - **Reload:** after adding a new `.py` file, run `/settings tools reload` so imports refresh without restarting.
 - **Details:** `/settings tools describe <tool-id>` or `<toolset-name>` for parameters and return shape (where documented).

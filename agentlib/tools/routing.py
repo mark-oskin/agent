@@ -201,8 +201,8 @@ def format_settings_tools_list(enabled_tools: AbstractSet[str]) -> str:
             on = "on" if tid in enabled_tools else "off"
             lines.append(f"  [{on}] {tid}")
     lines.append(
-        "You can use plain phrases, e.g. /set disable web search  "
-        "or  -disable_tool shell"
+        "Enable/disable: /set tools <id or phrase> enable|disable  "
+        "(e.g. /set tools web search enable)  or  -enable_tool shell"
     )
     lines.append(
         "Note: /skill or agent.skill_auto_match_triggers may narrow tools per message; "

@@ -16,7 +16,7 @@ The agent can merge **external tools** from [Model Context Protocol](https://mod
 
 **`/mcp enable`** connects servers for the whole process. Each session **automatically** enables discovered **`mcp_*`** tools when MCP is connected (no **`/mcp session on`** required). **`/mcp session off`** opts this session out; **`/mcp session on`** opts back in. **`/fork`** copies the parent's **`enabled_tools`** and opt-out flag.
 
-Use **`/set tools`** to see MCP tools with **`[on]`** / **`[off]`** per session, or **`/set enable`** / **`disable`** on individual **`mcp_*`** ids.
+Use **`/set tools`** to see MCP tools with **`[on]`** / **`[off]`** per session, or **`/set tools <mcp_id> enable|disable`** on individual **`mcp_*`** ids.
 
 ## REPL commands
 

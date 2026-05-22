@@ -15,7 +15,7 @@ Each module exports a **`TOOLSET`** dict: `name`, `description`, optional `trigg
 
 ## Enabling, routing, reload
 
-- **Enable:** `/settings tools enable <toolset-name>` (or disable individual tool ids).
+- **Enable:** `/set tools <toolset-name> enable` (e.g. `/set tools queue enable`).
 - **Routing:** With **multiple** toolsets enabled, the agent tries to expose only toolsets whose **triggers** match the current user message (smaller tool list). With **one** toolset enabled, it is always active. If nothing matches, all enabled toolsets are considered (fallback).
 - **Reload:** After adding a new `.py` file, `/settings tools reload` refreshes imports without restarting.
 - **Details:** `/settings tools describe <tool-id>` or `<toolset-name>` for parameters where documented.
@@ -41,7 +41,7 @@ Each module exports a **`TOOLSET`** dict: `name`, `description`, optional `trigg
 
 | Mechanism | What it adds | How you turn it on |
 |-----------|----------------|---------------------|
-| **Plugin toolset** | **LLM** `tool_call` handlers | `/settings tools enable …` |
+| **Plugin toolset** | **LLM** `tool_call` handlers | `/set tools <name> enable` |
 | **`/load` extension** | **Slash** commands (`/queue`, `/code`, …) | `/load path/to/extension.py` |
 
 Some features use **both** (for example **queue**: toolset `queue` + optional `/load extensions/queue_control.py`).

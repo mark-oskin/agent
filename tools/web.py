@@ -12,7 +12,7 @@ would require AppleScript / ``safaridriver`` and is not implemented here.
 
 Enable the toolset in-session::
 
-    /set tools enable browser
+    /set tools browser enable
     /set save
 
 Requires::

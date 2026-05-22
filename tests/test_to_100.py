@@ -500,6 +500,23 @@ def test_interactive_settings_thinking_and_stream_thinking(tmp_path, monkeypatch
     assert isinstance(session.settings.get_bool(("agent", "stream_thinking"), False), bool)
 
 
+def test_interactive_tools_toolset_enable_legacy_and_new_syntax(monkeypatch):
+    lines = [
+        "/set tools enable dev",
+        "/set tools dev disable",
+        "/set tools dev enable",
+        "/quit",
+    ]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "Toolset enabled: 'dev'" in out
+    assert "Toolset disabled: 'dev'" in out
+    assert "dev" in session.enabled_toolsets
+
+
 def test_interactive_settings_tools_lists_toolsets_and_describe(tmp_path, monkeypatch):
     lines = [
         "/set tools",
@@ -682,7 +699,23 @@ def test_cli_unknown_tool_prints_hint(monkeypatch):
     assert "list-tools" in out or "/set tools" in out
 
 
+def test_interactive_tools_phrase_enable_disable(monkeypatch):
+    lines = [
+        "/set tools web search disable",
+        "/set tools web search enable",
+        "/quit",
+    ]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _app, session = build_test_session(monkeypatch, verbose=0)
+        run_session_lines(session, lines)
+    out = buf.getvalue()
+    assert "Tool disabled: search_web" in out
+    assert "Tool enabled: search_web" in out
+
+
 def test_interactive_phrase_disable_enable_web_search(monkeypatch):
+    """Legacy /set enable|disable still works for tool phrases."""
     lines = [
         "/set disable web search",
         "/set enable web search",
@@ -699,8 +732,8 @@ def test_interactive_phrase_disable_enable_web_search(monkeypatch):
 
 def test_interactive_settings_tools(monkeypatch):
     lines = [
-        "/set disable search_web",
-        "/set enable search_web",
+        "/set tools search_web disable",
+        "/set tools search_web enable",
         "/quit",
     ]
     buf = io.StringIO()
