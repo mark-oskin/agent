@@ -191,6 +191,9 @@ def merge_stream_content(acc: str, chunk: str) -> str:
 
     Conservative rules only — do not drop chunks that happen to appear as
     substrings elsewhere in partial JSON (e.g. ``tool_call``).
+
+    When the model starts a fresh ``{...}`` object instead of extending ``acc``,
+    replace the buffer rather than concatenating (avoids glued JSON in Draft extract).
     """
     if not chunk:
         return acc
@@ -200,7 +203,18 @@ def merge_stream_content(acc: str, chunk: str) -> str:
         return chunk
     if acc.startswith(chunk):
         return acc
+    if _stream_content_is_fresh_json_object(acc, chunk):
+        return chunk
     return acc + chunk
+
+
+def _stream_content_is_fresh_json_object(acc: str, chunk: str) -> bool:
+    """True when ``chunk`` begins a new top-level JSON object, not a continuation of ``acc``."""
+    if not acc or not chunk:
+        return False
+    if chunk.startswith(acc) or acc.startswith(chunk):
+        return False
+    return chunk.lstrip().startswith("{")
 
 
 def merge_visible_answer_text(acc: str, chunk: str) -> str:
@@ -254,6 +268,14 @@ class _VisibleStreamState:
     last_eval_count: int = 0
     has_ollama_eval: bool = False
     cpt_estimator: Optional[CharsPerTokenEstimator] = None
+
+    def reset_answer_stream(self, *, stream_user_visible: bool = False) -> None:
+        """Forget Draft deltas after the model restarts its JSON object."""
+        self.answer_emitted_len = 0
+        self.tool_mode = None
+        self.tool_progress_emitted = False
+        if stream_user_visible:
+            sink_emit({"type": "answer_reset"})
 
 
 def _emit_gen_rate(state: _VisibleStreamState, *, stream_user_visible: bool) -> None:
@@ -309,9 +331,13 @@ def _record_ollama_eval_from_chunk(
 def _emit_visible_answer_delta(
     content: str, state: _VisibleStreamState, *, stream_user_visible: bool
 ) -> None:
-    answer = _extract_json_string_field(content, "answer", allow_unterminated=True)
+    answer = _extract_json_string_field(
+        content, "answer", allow_unterminated=True, use_last=True
+    )
     if answer is None:
         return
+    if len(answer) < state.answer_emitted_len:
+        state.reset_answer_stream()
     if len(answer) <= state.answer_emitted_len:
         return
     delta = answer[state.answer_emitted_len :]
@@ -398,7 +424,11 @@ def merge_stream_message_chunks(
             if show_thinking and thinking_started and not done_thinking_banner_printed:
                 sink_emit({"type": "thinking", "text": "\n\n[Done thinking]\n", "end": "", "partial": True})
                 done_thinking_banner_printed = True
-            acc["content"] = _merge_stream_content(acc["content"], chunk)
+            prev_content = acc["content"]
+            merged_content = _merge_stream_content(prev_content, chunk)
+            if _stream_content_is_fresh_json_object(prev_content, chunk) and merged_content == chunk:
+                vis.reset_answer_stream(stream_user_visible=stream_user_visible)
+            acc["content"] = merged_content
             _apply_content_chunk(
                 acc["content"],
                 chunk,
@@ -478,7 +508,11 @@ def merge_hosted_stream_chunks(
             if show_thinking and thinking_started and not done_thinking_banner_printed:
                 sink_emit({"type": "thinking", "text": "\n\n[Done thinking]\n", "end": "", "partial": True})
                 done_thinking_banner_printed = True
-            acc["content"] = _merge_stream_content(acc["content"], chunk)
+            prev_content = acc["content"]
+            merged_content = _merge_stream_content(prev_content, chunk)
+            if _stream_content_is_fresh_json_object(prev_content, chunk) and merged_content == chunk:
+                vis.reset_answer_stream(stream_user_visible=stream_user_visible)
+            acc["content"] = merged_content
             _apply_content_chunk(
                 acc["content"],
                 chunk,

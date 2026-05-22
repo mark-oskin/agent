@@ -8,6 +8,55 @@ from agentlib.llm import streaming as llm_streaming
 from agentlib.llm.streaming import merge_stream_content, merge_visible_answer_text
 
 
+def test_merge_stream_content_replaces_fresh_json_object():
+    first = '{"action":"answer","answer":"partial list'
+    restart = '{"action":"answer","answer":"Here are emails"}'
+    assert llm_streaming.merge_stream_content(first, restart) == restart
+    assert llm_streaming._stream_content_is_fresh_json_object(first, restart)
+
+
+def test_merge_stream_content_keeps_cumulative_prefix():
+    partial = '{"action":"answer","answer":"4'
+    full = '{"action":"answer","answer":"4"}'
+    assert llm_streaming.merge_stream_content(partial, full) == full
+    assert not llm_streaming._stream_content_is_fresh_json_object(partial, full)
+
+
+def test_stream_restart_does_not_bleed_glued_json_into_draft(monkeypatch):
+    """Second JSON object glued onto the first must not appear inside Draft answer text."""
+    emitted: list[dict] = []
+
+    def cap(ev: dict) -> None:
+        emitted.append(dict(ev))
+
+    monkeypatch.setattr(llm_streaming, "sink_emit", cap)
+    llm_streaming.reset_assistant_answer_streamed()
+
+    part1 = '{"action":"answer","answer":"Email one'
+    part2 = '"}'
+    restart = '{"action":"answer","answer":"Email two"}'
+    lines = [
+        json.dumps({"message": {"content": part1}, "done": False}),
+        json.dumps({"message": {"content": part2}, "done": False}),
+        json.dumps({"message": {"content": restart}, "done": True}),
+    ]
+    llm_streaming.merge_stream_message_chunks(
+        iter(lines),
+        stream_user_visible=True,
+        agent_stream_thinking_enabled=lambda: False,
+    )
+    draft_parts: list[str] = []
+    for e in emitted:
+        if e.get("type") == "answer_reset":
+            draft_parts = []
+        elif e.get("type") == "answer":
+            draft_parts.append(e.get("text", ""))
+    answer_text = "".join(draft_parts)
+    assert answer_text == "Email two"
+    assert '"action"' not in answer_text
+    assert any(e.get("type") == "answer_reset" for e in emitted)
+
+
 def test_merge_stream_content_cumulative_only():
     assert merge_stream_content("2 + 2 = ", "2 + 2 = 4") == "2 + 2 = 4"
     assert merge_stream_content("2 + 2 = 4", "2 + 2 = 4") == "2 + 2 = 4"

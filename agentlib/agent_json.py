@@ -229,20 +229,18 @@ def fallback_extract_answer_field(raw: str) -> Optional[str]:
     return None
 
 
-def _extract_json_string_field(
-    raw: str, field: str, *, allow_unterminated: bool = False
+_STREAM_ANSWER_UNTERMINATED_SENTINELS = (
+    '"},{"action"',
+    '"},{"tool"',
+    '"}',
+)
+
+
+def _read_json_quoted_string_body(
+    text: str, start: int, *, allow_unterminated: bool
 ) -> Optional[str]:
-    """
-    Scan for ``"field": "`` and read a JSON double-quoted string body with escape handling
-    (same rules as ``fallback_extract_answer_field``). Returns None if not found or unterminated,
-    unless ``allow_unterminated`` is True (then returns the partial string at EOF).
-    """
-    text = normalize_unicode_json_quotes(raw.strip())
-    pat = re.compile(r'"' + re.escape(field) + r'"\s*:\s*"')
-    m = pat.search(text)
-    if not m:
-        return None
-    i = m.end()
+    """Read a JSON string body starting at ``start`` (first char inside quotes)."""
+    i = start
     buf: list[str] = []
     escape = False
     while i < len(text):
@@ -287,8 +285,34 @@ def _extract_json_string_field(
         buf.append(c)
         i += 1
     if allow_unterminated and buf:
-        return "".join(buf)
+        joined = "".join(buf)
+        for marker in _STREAM_ANSWER_UNTERMINATED_SENTINELS:
+            pos = joined.find(marker)
+            if pos >= 0:
+                return joined[:pos]
+        return joined
     return None
+
+
+def _extract_json_string_field(
+    raw: str,
+    field: str,
+    *,
+    allow_unterminated: bool = False,
+    use_last: bool = False,
+) -> Optional[str]:
+    """
+    Scan for ``"field": "`` and read a JSON double-quoted string body with escape handling
+    (same rules as ``fallback_extract_answer_field``). Returns None if not found or unterminated,
+    unless ``allow_unterminated`` is True (then returns the partial string at EOF).
+    """
+    text = normalize_unicode_json_quotes(raw.strip())
+    pat = re.compile(r'"' + re.escape(field) + r'"\s*:\s*"')
+    matches = list(pat.finditer(text))
+    if not matches:
+        return None
+    m = matches[-1] if use_last else matches[0]
+    return _read_json_quoted_string_body(text, m.end(), allow_unterminated=allow_unterminated)
 
 
 def fallback_extract_run_applescript_field(raw: str) -> Optional[dict]:

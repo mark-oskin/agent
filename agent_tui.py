@@ -1624,6 +1624,11 @@ class AgentTuiApp(App[None]):
             self._write_final_answer_block(lane, text)
             return
 
+        if t == "answer_reset":
+            self._hide_thinking_panel(lane)
+            self._reset_chat_live_answer(lane)
+            return
+
         if t == "answer":
             self._hide_thinking_panel(lane)
             if partial:
