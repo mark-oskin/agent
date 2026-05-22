@@ -45,6 +45,7 @@ from agentlib.deliverables import (
     user_wants_written_deliverable,
 )
 from agentlib.llm import streaming, usage as llm_usage
+from agentlib.llm.token_estimate import CharsPerTokenEstimator
 from agentlib.llm.discovery import fetch_ollama_local_model_names as fetch_ollama_local_model_names_impl
 from agentlib.llm.calls import (
     call_hosted_agent_chat,
@@ -91,6 +92,7 @@ class AgentApp:
     _cached_turn_deps: Optional[ConversationTurnDeps] = None
     _repl_readline_installed: bool = False
     _last_ollama_usage: Optional[dict] = None
+    _chars_per_token_estimator: CharsPerTokenEstimator = field(default_factory=CharsPerTokenEstimator)
     _mcp_cluster: Optional[object] = field(default=None, repr=False)
     _mcp_resync_ticket: int = field(default=0, repr=False, init=False)
 
@@ -410,6 +412,7 @@ class AgentApp:
                 self.settings_get_bool(("agent", "stream_thinking"), False)
             ),
             ollama_usage_from_chat_response_fn=streaming.ollama_usage_from_chat_response,
+            chars_per_token_estimator=self._chars_per_token_estimator,
         )
 
     def merge_hosted_stream_chunks(self, sse_iter, *, stream_chunks: bool = False):
@@ -420,6 +423,7 @@ class AgentApp:
             agent_stream_thinking_enabled=lambda: bool(
                 self.settings_get_bool(("agent", "stream_thinking"), False)
             ),
+            chars_per_token_estimator=self._chars_per_token_estimator,
         )
 
     def call_ollama_chat(
@@ -662,6 +666,7 @@ class AgentApp:
                 call_hosted_chat_plain=self.call_hosted_chat_plain,
                 call_ollama_plaintext=lambda msgs, model: self.call_ollama_plaintext(msgs, model),
                 ollama_model=self.ollama_model(),
+                chars_per_token_estimator=self._chars_per_token_estimator,
                 summarize_conversation_fn=lambda **kwargs: summarize_conversation_for_context(
                     **kwargs,
                     call_hosted_chat_plain=self.call_hosted_chat_plain,
@@ -1095,7 +1100,8 @@ class AgentApp:
                 self.ollama_base_url(), http_get=requests.get, timeout=60
             ),
             format_last_ollama_usage_for_repl=lambda: llm_usage.format_last_ollama_usage_for_repl(
-                self._last_ollama_usage
+                self._last_ollama_usage,
+                self._chars_per_token_estimator,
             ),
             format_session_primary_llm_line=format_session_primary_llm_line,
             format_session_reviewer_line=format_session_reviewer_line,

@@ -245,7 +245,8 @@ def build_embedded_session(
             app.ollama_base_url(), http_get=requests.get, timeout=60
         ),
         format_last_ollama_usage_for_repl=lambda: llm_usage.format_last_ollama_usage_for_repl(
-            app._last_ollama_usage
+            app._last_ollama_usage,
+            app._chars_per_token_estimator,
         ),
         format_session_primary_llm_line=format_session_primary_llm_line,
         format_session_reviewer_line=format_session_reviewer_line,

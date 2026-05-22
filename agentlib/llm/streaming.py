@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional, Tuple
 
 from agentlib.agent_json import _extract_json_string_field
-from agentlib.llm.gen_rate import GenRateTracker, estimate_tokens_from_text
+from agentlib.llm.gen_rate import GenRateTracker
+from agentlib.llm.token_estimate import CharsPerTokenEstimator, estimate_tokens_from_text
 from agentlib.sink import sink_emit
 
 _assistant_answer_streamed: ContextVar[bool] = ContextVar("_assistant_answer_streamed", default=False)
@@ -252,6 +253,7 @@ class _VisibleStreamState:
     gen_rate: GenRateTracker = field(default_factory=GenRateTracker)
     last_eval_count: int = 0
     has_ollama_eval: bool = False
+    cpt_estimator: Optional[CharsPerTokenEstimator] = None
 
 
 def _emit_gen_rate(state: _VisibleStreamState, *, stream_user_visible: bool) -> None:
@@ -278,7 +280,7 @@ def _record_thinking_chunk_tokens(
         return
     _record_gen_tokens(
         state,
-        estimate_tokens_from_text(tchunk),
+        estimate_tokens_from_text(tchunk, estimator=state.cpt_estimator),
         stream_user_visible=stream_user_visible,
     )
 
@@ -322,7 +324,7 @@ def _emit_visible_answer_delta(
     if not state.has_ollama_eval and not state.tool_mode:
         _record_gen_tokens(
             state,
-            estimate_tokens_from_text(delta),
+            estimate_tokens_from_text(delta, estimator=state.cpt_estimator),
             stream_user_visible=stream_user_visible,
         )
 
@@ -359,6 +361,7 @@ def merge_stream_message_chunks(
     stream_user_visible: bool = False,
     agent_stream_thinking_enabled: Callable[[], bool],
     ollama_usage_from_chat_response_fn: Callable[[dict], Optional[dict]] = ollama_usage_from_chat_response,
+    chars_per_token_estimator: Optional[CharsPerTokenEstimator] = None,
 ) -> Tuple[dict, Optional[dict], bool]:
     """Merge streaming /api/chat chunks into one assistant message dict + final usage dict."""
     acc = {"role": "assistant", "content": "", "thinking": ""}
@@ -368,7 +371,7 @@ def merge_stream_message_chunks(
     thinking_started = False
     done_thinking_banner_printed = False
     saw_done = False
-    vis = _VisibleStreamState()
+    vis = _VisibleStreamState(cpt_estimator=chars_per_token_estimator)
     for line in lines_iter:
         if not line:
             continue
@@ -436,6 +439,10 @@ def merge_stream_message_chunks(
         acc["tool_calls"] = tool_calls
     if stream_user_visible and vis.answer_emitted_len > 0:
         sink_emit({"type": "output", "text": "", "end": "\n", "flush": True})
+    if chars_per_token_estimator is not None:
+        CharsPerTokenEstimator.observe_from_assistant_message(
+            chars_per_token_estimator, acc, usage
+        )
     return acc, usage, vis.streamed_content
 
 
@@ -445,6 +452,7 @@ def merge_hosted_stream_chunks(
     stream_chunks: bool = False,
     stream_user_visible: bool = False,
     agent_stream_thinking_enabled: Callable[[], bool],
+    chars_per_token_estimator: Optional[CharsPerTokenEstimator] = None,
 ) -> Tuple[dict, Optional[dict], bool]:
     """Merge OpenAI-style chat completion SSE into one assistant message dict."""
     acc = {"role": "assistant", "content": "", "thinking": ""}
@@ -452,7 +460,7 @@ def merge_hosted_stream_chunks(
     show_thinking = agent_stream_thinking_enabled()
     thinking_started = False
     done_thinking_banner_printed = False
-    vis = _VisibleStreamState()
+    vis = _VisibleStreamState(cpt_estimator=chars_per_token_estimator)
     for data in sse_iter:
         if not isinstance(data, dict):
             continue

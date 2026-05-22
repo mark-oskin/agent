@@ -164,7 +164,9 @@ def build_test_session(
         session_prompt_template=None,
         agent_progress=app.agent_progress,
         fetch_ollama_local_model_names=lambda: [],
-        format_last_ollama_usage_for_repl=lambda: llm_usage.format_last_ollama_usage_for_repl(None),
+        format_last_ollama_usage_for_repl=lambda: llm_usage.format_last_ollama_usage_for_repl(
+            None, app._chars_per_token_estimator
+        ),
         format_session_primary_llm_line=format_session_primary_llm_line,
         format_session_reviewer_line=format_session_reviewer_line,
         print_skill_usage_verbose=app.print_skill_usage_verbose,

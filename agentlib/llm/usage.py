@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from agentlib.llm.token_estimate import CharsPerTokenEstimator
 
 
 def ollama_eval_generation_tok_per_sec(usage: dict) -> Optional[float]:
@@ -36,16 +39,25 @@ def format_ollama_usage_line(usage: dict) -> str:
     return "[Ollama usage] " + ", ".join(parts) if parts else "[Ollama usage] (no counts in response)"
 
 
-def format_last_ollama_usage_for_repl(last_usage: Optional[dict]) -> str:
+def format_last_ollama_usage_for_repl(
+    last_usage: Optional[dict],
+    chars_per_token_estimator: Optional["CharsPerTokenEstimator"] = None,
+) -> str:
     """Human-readable report for /usage (last local Ollama agent chat only)."""
+    from agentlib.llm.token_estimate import get_default_chars_per_token_estimator
+
+    est = chars_per_token_estimator or get_default_chars_per_token_estimator()
+    cal_note = est.calibration_note_for_usage()
     if last_usage is None:
         return (
             "No data available.\n"
             "Ollama usage stats come from the local primary model's last /api/chat response (not hosted APIs). "
-            "After a turn, try again, or use /set verbose 2 to print usage after each Ollama call (level 2)."
+            "After a turn, try again, or use /set verbose 2 to print usage after each Ollama call (level 2).\n"
+            + cal_note
         )
     return (
         format_ollama_usage_line(last_usage)
         + "\n(Ollama: prompt_eval_count / eval_count — not identical to OpenAI-style prompt/completion tokens; "
-        "gen_tok/s uses eval_count ÷ eval_duration when both are present.)"
+        "gen_tok/s uses eval_count ÷ eval_duration when both are present.)\n"
+        + cal_note
     )

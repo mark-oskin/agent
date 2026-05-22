@@ -6,18 +6,22 @@ import re
 from typing import Any, Callable, Optional, cast
 
 from agentlib.llm.profile import LlmProfile
+from agentlib.llm.token_estimate import CharsPerTokenEstimator, get_default_chars_per_token_estimator
 
 
-def approx_message_tokens(messages: list) -> int:
-    # Heuristic: ~4 chars/token + small per-message overhead.
-    total_chars = 0
+def approx_message_tokens(
+    messages: list,
+    *,
+    estimator: Optional[CharsPerTokenEstimator] = None,
+) -> int:
+    est = estimator or get_default_chars_per_token_estimator()
+    total = 8 * max(1, len(messages))
     for m in messages:
         if isinstance(m, dict):
             c = m.get("content")
-            if isinstance(c, str):
-                total_chars += len(c)
-    overhead = 8 * max(1, len(messages))
-    return overhead + (total_chars // 4)
+            if isinstance(c, str) and c:
+                total += est.estimate_tokens(c)
+    return total
 
 
 def context_limit_tokens(
@@ -90,6 +94,7 @@ def maybe_compact_context_window(
     call_ollama_plaintext: Callable[[list, str], str],
     ollama_model: str,
     summarize_conversation_fn: Optional[Callable[..., str]] = None,
+    chars_per_token_estimator: Optional[CharsPerTokenEstimator] = None,
 ) -> list:
     cfg = context_cfg if isinstance(context_cfg, dict) else {}
     enabled = bool(cfg.get("enabled", True))
@@ -111,7 +116,7 @@ def maybe_compact_context_window(
         limit = context_limit_tokens(primary_profile, settings_get_int=settings_get_int)
     if limit <= 0:
         return messages
-    approx = approx_message_tokens(messages)
+    approx = approx_message_tokens(messages, estimator=chars_per_token_estimator)
     if approx <= int(limit * trigger_frac):
         return messages
 
@@ -150,7 +155,7 @@ def maybe_compact_context_window(
         ),
     }
     new_messages = [*head, summary_msg, *tail]
-    approx2 = approx_message_tokens(new_messages)
+    approx2 = approx_message_tokens(new_messages, estimator=chars_per_token_estimator)
     if approx2 > int(limit * target_frac) and len(tail) > 6:
         new_messages = [*head, summary_msg, *tail[-6:]]
     if verbose >= 3:
@@ -161,7 +166,7 @@ def maybe_compact_context_window(
                 "type": "debug",
                 "text": (
                     f"[DEBUG] context manager compacted messages: ~{approx} -> "
-                    f"~{approx_message_tokens(new_messages)} tokens"
+                    f"~{approx_message_tokens(new_messages, estimator=chars_per_token_estimator)} tokens"
                 ),
             }
         )
@@ -182,8 +187,14 @@ def _truncate_to_max_words(text: str, max_words: int) -> str:
     return " ".join(words[:max_words]) + "\n…(truncated to word budget)\n"
 
 
-def _truncate_to_approx_tokens(text: str, max_tokens: int) -> str:
-    cap = max(200, int(max_tokens) * 4)
+def _truncate_to_approx_tokens(
+    text: str,
+    max_tokens: int,
+    *,
+    estimator: Optional[CharsPerTokenEstimator] = None,
+) -> str:
+    est = estimator or get_default_chars_per_token_estimator()
+    cap = est.char_cap_for_token_budget(max_tokens)
     t = (text or "").strip()
     if len(t) <= cap:
         return t
@@ -199,6 +210,7 @@ def llm_compress_transcript_for_repl(
     call_hosted_chat_plain: Callable[[list, Any], str],
     call_ollama_plaintext: Callable[[list, str], str],
     ollama_model: str,
+    chars_per_token_estimator: Optional[CharsPerTokenEstimator] = None,
 ) -> str:
     """
     Ask the primary LLM to compress a transcript for continued conversation.
@@ -218,13 +230,14 @@ def llm_compress_transcript_for_repl(
         )
         post_trim = lambda s: _truncate_to_max_words(s, n)
     elif constraint_kind == "approx_tokens":
+        est = chars_per_token_estimator or get_default_chars_per_token_estimator()
         tok = max(32, int(constraint_value))
-        approx_chars = max(200, tok * 4)
+        approx_chars = est.char_cap_for_token_budget(tok)
         constraint_line = (
             f"Your entire reply must fit within approximately {tok} tokens "
             f"(aim well under ~{approx_chars} characters of body text; be concise)."
         )
-        post_trim = lambda s: _truncate_to_approx_tokens(s, tok)
+        post_trim = lambda s: _truncate_to_approx_tokens(s, tok, estimator=est)
     else:
         raise ValueError(f"unknown constraint_kind: {constraint_kind!r}")
 

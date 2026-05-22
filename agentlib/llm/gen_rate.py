@@ -6,12 +6,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from agentlib.llm.token_estimate import CharsPerTokenEstimator, estimate_tokens_from_text
 
-def estimate_tokens_from_text(text: str) -> int:
-    """Rough token count for streamed UTF-8 text when the API omits live counts."""
-    if not text:
-        return 0
-    return max(1, (len(text) + 3) // 4)
+__all__ = ["GenRateTracker", "estimate_tokens_from_text", "CharsPerTokenEstimator"]
 
 
 @dataclass

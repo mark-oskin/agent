@@ -6,13 +6,15 @@ import json
 import time
 
 from agentlib.llm import streaming as llm_streaming
-from agentlib.llm.gen_rate import GenRateTracker, estimate_tokens_from_text
+from agentlib.llm.gen_rate import GenRateTracker
+from agentlib.llm.token_estimate import CharsPerTokenEstimator, estimate_tokens_from_text
 
 
 def test_estimate_tokens_from_text():
-    assert estimate_tokens_from_text("") == 0
-    assert estimate_tokens_from_text("abcd") == 1
-    assert estimate_tokens_from_text("a" * 8) == 2
+    est = CharsPerTokenEstimator()
+    assert estimate_tokens_from_text("", estimator=est) == 0
+    assert estimate_tokens_from_text("abcd", estimator=est) == 1
+    assert estimate_tokens_from_text("a" * 12, estimator=est) == 3
 
 
 def test_gen_rate_tracker_interval_sampling():

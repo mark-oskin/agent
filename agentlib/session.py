@@ -295,6 +295,14 @@ class AgentSession:
         self.python_enqueue_line = python_enqueue_line
         self._host_app = host_app
 
+    def _chars_per_token_estimator(self):
+        app = getattr(self, "_host_app", None)
+        if app is not None:
+            return app._chars_per_token_estimator
+        from agentlib.llm.token_estimate import get_default_chars_per_token_estimator
+
+        return get_default_chars_per_token_estimator()
+
     def _resolve_session_path(self, raw: object) -> str:
         """Resolve a user/tool path against this session's cwd when relative."""
         return resolve_path_under_session(raw, self.session_cwd, self._conversation_turn_deps.scalar_to_str)
@@ -727,7 +735,8 @@ class AgentSession:
             sink_print_compat("/compact: nothing to compress (no user/assistant text in history).")
             return SessionLineResult()
 
-        approx0 = approx_message_tokens(self.messages)
+        est = self._chars_per_token_estimator()
+        approx0 = approx_message_tokens(self.messages, estimator=est)
         if approx0 < 1:
             approx0 = 1
 
@@ -770,6 +779,7 @@ class AgentSession:
                 call_hosted_chat_plain=self._conversation_turn_deps.call_hosted_chat_plain,
                 call_ollama_plaintext=self._conversation_turn_deps.call_ollama_plaintext,
                 ollama_model=om,
+                chars_per_token_estimator=est,
             )
         except Exception as e:
             sink_print_compat(f"/compact failed: {type(e).__name__}: {e}")
@@ -791,7 +801,7 @@ class AgentSession:
         )
         self.messages.append({"role": "system", "content": body})
 
-        approx1 = approx_message_tokens(self.messages)
+        approx1 = approx_message_tokens(self.messages, estimator=est)
         if kind == "max_words":
             detail = f"max {val} words"
         else:
