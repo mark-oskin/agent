@@ -50,7 +50,7 @@ Run a shell command locally like the agent ``run_command`` tool: ``/run_command 
 
 Clipboard: ``/clipboard copy|copy all|paste`` (`paste` loads the clipboard into your prompt so you can edit before Enter). Session JSON: ``/context load|save|start_log FILE`` (``/save_context`` is a one-shot snapshot; ``start_log`` enables auto-save after each turn). Extensions: ``/load FILE.py`` (``register_repl``), ``/unload``, ``/extensions``.
 
-**Mouse:** drag in the chat or thinking log to select text (within that pane only); releasing the button copies to the clipboard (macOS Terminal usually does not pass **Cmd+C** through). **Ctrl+C** or **Ctrl+Shift+C** also copies when idle; **Cmd+C** works in terminals that forward it (iTerm, Ghostty, WezTerm). The prompt uses normal editor copy/paste (**Ctrl+V** / **Cmd+V** to paste).
+**Mouse:** two-finger scroll in the chat or thinking log to move through output; drag to select text (within that pane only); releasing the button copies to the clipboard (macOS Terminal usually does not pass **Cmd+C** through). **Ctrl+C** or **Ctrl+Shift+C** also copies when idle; **Cmd+C** works in terminals that forward it (iTerm, Ghostty, WezTerm). The prompt uses normal editor copy/paste (**Ctrl+V** / **Cmd+V** to paste).
 
 Prompt history is **per lane**: **↑** / **↓** when the cursor is on the **first / last** line recall prior messages (like the CLI);
 otherwise they move inside the editor. **Ctrl+↑** / **Ctrl+↓** always recall (even mid‑multiline). **Enter** sends the message (same idea as the single-line input).

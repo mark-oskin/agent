@@ -310,7 +310,8 @@ class AgentScreen(Screen):
         return widget if isinstance(widget, SelectableRichLog) else None
 
     def _forward_event(self, event: events.Event) -> None:
-        if isinstance(event, events.MouseEvent):
+        # Trackpad/wheel scroll is also a MouseEvent subclass; only intercept click-drag selection.
+        if isinstance(event, (events.MouseDown, events.MouseMove, events.MouseUp)):
             log = self._log_for_mouse_event(event)
             if log is not None:
                 if isinstance(event, events.MouseDown):

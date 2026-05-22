@@ -102,6 +102,49 @@ def test_selectable_rich_log_accepts_button_zero():
     asyncio.run(run())
 
 
+def test_mouse_scroll_updates_log_scroll_offset():
+    from textual.events import MouseScrollDown
+
+    class _ScrollApp(App):
+        def get_default_screen(self):
+            return AgentScreen()
+
+        def compose(self):
+            yield SelectableRichLog(id="log", markup=True, auto_scroll=False)
+            yield Footer()
+
+    async def run():
+        app = _ScrollApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            log = app.query_one("#log", SelectableRichLog)
+            for i in range(40):
+                log.write(f"line {i:02d}\n")
+            await pilot.pause()
+            log.scroll_home()
+            await pilot.pause()
+            before_y = log.scroll_offset.y
+            region = log.region
+            app.screen.post_message(
+                MouseScrollDown(
+                    widget=log,
+                    x=5,
+                    y=5,
+                    delta_x=0,
+                    delta_y=1,
+                    button=0,
+                    shift=False,
+                    meta=False,
+                    ctrl=False,
+                    screen_x=region.x + 5,
+                    screen_y=region.y + 5,
+                )
+            )
+            await pilot.pause()
+            assert log.scroll_offset.y > before_y
+
+    asyncio.run(run())
+
+
 def test_copy_mouse_selection_uses_os_clipboard(monkeypatch):
     copied: list[str] = []
 
