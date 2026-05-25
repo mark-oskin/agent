@@ -199,6 +199,13 @@ class AgentApp:
             return "medium"
         return True
 
+    def ollama_tool_call_mode(self) -> str:
+        from agentlib.llm.calls import DEFAULT_TOOL_CALL_MODE, normalize_tool_call_mode
+
+        return normalize_tool_call_mode(
+            self.settings_get_str(("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE)
+        )
+
     def apply_cli_primary_model(self, name: str, profile: LlmProfile) -> LlmProfile:
         s = (name or "").strip()
         if not s:
@@ -427,7 +434,13 @@ class AgentApp:
         )
 
     def call_ollama_chat(
-        self, messages: list, primary_profile=None, enabled_tools=None, *, verbose: int = 0
+        self,
+        messages: list,
+        primary_profile=None,
+        enabled_tools=None,
+        *,
+        verbose: int = 0,
+        for_agent_turn: bool = True,
     ) -> str:
         prof = primary_profile or default_primary_llm_profile()
         om = effective_ollama_model_from_profile(prof, self.ollama_model())
@@ -450,6 +463,8 @@ class AgentApp:
             set_last_ollama_usage=self._set_last_ollama_usage,
             call_hosted_agent_chat_impl=call_hosted_agent_chat,
             merge_hosted_stream_chunks=self.merge_hosted_stream_chunks,
+            ollama_tool_call_mode=self.ollama_tool_call_mode(),
+            for_agent_turn=for_agent_turn,
         )
 
     def call_ollama_plaintext(self, messages: list, model: str) -> str:
@@ -509,7 +524,7 @@ class AgentApp:
             transcript_messages,
             coerce_enabled_tools=self.registry.coerce_enabled_tools,
             call_ollama_chat=lambda msgs, prof, tools: self.call_ollama_chat(
-                msgs, prof, tools, verbose=0
+                msgs, prof, tools, verbose=0, for_agent_turn=False
             ),
             parse_agent_json=lambda txt: agent_json.parse_agent_json(txt, self.agent_json_deps()),
             scalar_to_str=scalar_to_str,
@@ -534,7 +549,7 @@ class AgentApp:
             transcript_messages,
             coerce_enabled_tools=self.registry.coerce_enabled_tools,
             call_ollama_chat=lambda msgs, prof, tools: self.call_ollama_chat(
-                msgs, prof, tools, verbose=0
+                msgs, prof, tools, verbose=0, for_agent_turn=False
             ),
             parse_agent_json=lambda txt: agent_json.parse_agent_json(txt, self.agent_json_deps()),
             scalar_to_str=scalar_to_str,
@@ -756,7 +771,7 @@ class AgentApp:
                 et,
                 verbose,
                 call_ollama_chat=lambda msgs, prof, tools, verbose=0: self.call_ollama_chat(
-                    msgs, prof, tools, verbose=verbose
+                    msgs, prof, tools, verbose=verbose, for_agent_turn=False
                 ),
                 merge_aliases=turn_support.merge_tool_param_aliases,
                 ensure_defaults=turn_support.ensure_tool_defaults,
@@ -786,6 +801,7 @@ class AgentApp:
                 if getattr(self, "_mcp_cluster", None) is not None
                 else "MCP error: not initialized (enable agent.mcp_enabled and configure agent.mcp_servers)."
             ),
+            ollama_tool_call_mode=self.ollama_tool_call_mode,
         )
         if agent_progress is None:
             self._cached_turn_deps = deps
@@ -1056,6 +1072,7 @@ class AgentApp:
                 ollama_model=effective_ollama_model_from_profile(prof, self.ollama_model()),
                 hosted_review_ready=hosted_review_ready,
                 tool_policy_runner_text=self.registry.tool_policy_runner_text,
+                tool_call_mode=self.ollama_tool_call_mode(),
             )
             system = prompts.build_agent_system_message(**kw)
             user = prompts.interactive_turn_user_content(user_query, continuation=continuation)
@@ -1345,6 +1362,7 @@ def cli_build_agent_system_message(
         ollama_model=effective_ollama_model_from_profile(primary_profile, app.ollama_model()),
         hosted_review_ready=_cli_hosted_review_ready(app),
         tool_policy_runner_text=app.registry.tool_policy_runner_text,
+        tool_call_mode=app.ollama_tool_call_mode(),
     )
 
 
@@ -1527,13 +1545,16 @@ def main(argv: Optional[list[str]] = None, *, app: Optional["AgentApp"] = None) 
     web_required = bool(router_query)
     _mw_run = preferred_web_search_tool(frozenset(enabled_tools))
     if router_query and _mw_run:
+        from agentlib.llm.tool_schemas import web_search_required_user_content
+
         messages.append(
             {
                 "role": "user",
-                "content": (
-                    f"Before answering, you MUST call the tool {_mw_run}.\n"
-                    "Respond with JSON only in tool_call form.\n"
-                    f'Suggested query: "{router_query}"'
+                "content": web_search_required_user_content(
+                    _mw_run,
+                    router_query,
+                    tool_call_mode=app0.ollama_tool_call_mode(),
+                    primary_profile=primary_profile,
                 ),
             }
         )

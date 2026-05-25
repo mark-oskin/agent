@@ -33,6 +33,8 @@ DEFAULT_SETTINGS: dict = {
         "stream_thinking": False,
         # Stream assistant answer text incrementally during LLM generation (REPL/TUI).
         "stream_assistant": True,
+        # Ollama tool transport: "native" (Ollama tools API) or "json" (format:json agent protocol).
+        "tool_call_mode": "native",
         "search_web_max_results": 5,
         "search_web_backend": "ddg",
         "brave_search_api_key": "",

@@ -391,7 +391,16 @@ def _apply_content_chunk(
         state.tool_mode = True
     if state.tool_mode:
         if not state.tool_progress_emitted:
-            sink_emit({"type": "progress", "text": "Preparing tool call…"})
+            from agentlib.llm.tool_schemas import preparing_tool_progress_line
+
+            sink_emit(
+                {
+                    "type": "progress",
+                    "text": preparing_tool_progress_line(
+                        tool_calls=tool_calls, content=acc_content
+                    ),
+                }
+            )
             state.tool_progress_emitted = True
         return
     state.tool_mode = False
@@ -468,6 +477,18 @@ def merge_stream_message_chunks(
             tool_calls = merge_partial_tool_calls(tool_calls, msg["tool_calls"])
             if stream_user_visible and vis.tool_mode is not False:
                 vis.tool_mode = True
+                if not vis.tool_progress_emitted:
+                    from agentlib.llm.tool_schemas import preparing_tool_progress_line
+
+                    sink_emit(
+                        {
+                            "type": "progress",
+                            "text": preparing_tool_progress_line(
+                                tool_calls=tool_calls, content=acc.get("content") or ""
+                            ),
+                        }
+                    )
+                    vis.tool_progress_emitted = True
         if data.get("done"):
             saw_done = True
             u = ollama_usage_from_chat_response_fn(data)

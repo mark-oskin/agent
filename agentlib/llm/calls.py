@@ -17,6 +17,70 @@ from agentlib.llm.request_options import (
 _THINK_FALLBACK_WARNING = (
     "Ollama rejected thinking for this model (HTTP 400); retrying without the think option.\n"
 )
+_NATIVE_JSON_FALLBACK_WARNING = (
+    "Native Ollama tool call did not yield a usable tool_call or answer; retrying with JSON mode.\n"
+)
+
+
+DEFAULT_TOOL_CALL_MODE = "native"
+
+
+def normalize_tool_call_mode(mode: object) -> str:
+    """``native`` (default) or ``json`` (Ollama ``format: json`` agent protocol)."""
+    s = str(mode or DEFAULT_TOOL_CALL_MODE).strip().lower()
+    if s in ("native", "tools", "ollama_tools", "ollama_native"):
+        return "native"
+    return "json"
+
+
+def _agent_json_text_usable(agent_text: str, msg: dict) -> bool:
+    """True when merged Ollama message maps to a tool call or non-empty agent answer."""
+    if msg.get("tool_calls"):
+        return True
+    t = (agent_text or "").strip()
+    if not t:
+        return False
+    if not t.startswith("{"):
+        return True
+    try:
+        d = json.loads(t)
+    except json.JSONDecodeError:
+        return True
+    if not isinstance(d, dict):
+        return True
+    action = d.get("action")
+    if action == "tool_call":
+        return bool(d.get("tool"))
+    if action == "answer":
+        return bool(str(d.get("answer") or "").strip())
+    if action == "error":
+        return True
+    if action:
+        return True
+    return bool(t)
+
+
+def _build_ollama_agent_chat_payload(
+    *,
+    model: str,
+    messages: list,
+    think_value: object,
+    request_options: Optional[dict],
+    native_tools: list[dict],
+    use_native_tools: bool,
+) -> dict:
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "think": think_value,
+    }
+    if use_native_tools and native_tools:
+        payload["tools"] = native_tools
+    else:
+        payload["format"] = "json"
+    merge_ollama_options_payload(payload, request_options or {})
+    return payload
 
 def _emit_full_llm_prompts_if_verbose(messages: list, *, verbose: int, backend: str, model: str, format_json: bool) -> None:
     """
@@ -309,6 +373,8 @@ def call_ollama_chat(
     merge_hosted_stream_chunks: Optional[
         Callable[..., Tuple[dict, Optional[dict], bool]]
     ] = None,
+    ollama_tool_call_mode: str = DEFAULT_TOOL_CALL_MODE,
+    for_agent_turn: bool = True,
 ) -> str:
     """
     Agent chat: local Ollama JSON /api/chat, or hosted OpenAI-compatible chat.completions.
@@ -331,19 +397,36 @@ def call_ollama_chat(
 
     base = (ollama_base_url or "").rstrip("/")
     url = f"{base}/api/chat"
-    payload = {
-        "model": ollama_model,
-        "messages": messages,
-        "stream": True,
-        "format": "json",
-        "think": ollama_think_value,
-    }
-    merge_ollama_options_payload(payload, getattr(prof, "request_options", None) or {})
-    _emit_full_llm_prompts_if_verbose(messages, verbose=verbose, backend="ollama", model=ollama_model, format_json=True)
+    from agentlib.llm.tool_schemas import ollama_tools_for_enabled
+
+    tcm = normalize_tool_call_mode(ollama_tool_call_mode)
+    use_native = for_agent_turn and tcm == "native"
+    native_tools = ollama_tools_for_enabled(enabled_tools) if use_native else []
+    use_native = use_native and bool(native_tools)
+
+    def _payload(*, native: bool) -> dict:
+        return _build_ollama_agent_chat_payload(
+            model=ollama_model,
+            messages=messages,
+            think_value=ollama_think_value,
+            request_options=dict(getattr(prof, "request_options", None) or {}),
+            native_tools=native_tools,
+            use_native_tools=native,
+        )
+
+    payload = _payload(native=use_native)
+    _emit_full_llm_prompts_if_verbose(
+        messages,
+        verbose=verbose,
+        backend="ollama",
+        model=ollama_model,
+        format_json=not use_native,
+    )
     stream_llm = verbose >= 2
 
-    def run_chat(streaming: bool) -> Tuple[str, Optional[dict], bool]:
-        body = {**payload, "stream": streaming}
+    def run_chat(payload_body: dict, *, streaming: bool) -> Tuple[str, Optional[dict], bool, dict]:
+        body = {**payload_body, "stream": streaming}
+        last_msg: dict = {}
         for attempt in range(2):
             try:
                 if streaming:
@@ -353,38 +436,58 @@ def call_ollama_chat(
                             llm_streaming.iter_ollama_ndjson_lines_from_response(r),
                             stream_chunks=stream_llm,
                         )
+                    last_msg = msg if isinstance(msg, dict) else {}
                     if ollama_debug:
                         sink_emit({"type": "debug", "text": f"[DEBUG] Ollama merged message: {msg!r}"})
                     text = message_to_agent_json_text(msg, enabled_tools)
-                    return text, usage, streamed
+                    return text, usage, streamed, last_msg
                 r = requests.post(url, json=body, timeout=600)
                 r.raise_for_status()
                 data = r.json()
                 if ollama_debug:
                     sink_emit({"type": "debug", "text": f"[DEBUG] Ollama API response: {data!r}"})
                 msg = data.get("message") or {}
+                last_msg = msg if isinstance(msg, dict) else {}
                 text = message_to_agent_json_text(msg, enabled_tools)
                 usage = ollama_usage_from_chat_response(data)
                 if stream_llm and text.strip():
                     sink_emit({"type": "output", "text": text})
-                    return text, usage, True
-                return text, usage, False
+                if stream_llm and text.strip():
+                    return text, usage, True, last_msg
+                return text, usage, False, last_msg
             except HTTPError as e:
                 if attempt == 0 and _should_retry_ollama_chat_without_think(e, body):
                     sink_emit({"type": "warning", "text": _THINK_FALLBACK_WARNING})
                     body = {**body, "think": False}
                     continue
                 raise
+        return "", None, False, last_msg
 
-    try:
-        text, usage, streamed = run_chat(streaming=True)
+    def _run_chat_with_optional_stream(payload_body: dict) -> Tuple[str, Optional[dict], bool, dict]:
+        text, usage, streamed, msg = run_chat(payload_body, streaming=True)
         text = text.strip()
         if not text:
-            text2, usage2, streamed2 = run_chat(streaming=False)
+            text2, usage2, streamed2, msg2 = run_chat(payload_body, streaming=False)
             text = text2.strip()
             if usage2:
                 usage = usage2
             streamed = streamed or streamed2
+            msg = msg2
+        return text, usage, streamed, msg
+
+    try:
+        text, usage, streamed, msg = _run_chat_with_optional_stream(payload)
+        if use_native and not _agent_json_text_usable(text, msg):
+            sink_emit({"type": "warning", "text": _NATIVE_JSON_FALLBACK_WARNING})
+            json_payload = _payload(native=False)
+            text, usage, streamed, _msg = run_chat(json_payload, streaming=True)
+            text = text.strip()
+            if not text:
+                text2, usage2, streamed2, _ = run_chat(json_payload, streaming=False)
+                text = text2.strip()
+                if usage2:
+                    usage = usage2
+                streamed = streamed or streamed2
         if usage:
             set_last_ollama_usage(usage)
         if stream_llm:
@@ -400,4 +503,3 @@ def call_ollama_chat(
     except Exception as e:
         sink_emit({"type": "debug", "text": f"[DEBUG] Request error: {e}"})
         return json.dumps({"action": "error", "error": str(e)})
-

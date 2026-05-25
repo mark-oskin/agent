@@ -186,6 +186,7 @@ def build_embedded_session(
             ollama_model=effective_ollama_model_from_profile(prof, app.ollama_model()),
             hosted_review_ready=hosted_review_ready,
             tool_policy_runner_text=app.registry.tool_policy_runner_text,
+            tool_call_mode=app.ollama_tool_call_mode(),
         )
         return (
             prompts.build_agent_system_message(**kw),

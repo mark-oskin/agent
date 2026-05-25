@@ -11,6 +11,8 @@ from agentlib.sink import sink_emit
 from agentlib.tools import mcp_registry, turn_support
 from agentlib.tools.routing import preferred_web_search_tool
 
+from agentlib.llm.tool_schemas import tool_call_only_nudge, web_search_required_user_content
+
 from .deps import ConversationTurnDeps
 
 _NEEDS_MORE_WEB_RE = re.compile(
@@ -174,6 +176,7 @@ def run_agent_conversation_turn(
     step_limit = msw if web_required else ms
     verified_by_fetch = False
     forced_tool_attempt_after_refusal = False
+    tool_call_mode = deps.ollama_tool_call_mode()
     for _ in range(step_limit):
         messages = deps.maybe_compact_context_window(
             messages,
@@ -190,6 +193,10 @@ def run_agent_conversation_turn(
         note = consume_last_json_parse_note()
         if note:
             sink_emit({"type": "warning", "text": note})
+        from agentlib import agent_json as _agent_json_mod
+        from agentlib.llm.tool_schemas import tool_transport_label
+
+        tool_transport = _agent_json_mod.consume_last_tool_transport()
         action = response_data.get("action")
         if action == "answer":
             rt = (response_text or "").strip()
@@ -215,7 +222,7 @@ def run_agent_conversation_turn(
                             "You must not answer from memory for this request because web verification is required. "
                             "No usable web results have been obtained yet (or they were empty/blocked). "
                             f"Call {mandatory_web_tool} again with a different, more effective query, or fetch_page on a credible source URL "
-                            "from any results you do have. Respond with JSON tool_call only."
+                            f"from any results you do have. {tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
                         ),
                     }
                 )
@@ -238,7 +245,8 @@ def run_agent_conversation_turn(
                         "content": (
                             "You have permission to use the allowed tools in this session. "
                             "Do not refuse due to lack of access when a relevant tool exists. "
-                            "Pick an appropriate tool and call it now. Respond with JSON tool_call only."
+                            "Pick an appropriate tool and call it now. "
+                            f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
                         ),
                     }
                 )
@@ -258,7 +266,7 @@ def run_agent_conversation_turn(
                                 "Web verification is required. You must call fetch_page on a credible source URL "
                                 "before giving a final answer. If the current results don't include a good URL, "
                                 f"call {mandatory_web_tool} again with a better query to find a more direct page, then fetch_page it. "
-                                "Do not answer yet. Respond with JSON tool_call only."
+                                f"Do not answer yet. {tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
                             ),
                         }
                     )
@@ -275,8 +283,8 @@ def run_agent_conversation_turn(
                         "role": "user",
                         "content": (
                             "You said you need to search again. Do not respond with action answer yet. "
-                            f"Call {mandatory_web_tool} again with a more effective query (or fetch_page on a credible URL) "
-                            "and respond with JSON tool_call only."
+                            f"Call {mandatory_web_tool} again with a more effective query (or fetch_page on a credible URL). "
+                            f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
                         ),
                     }
                 )
@@ -295,7 +303,8 @@ def run_agent_conversation_turn(
                             "Web verification is required and you already have URL-backed search results. "
                             "Do not punt the user to 'visit a website' or say you can't answer from snippets. "
                             "Fetch and verify: call fetch_page on a credible source URL from the results (prefer official sites), "
-                            "then answer with the verified name and cite the source. Respond with JSON tool_call only."
+                            "then answer with the verified name and cite the source. "
+                            f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
                         ),
                     }
                 )
@@ -419,10 +428,12 @@ def run_agent_conversation_turn(
                     messages.append(
                         {
                             "role": "user",
-                            "content": (
-                                f"Before finalizing, you MUST call the tool {mandatory_web_tool} to verify.\n"
-                                "Respond with JSON only in tool_call form.\n"
-                                f'Suggested query: "{router_q2}"'
+                            "content": web_search_required_user_content(
+                                mandatory_web_tool,
+                                router_q2,
+                                tool_call_mode=tool_call_mode,
+                                primary_profile=primary_profile,
+                                lead_in="Before finalizing",
                             ),
                         }
                     )
@@ -496,6 +507,11 @@ def run_agent_conversation_turn(
             dedupe_ok = tool not in ("read_file", "tail_file", "grep")
             skipped_duplicate = bool(dedupe_ok and fp in seen_tool_fingerprints)
             policy_blocked = False
+            transport_tag = ""
+            if tool_transport and tool_transport[0] == tool:
+                transport_tag = f" {tool_transport_label(tool, tool_transport[1])}"
+            elif tool_transport:
+                transport_tag = f" [{tool_transport[1]}]"
             if verbose >= 1:
                 if skipped_duplicate:
                     sink_emit({"type": "output", "text": f"[*] Skipping duplicate tool: {tool} (same logical parameters as earlier)"})
@@ -504,11 +520,16 @@ def run_agent_conversation_turn(
                         sink_emit(
                             {
                                 "type": "output",
-                                "text": f"[*] Executing tool: {tool} ({deps.search_backend_banner_line()}) with {params}",
+                                "text": f"[*] Executing tool{transport_tag} ({deps.search_backend_banner_line()}) with {params}",
                             }
                         )
                     else:
-                        sink_emit({"type": "output", "text": f"[*] Executing tool: {tool} with {params}"})
+                        sink_emit(
+                            {
+                                "type": "output",
+                                "text": f"[*] Executing tool{transport_tag} with {params}",
+                            }
+                        )
             if skipped_duplicate:
                 result = (
                     "[Duplicate call skipped: this tool was already run with the same parameters "
@@ -518,7 +539,12 @@ def run_agent_conversation_turn(
                 tool_executed = True
                 tool_calls_executed += 1
                 if verbose < 1:
-                    deps.agent_progress(deps.tool_progress_message(tool, params))
+                    prog = deps.tool_progress_message(tool, params)
+                    if tool_transport and tool_transport[0] == tool:
+                        prog = f"{tool_transport_label(tool, tool_transport[1])} {prog}"
+                    elif tool_transport:
+                        prog = f"[{tool_transport[1]}] {prog}"
+                    deps.agent_progress(prog)
                 result = ""
                 if web_required and tool_calls_executed > mtcw:
                     result = (

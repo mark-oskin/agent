@@ -6,6 +6,18 @@ from typing import AbstractSet, Callable, Optional
 
 from agentlib.tools import mcp_registry, plugins, routing
 from agentlib.tools.routing import CORE_TOOL_ENTRIES, all_known_tools
+from agentlib.llm.calls import DEFAULT_TOOL_CALL_MODE
+
+
+def use_native_tool_prompt(*, tool_call_mode: str, primary_profile) -> bool:
+    """True when the Ollama request uses native ``tools`` (not JSON-in-content for Phase 1 tools)."""
+    from agentlib.llm.calls import normalize_tool_call_mode
+
+    if normalize_tool_call_mode(tool_call_mode) != "native":
+        return False
+    if primary_profile is not None and getattr(primary_profile, "backend", "") == "hosted":
+        return False
+    return True
 
 
 SYSTEM_INSTRUCTIONS = (
@@ -56,9 +68,98 @@ SYSTEM_INSTRUCTIONS = (
     "citations, or web research—compose with write_file or a direct answer.",
 )
 
+NATIVE_SYSTEM_INSTRUCTIONS = (
+    "You are a universal agent.\n\n"
+    "Native tool use: When a task matches a tool listed under \"Native function tools\" below, invoke it using "
+    "the tool/function calling interface (schemas are supplied by the API). Do not write "
+    "{\"action\":\"tool_call\",...} in your message text for those native tools.\n\n"
+    "When reasoning internally (thinking): invoke native tools only through the function-calling API "
+    "(tool_calls)—never draft JSON {\"action\":\"tool_call\",...} in thinking or message content for native tools. "
+    "Plan JSON only for final answers and for JSON-only tools.\n\n"
+    "JSON output: For final answers to the user, for tools listed under \"JSON-only tools\" below, and whenever "
+    "you are not issuing a native function call, reply with a single JSON object only—no text before or after it, "
+    "no Markdown code fences, no keys or values that are not valid JSON. The object must include an \"action\" key. "
+    "Minimal answer example: {\"action\":\"answer\",\"answer\":\"your user-facing reply as a string\"}. "
+    "The \"answer\" string should be the complete helpful response for the user: do not fill it with meta-commentary "
+    "about your search process, your uncertainty, or system instructions.\n\n"
+    "- If the user needs current or recent real-world facts, or information about any fact that changes over time you "
+    "MUST use a tool call to obtain the that information, do not rely on your trained memory because it is out of date"
+    "\n"
+    "- Do not fail to obtain information with tool calls.  Keep trying until you succeed.  A single failed "
+    "web search or web page fetch should not deter you.  Keep trying."
+    "\n"
+    "- If the user request is ambiguous, you make make reasonable assumptioms."
+    "\n"
+    "- You are free to make as many tool calls as you need in order to obtain the infomration you need to provide an answer."
+    "\n"
+    "- When assessing search results, do not just believe the first result, instead use your judgement on what result "
+    "and webpage provides the best and highest quality information."
+    "\n"
+    "- If you cannot get useful search results in 30 tool calls, stop and explain the failure to the user."
+    "\n"
+    "- You are explicitly permitted to invoke ANY tool described in the tool section below.\n"
+    "\n"
+    "- If the user request asks you to perform an action on the user's system (create/edit/delete, run a command, automate a workflow, etc.) "
+    "and an appropriate native or JSON-only tool is available, start by calling that tool (native function call or JSON tool_call as documented).\n"
+    "\n"
+    "- If the user request can be satisfied by invoking a tool then you must make an attempt to do so.  Do not claim you cannot.\n"
+    "\n"
+    "- Tool failure handling: if a tool call fails or returns an error/unhelpful result, you MUST include the tool output in your "
+    "next message, then try ONE corrected tool call (different parameters or a different allowed tool). Only after that may you "
+    "fall back to a non-tool answer and briefly explain the concrete failure.\n\n"
+    "Tools you can use and how to call them:\n"
+    "(This section is generated per run based on tool policy.)\n\n"
+    "Finishing: use {\"action\":\"answer\",\"answer\":\"string\","
+    "\"next_action\":\"finalize\",\"rationale\":\"short note (e.g. why you are done)\"}. "
+    "To request an independent second opinion before finishing, use "
+    "{\"action\":\"answer\",\"answer\":\"your best draft so far\",\"next_action\":\"second_opinion\","
+    "\"rationale\":\"why you want a review\"}. "
+    "The program routes that using session configuration.\n"
+    "If you need to write and execute code, first use write_file then use run_command. "
+    "If the user asked for a document/report/essay saved to disk, after write_file you should read_file that same path "
+    "and put the full document text in the final answer field (unless the user explicitly asked only for a file path). "
+    "For letters, memos, or other creative writing, web search tools are optional unless the user asked for sources, "
+    "citations, or web research—compose with write_file or a direct answer.",
+)
 
-def default_system_instruction_text() -> str:
-    return "".join(SYSTEM_INSTRUCTIONS)
+
+def default_system_instruction_text(*, native_tool_prompt: bool = False) -> str:
+    src = NATIVE_SYSTEM_INSTRUCTIONS if native_tool_prompt else SYSTEM_INSTRUCTIONS
+    return src if isinstance(src, str) else "".join(src)
+
+
+_TOOLS_SECTION_MARKER = "Tools you can use and how to call them:"
+
+
+def _is_builtin_shaped_agent_prompt(text: str) -> bool:
+    """True when text looks like our built-in agent prompt (tool block + Finishing section)."""
+    s = text or ""
+    return _TOOLS_SECTION_MARKER in s and "\n\nFinishing:" in s
+
+
+def _upgrade_builtin_prompt_preamble_to_native(text: str) -> str:
+    """Replace JSON-mode preamble with native-mode preamble; keep tool tail and any template overlay."""
+    idx = text.find(_TOOLS_SECTION_MARKER)
+    if idx < 0:
+        return text
+    native = default_system_instruction_text(native_tool_prompt=True)
+    n_idx = native.find(_TOOLS_SECTION_MARKER)
+    if n_idx < 0:
+        return text
+    return native[:n_idx] + text[idx:]
+
+
+def _instruction_base_for_tools(
+    override: Optional[str], *, native_tool_prompt: bool
+) -> str:
+    if override is None:
+        return default_system_instruction_text(native_tool_prompt=native_tool_prompt)
+    s = str(override).strip()
+    if not s:
+        return default_system_instruction_text(native_tool_prompt=native_tool_prompt)
+    if native_tool_prompt and _is_builtin_shaped_agent_prompt(s):
+        return _upgrade_builtin_prompt_preamble_to_native(s)
+    return s
 
 
 def _enabled_tools_list(enabled_tools: Optional[AbstractSet[str]]) -> list[str]:
@@ -79,9 +180,49 @@ def _enabled_tools_list(enabled_tools: Optional[AbstractSet[str]]) -> list[str]:
     return core_enabled + plugin_enabled
 
 
-def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
+def _tool_docs_block(
+    enabled_tools: Optional[AbstractSet[str]], *, native_tool_prompt: bool = False
+) -> str:
     """Minimal per-tool parameter docs, filtered by tool policy."""
+    from agentlib.llm.tool_schemas import NATIVE_PHASE1_TOOL_IDS
+
     enabled = _enabled_tools_list(enabled_tools)
+    native_enabled = [tid for tid in enabled if tid in NATIVE_PHASE1_TOOL_IDS]
+    json_enabled = [tid for tid in enabled if tid not in NATIVE_PHASE1_TOOL_IDS]
+
+    def _numbered_docs(tool_ids: list[str]) -> str:
+        docs: list[str] = []
+        for i, tid in enumerate(tool_ids, 1):
+            doc = routing.core_tool_prompt_doc(tid)
+            if not doc:
+                doc = plugins.plugin_tool_prompt_doc(tid)
+            if not doc:
+                doc = mcp_registry.prompt_doc(tid)
+            if not doc:
+                doc = f"{tid} — parameters: JSON object (tool-specific)."
+            docs.append(f"{i}. {doc}\n")
+        return "".join(docs)
+
+    if native_tool_prompt and native_enabled:
+        parts: list[str] = [
+            "Tools you can use and how to call them:\n",
+            "Native function tools (Ollama tools API — invoke via tool_calls on every tool call; "
+            "do NOT emit {\"action\":\"tool_call\",...} in message content or thinking for these):\n\n",
+            _numbered_docs(native_enabled),
+        ]
+        if json_enabled:
+            parts.append(
+                "\nJSON-only tools (respond with "
+                '{"action":"tool_call","tool":<name>,"parameters":{...}} in your message text):\n'
+            )
+            parts.append(
+                "Example: "
+                '{"action":"tool_call","tool":"grep","parameters":{"pattern":"foo","path":"."}}.\n\n'
+            )
+            parts.append("Parameters per JSON-only tool:\n")
+            parts.append(_numbered_docs(json_enabled))
+        return "".join(parts)
+
     header = (
         "Tools you can use and how to call them:\n"
         "Tool calls use this shape: {\"action\":\"tool_call\",\"tool\":<name>,\"parameters\":{...}} "
@@ -89,31 +230,30 @@ def _tool_docs_block(enabled_tools: Optional[AbstractSet[str]]) -> str:
         "{\"action\":\"tool_call\",\"tool\":\"search_web\",\"parameters\":{\"query\":\"search terms\"}}.\n\n"
         "Parameters per tool (use JSON strings, numbers, or booleans as noted):\n"
     )
-    docs: list[str] = []
-    i = 1
-    for tid in enabled:
-        doc = routing.core_tool_prompt_doc(tid)
-        if not doc:
-            doc = plugins.plugin_tool_prompt_doc(tid)
-        if not doc:
-            doc = mcp_registry.prompt_doc(tid)
-        if not doc:
-            # Plugin tools: keep docs minimal here; full contracts are available via /set tools describe <tool-id>.
-            doc = f"{tid} — parameters: JSON object (tool-specific)."
-        docs.append(f"{i}. {doc}\n")
-        i += 1
-    return header + "".join(docs)
+    return header + _numbered_docs(enabled)
 
 
 def effective_system_instruction_text_for_tools(
-    override: Optional[str], enabled_tools: Optional[AbstractSet[str]]
+    override: Optional[str],
+    enabled_tools: Optional[AbstractSet[str]],
+    *,
+    native_tool_prompt: bool = False,
+    tool_call_mode: Optional[str] = None,
+    primary_profile=None,
 ) -> str:
     """
     Like `effective_system_instruction_text`, but the tools section is generated to match tool policy.
+
+    Pass ``tool_call_mode`` (and ``primary_profile`` when needed) so native vs JSON tool docs match
+    the live Ollama request — same as ``build_agent_system_message``.
     """
-    base = effective_system_instruction_text(override)
-    tool_block = _tool_docs_block(enabled_tools)
-    start = base.find("Tools you can use and how to call them:")
+    if tool_call_mode is not None:
+        native_tool_prompt = use_native_tool_prompt(
+            tool_call_mode=tool_call_mode, primary_profile=primary_profile
+        )
+    base = _instruction_base_for_tools(override, native_tool_prompt=native_tool_prompt)
+    tool_block = _tool_docs_block(enabled_tools, native_tool_prompt=native_tool_prompt)
+    start = base.find(_TOOLS_SECTION_MARKER)
     end = base.find("\n\nFinishing:", start if start >= 0 else 0)
     if start >= 0 and end >= 0 and end > start:
         return base[:start] + tool_block + base[end:]
@@ -147,13 +287,15 @@ def resolve_prompt_template_text(name: str, templates: dict) -> Optional[str]:
     return default_system_instruction_text() + "\n\n" + body
 
 
-def effective_system_instruction_text(override: Optional[str]) -> str:
+def effective_system_instruction_text(
+    override: Optional[str], *, native_tool_prompt: bool = False
+) -> str:
     """Session override replaces the built-in system prompt when non-empty."""
     if override is None:
-        return default_system_instruction_text()
+        return default_system_instruction_text(native_tool_prompt=native_tool_prompt)
     s = str(override).strip()
     if not s:
-        return default_system_instruction_text()
+        return default_system_instruction_text(native_tool_prompt=native_tool_prompt)
     return s
 
 
@@ -192,6 +334,10 @@ def runner_instruction_bits(
 
 
 _JSON_ONLY_TAIL = "Respond with JSON only. No other text."
+_NATIVE_JSON_TAIL = (
+    "Use native function calling for Native function tools. "
+    "For JSON-only tools and for final answers, respond with JSON only. No other text."
+)
 
 
 def build_agent_system_message(
@@ -208,18 +354,29 @@ def build_agent_system_message(
     ollama_model: str,
     hosted_review_ready: Callable[[bool, object], bool],
     tool_policy_runner_text: Callable[[Optional[AbstractSet[str]]], str],
+    tool_call_mode: str = DEFAULT_TOOL_CALL_MODE,
 ) -> str:
     """Agent contract + runner context; sent once per LLM API call (not stored in transcript)."""
-    si = effective_system_instruction_text_for_tools(system_instruction_override, enabled_tools)
+    native_prompt = use_native_tool_prompt(
+        tool_call_mode=tool_call_mode, primary_profile=primary_profile
+    )
+    si = effective_system_instruction_text_for_tools(
+        system_instruction_override,
+        enabled_tools,
+        native_tool_prompt=native_prompt,
+        tool_call_mode=tool_call_mode,
+        primary_profile=primary_profile,
+    )
     suff = (skill_suffix or "").strip()
     if suff:
         si = si + "\n\n--- Active skill ---\n" + suff
     os_line = platform.platform()
+    tail = _NATIVE_JSON_TAIL if native_prompt else _JSON_ONLY_TAIL
     block = (
         f"{si}\n\n"
         f"Today's date (system clock): {today_str}\n\n"
         f"User operating system: {os_line}\n\n"
-        f"{_JSON_ONLY_TAIL}"
+        f"{tail}"
     )
     ri = runner_instruction_bits(
         second_opinion=second_opinion,
@@ -315,6 +472,7 @@ def interactive_turn_user_message(
     ollama_model: str,
     hosted_review_ready: Callable[[bool, object], bool],
     tool_policy_runner_text: Callable[[Optional[AbstractSet[str]]], str],
+    tool_call_mode: str = DEFAULT_TOOL_CALL_MODE,
 ) -> str:
     """Legacy combined turn block (system + user). Prefer build_agent_system_message + user_content."""
     system = build_agent_system_message(
@@ -330,6 +488,7 @@ def interactive_turn_user_message(
         ollama_model=ollama_model,
         hosted_review_ready=hosted_review_ready,
         tool_policy_runner_text=tool_policy_runner_text,
+        tool_call_mode=tool_call_mode,
     )
     user = interactive_turn_user_content(user_query)
     return f"{system}\n\n{user}"

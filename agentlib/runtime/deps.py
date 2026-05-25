@@ -56,6 +56,7 @@ class ConversationTurnDeps:
     confirm_tool_recovery_retry: Callable[..., bool]
     agent_progress: Callable[[str], None]
     tool_progress_message: Callable[[str, dict], str]
+    ollama_tool_call_mode: Callable[[], str]
     is_tool_result_weak_for_dedup: Callable[[str], bool]
     tool_result_user_message: Callable[..., str]
     call_mcp_tool: Callable[[str, dict], str]

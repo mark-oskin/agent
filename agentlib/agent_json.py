@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import AbstractSet, Callable, FrozenSet, Optional
+from typing import AbstractSet, Callable, FrozenSet, Optional, Tuple
 
 _PARSE_RECOVERY_NOTE: Optional[str] = None
+_LAST_TOOL_TRANSPORT: Optional[Tuple[str, str]] = None  # (tool_id, "native"|"json")
 
 
 def consume_last_json_parse_note() -> Optional[str]:
@@ -21,6 +22,43 @@ def consume_last_json_parse_note() -> Optional[str]:
 def _record_parse_recovery(note: str) -> None:
     global _PARSE_RECOVERY_NOTE
     _PARSE_RECOVERY_NOTE = note
+
+
+def consume_last_tool_transport() -> Optional[Tuple[str, str]]:
+    """Return and clear (tool_id, transport) from the last ``message_to_agent_json_text`` call."""
+    global _LAST_TOOL_TRANSPORT
+    n = _LAST_TOOL_TRANSPORT
+    _LAST_TOOL_TRANSPORT = None
+    return n
+
+
+def _record_tool_transport(tool_id: str, transport: str) -> None:
+    global _LAST_TOOL_TRANSPORT
+    tid = (tool_id or "").strip() or "?"
+    kind = (transport or "json").strip().lower()
+    _LAST_TOOL_TRANSPORT = (tid, "native" if kind == "native" else "json")
+
+
+def _maybe_record_json_tool_transport(raw: str, deps: AgentJsonDeps) -> None:
+    """If ``raw`` parses to a tool_call, record json transport (content/thinking path)."""
+    if not raw or not raw.strip().startswith("{"):
+        return
+    try:
+        d = json.loads(raw)
+    except json.JSONDecodeError:
+        best = best_agent_dict_from_text(raw, deps.all_known_tools())
+        if not best:
+            return
+        d = best
+    if not isinstance(d, dict):
+        return
+    tool = d.get("tool")
+    action = d.get("action")
+    known = deps.all_known_tools()
+    if action == "tool_call" and tool:
+        _record_tool_transport(str(tool), "json")
+    elif action in known:
+        _record_tool_transport(str(action), "json")
 
 
 _AGENT_TOP_LEVEL_PARAM_KEYS = frozenset(
@@ -536,20 +574,31 @@ def message_to_agent_json_text(
     msg: dict, enabled_tools: Optional[AbstractSet[str]], deps: AgentJsonDeps
 ) -> str:
     """Build a JSON string for parse_agent_json from an Ollama chat message."""
+    global _LAST_TOOL_TRANSPORT
+    _LAST_TOOL_TRANSPORT = None
     # Prefer structured native tool_calls when present (works even if content is noise).
     from_tools = tool_calls_to_agent_json_text(msg.get("tool_calls"), enabled_tools, deps)
     if from_tools:
+        try:
+            mapped = json.loads(from_tools)
+            if isinstance(mapped, dict) and mapped.get("tool"):
+                _record_tool_transport(str(mapped["tool"]), "native")
+        except json.JSONDecodeError:
+            pass
         return from_tools
 
     text = (msg.get("content") or "").strip()
     if text:
         extracted = extract_json_object_from_text(text, deps)
         if extracted:
+            _maybe_record_json_tool_transport(extracted, deps)
             return extracted
         best = best_agent_dict_from_text(text, deps.all_known_tools())
         if best:
             try:
-                return json.dumps(best)
+                out = json.dumps(best)
+                _maybe_record_json_tool_transport(out, deps)
+                return out
             except (TypeError, ValueError):
                 pass
         return text
@@ -558,11 +607,14 @@ def message_to_agent_json_text(
     if thinking:
         extracted = extract_json_object_from_text(thinking, deps)
         if extracted:
+            _maybe_record_json_tool_transport(extracted, deps)
             return extracted
         best = best_agent_dict_from_text(thinking, deps.all_known_tools())
         if best:
             try:
-                return json.dumps(best)
+                out = json.dumps(best)
+                _maybe_record_json_tool_transport(out, deps)
+                return out
             except (TypeError, ValueError):
                 pass
         return thinking

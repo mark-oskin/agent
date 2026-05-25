@@ -31,6 +31,7 @@ from agentlib.context.compaction import (
     llm_compress_transcript_for_repl,
 )
 from agentlib.llm.discovery import fetch_ollama_model_show
+from agentlib.llm.calls import DEFAULT_TOOL_CALL_MODE
 from agentlib.llm.profile import effective_ollama_model_from_profile, preserved_request_options
 from agentlib.llm.request_options import (
     normalize_request_options_pref,
@@ -1165,13 +1166,18 @@ class AgentSession:
         self.messages.append({"role": "user", "content": turn_user})
         _mw = preferred_web_search_tool(et_turn)
         if router_query and _mw:
+            from agentlib.llm.tool_schemas import web_search_required_user_content
+
             self.messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        f"Before answering, you MUST call the tool {_mw}.\n"
-                        "Respond with JSON only in tool_call form.\n"
-                        f'Suggested query: "{router_query}"'
+                    "content": web_search_required_user_content(
+                        _mw,
+                        router_query,
+                        tool_call_mode=self.settings.get_str(
+                            ("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE
+                        ),
+                        primary_profile=self.primary_profile,
                     ),
                 }
             )
@@ -1326,13 +1332,18 @@ class AgentSession:
                 self.messages.append({"role": "user", "content": step_user_msg})
                 _mw_step = preferred_web_search_tool(et_step)
                 if router_query and _mw_step and i == 1:
+                    from agentlib.llm.tool_schemas import web_search_required_user_content
+
                     self.messages.append(
                         {
                             "role": "user",
-                            "content": (
-                                f"Before answering, you MUST call the tool {_mw_step}.\n"
-                                "Respond with JSON only in tool_call form.\n"
-                                f'Suggested query: "{router_query}"'
+                            "content": web_search_required_user_content(
+                                _mw_step,
+                                router_query,
+                                tool_call_mode=self.settings.get_str(
+                                    ("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE
+                                ),
+                                primary_profile=self.primary_profile,
                             ),
                         }
                     )
@@ -1389,13 +1400,18 @@ class AgentSession:
         self.messages.append({"role": "user", "content": skill_user})
         _mw2 = preferred_web_search_tool(et_turn)
         if router_query and _mw2:
+            from agentlib.llm.tool_schemas import web_search_required_user_content
+
             self.messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        f"Before answering, you MUST call the tool {_mw2}.\n"
-                        "Respond with JSON only in tool_call form.\n"
-                        f'Suggested query: "{router_query}"'
+                    "content": web_search_required_user_content(
+                        _mw2,
+                        router_query,
+                        tool_call_mode=self.settings.get_str(
+                            ("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE
+                        ),
+                        primary_profile=self.primary_profile,
                     ),
                 }
             )
@@ -3111,7 +3127,12 @@ class AgentSession:
             sub = toks[2].lower()
             if sub == "show":
                 body = agent_prompts.effective_system_instruction_text_for_tools(
-                    self.session_system_prompt, frozenset(self.enabled_tools)
+                    self.session_system_prompt,
+                    frozenset(self.enabled_tools),
+                    tool_call_mode=self.settings.get_str(
+                        ("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE
+                    ),
+                    primary_profile=self.primary_profile,
                 )
                 sink_print_compat(f"Effective system prompt ({len(body)} chars):\n{body}")
                 if self.session_system_prompt_path:
@@ -3123,7 +3144,12 @@ class AgentSession:
                 return SessionLineResult()
             if sub in ("pin", "snapshot"):
                 body = agent_prompts.effective_system_instruction_text_for_tools(
-                    self.session_system_prompt, frozenset(self.enabled_tools)
+                    self.session_system_prompt,
+                    frozenset(self.enabled_tools),
+                    tool_call_mode=self.settings.get_str(
+                        ("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE
+                    ),
+                    primary_profile=self.primary_profile,
                 )
                 self.session_system_prompt = body
                 self.session_system_prompt_path = None
@@ -3169,7 +3195,12 @@ class AgentSession:
                     return SessionLineResult()
                 path = os.path.expanduser(" ".join(toks[3:]).strip())
                 body = agent_prompts.effective_system_instruction_text_for_tools(
-                    self.session_system_prompt, frozenset(self.enabled_tools)
+                    self.session_system_prompt,
+                    frozenset(self.enabled_tools),
+                    tool_call_mode=self.settings.get_str(
+                        ("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE
+                    ),
+                    primary_profile=self.primary_profile,
                 )
                 try:
                     parent = os.path.dirname(path)
@@ -3504,6 +3535,17 @@ class AgentSession:
                     "stream_thinking enabled for this session (streams model thinking when available). Use /set save to persist."
                 )
                 return SessionLineResult()
+            if feat in (
+                "native_tool_calls",
+                "native_tools",
+                "ollama_native_tools",
+                "tool_call_mode_native",
+            ):
+                self._settings_set(("agent", "tool_call_mode"), "native")
+                sink_print_compat(
+                    "tool_call_mode set to native for this session (Ollama tools API, Phase 1). Use /set save to persist."
+                )
+                return SessionLineResult()
             if feat == "verbose":
                 self.verbose = 2
                 sink_print_compat(self._verbose_ack_message(self.verbose))
@@ -3547,6 +3589,49 @@ class AgentSession:
                 sink_print_compat(self._verbose_ack_message(self.verbose))
                 return SessionLineResult()
             sink_print_compat(self._registry.format_unknown_tool_hint(phrase))
+            return SessionLineResult()
+
+        if key == "tool_call_mode":
+            if len(toks) < 3:
+                sink_print_compat(
+                    "Usage:\n"
+                    "  /set tool_call_mode show\n"
+                    "  /set tool_call_mode json|native\n"
+                    "Notes:\n"
+                    "  - native (default): Ollama tools API for Phase 1 core tools; auto-fallback to json if unusable.\n"
+                    "  - json: agent JSON in message content (Ollama format: json).\n"
+                    "  - Hosted primary LLM still uses JSON mode (Phase 2).\n"
+                    "  - Use /set save to persist.\n"
+                )
+                return SessionLineResult()
+            from agentlib.llm.calls import normalize_tool_call_mode
+            from agentlib.llm.tool_schemas import NATIVE_PHASE1_TOOL_IDS
+
+            sub = toks[2].lower()
+            if sub == "show":
+                mode = normalize_tool_call_mode(
+                    self.settings.get_str(("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE)
+                )
+                tools = ", ".join(sorted(NATIVE_PHASE1_TOOL_IDS))
+                sink_print_compat(
+                    f"tool_call_mode: {mode}; native Phase 1 tools: {tools}\n"
+                    "Progress lines tag tool transport: [native] (Ollama tool_calls API) vs [json] (content/thinking JSON)."
+                )
+                return SessionLineResult()
+            if sub in ("json", "legacy", "content"):
+                self._settings_set(("agent", "tool_call_mode"), "json")
+                sink_print_compat(
+                    "tool_call_mode set to json for this session. Use /set save to persist."
+                )
+                return SessionLineResult()
+            if sub in ("native", "tools", "ollama"):
+                self._settings_set(("agent", "tool_call_mode"), "native")
+                sink_print_compat(
+                    "tool_call_mode set to native (Ollama tools API, Phase 1 core tools). "
+                    "Use /set save to persist."
+                )
+                return SessionLineResult()
+            sink_print_compat("Usage: /set tool_call_mode json|native   (try /set tool_call_mode help)")
             return SessionLineResult()
 
         if key == "thinking":
