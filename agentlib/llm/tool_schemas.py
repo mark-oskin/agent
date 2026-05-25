@@ -286,6 +286,24 @@ def tool_call_only_nudge(*, tool_call_mode: str, primary_profile=None) -> str:
     return "Respond with JSON tool_call only."
 
 
+def invalid_agent_response_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
+    """User nudge when the model response could not be parsed as answer or tool call."""
+    if tool_transport_uses_native(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+        return (
+            "Your last message was not a valid tool call or answer. "
+            "To call a native tool, use the function-calling API (tool_calls), not bare parameter JSON in message text. "
+            "To answer the user, reply with plain text, or use "
+            '{"action":"answer","answer":"..."} when you need structured fields like next_action. '
+            'For JSON-only tools, use {"action":"tool_call","tool":<name>,"parameters":{...}}.'
+        )
+    return (
+        "Your last message was not valid agent JSON. "
+        "Respond with JSON only and include a non-null string action. "
+        'Use {"action":"tool_call","tool":<one of the allowed tools>,'
+        '"parameters":{...}} or {"action":"answer","answer":"..."}.'
+    )
+
+
 def web_search_required_user_content(
     tool_name: str,
     suggested_query: str,

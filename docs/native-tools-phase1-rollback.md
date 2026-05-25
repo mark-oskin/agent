@@ -2,7 +2,13 @@
 
 Phase 1 adds optional Ollama native `tools` API support (JSON fallback unchanged by default).
 
-**Baseline commit (before Phase 1):**
+**Baseline commit (Phase 1 complete, before thin native protocol):**
+
+```
+9cba542 Native Ollama tool calling Phase 1 baseline.
+```
+
+**Pre-Phase-1 commit:**
 
 ```
 612274dcd175cba56924e0c27d30bd750b332804

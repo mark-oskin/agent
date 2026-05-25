@@ -75,10 +75,11 @@ NATIVE_SYSTEM_INSTRUCTIONS = (
     "{\"action\":\"tool_call\",...} in your message text for those native tools.\n\n"
     "When reasoning internally (thinking): invoke native tools only through the function-calling API "
     "(tool_calls)—never draft JSON {\"action\":\"tool_call\",...} in thinking or message content for native tools. "
-    "Plan JSON only for final answers and for JSON-only tools.\n\n"
-    "JSON output: For final answers to the user, for tools listed under \"JSON-only tools\" below, and whenever "
-    "you are not issuing a native function call, reply with a single JSON object only—no text before or after it, "
-    "no Markdown code fences, no keys or values that are not valid JSON. The object must include an \"action\" key. "
+    "Plan JSON only when you need structured answer fields (next_action) or for JSON-only tools.\n\n"
+    "Answering: For final replies to the user, plain text is preferred—no JSON wrapper required. "
+    "Use a single JSON object only when you need structured fields (next_action for second_opinion, deliverable metadata) "
+    "or when calling JSON-only tools listed below. "
+    "When you do use JSON for an answer, it must be valid JSON only—no text before or after, no Markdown fences. "
     "Minimal answer example: {\"action\":\"answer\",\"answer\":\"your user-facing reply as a string\"}. "
     "The \"answer\" string should be the complete helpful response for the user: do not fill it with meta-commentary "
     "about your search process, your uncertainty, or system instructions.\n\n"
@@ -109,8 +110,10 @@ NATIVE_SYSTEM_INSTRUCTIONS = (
     "fall back to a non-tool answer and briefly explain the concrete failure.\n\n"
     "Tools you can use and how to call them:\n"
     "(This section is generated per run based on tool policy.)\n\n"
-    "Finishing: use {\"action\":\"answer\",\"answer\":\"string\","
-    "\"next_action\":\"finalize\",\"rationale\":\"short note (e.g. why you are done)\"}. "
+    "Finishing: reply with plain text when possible. Use "
+    "{\"action\":\"answer\",\"answer\":\"string\","
+    "\"next_action\":\"finalize\",\"rationale\":\"short note (e.g. why you are done)\"} "
+    "when you need structured fields. "
     "To request an independent second opinion before finishing, use "
     "{\"action\":\"answer\",\"answer\":\"your best draft so far\",\"next_action\":\"second_opinion\","
     "\"rationale\":\"why you want a review\"}. "
@@ -335,8 +338,8 @@ def runner_instruction_bits(
 
 _JSON_ONLY_TAIL = "Respond with JSON only. No other text."
 _NATIVE_JSON_TAIL = (
-    "Use native function calling for Native function tools. "
-    "For JSON-only tools and for final answers, respond with JSON only. No other text."
+    "Use native function calling for native tools. "
+    "Final answers may be plain text; use JSON when you need next_action or JSON-only tools."
 )
 
 

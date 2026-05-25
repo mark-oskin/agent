@@ -59,6 +59,10 @@ def _maybe_record_json_tool_transport(raw: str, deps: AgentJsonDeps) -> None:
         _record_tool_transport(str(tool), "json")
     elif action in known:
         _record_tool_transport(str(action), "json")
+    else:
+        inferred = infer_tool_call_from_bare_args(d, known)
+        if inferred and inferred.get("tool"):
+            _record_tool_transport(str(inferred["tool"]), "json")
 
 
 _AGENT_TOP_LEVEL_PARAM_KEYS = frozenset(
@@ -621,6 +625,111 @@ def message_to_agent_json_text(
     return ""
 
 
+def infer_tool_call_from_bare_args(d: dict, known_tools: FrozenSet[str]) -> Optional[dict]:
+    """
+    Map bare parameter objects (no action/tool) to tool_call shape.
+
+    Models in native mode often emit {"query": "..."} or {"url": "..."} in content
+    instead of structured agent JSON or native tool_calls.
+    """
+    if not isinstance(d, dict) or not d:
+        return None
+    action = d.get("action")
+    if action in ("answer", "error", "tool_call"):
+        return None
+    if action in known_tools or d.get("tool") in known_tools:
+        return None
+    if d.get("answer") is not None:
+        return None
+
+    path = d.get("path")
+    pattern = d.get("pattern")
+    replacement = d.get("replacement")
+
+    if (
+        path is not None
+        and pattern is not None
+        and replacement is not None
+        and "replace_text" in known_tools
+    ):
+        return {
+            "action": "tool_call",
+            "tool": "replace_text",
+            "parameters": {
+                k: d[k]
+                for k in ("path", "pattern", "replacement", "replace_all", "glob_pattern")
+                if k in d
+            },
+        }
+
+    if path is not None and "content" in d and "write_file" in known_tools:
+        return {
+            "action": "tool_call",
+            "tool": "write_file",
+            "parameters": {k: d[k] for k in ("path", "content") if k in d},
+        }
+
+    for cmd_key in ("command", "cmd", "shell", "line"):
+        if cmd_key in d and d[cmd_key] is not None and "run_command" in known_tools:
+            return {
+                "action": "tool_call",
+                "tool": "run_command",
+                "parameters": {"command": d[cmd_key]},
+            }
+
+    query = d.get("query")
+    if query is None and d.get("q") is not None:
+        query = d.get("q")
+    if query is not None and str(query).strip():
+        if "fetch_top_n" in d and "search_web_fetch_top" in known_tools:
+            params = {"query": query}
+            for k in ("fetch_top_n", "max_results", "region"):
+                if k in d:
+                    params[k] = d[k]
+            return {"action": "tool_call", "tool": "search_web_fetch_top", "parameters": params}
+        if "search_web" in known_tools:
+            params = {"query": query}
+            for k in ("max_results", "region", "max", "num_results", "limit"):
+                if k in d:
+                    params[k] = d[k]
+            return {"action": "tool_call", "tool": "search_web", "parameters": params}
+        if "search_web_fetch_top" in known_tools:
+            return {
+                "action": "tool_call",
+                "tool": "search_web_fetch_top",
+                "parameters": {"query": query},
+            }
+
+    if ("url" in d or "urls" in d) and "fetch_page" in known_tools:
+        params = {}
+        for k in ("url", "urls", "max_chars", "timeout"):
+            if k in d:
+                params[k] = d[k]
+        if params:
+            return {"action": "tool_call", "tool": "fetch_page", "parameters": params}
+
+    if pattern is not None and "grep" in known_tools:
+        params = {k: d[k] for k in ("pattern", "path", "glob_pattern", "max_results") if k in d}
+        if params:
+            return {"action": "tool_call", "tool": "grep", "parameters": params}
+
+    if path is not None and "read_file" in known_tools and "content" not in d:
+        params = {"path": path}
+        for k in ("lines", "m", "n"):
+            if k in d:
+                params[k] = d[k]
+        return {"action": "tool_call", "tool": "read_file", "parameters": params}
+
+    if d.get("script") is not None and "run_applescript" in known_tools:
+        return {
+            "action": "tool_call",
+            "tool": "run_applescript",
+            "parameters": {"script": d["script"]},
+        }
+
+    return None
+
+
 def _is_tool_call_intent(out: dict, known_tools: FrozenSet[str]) -> bool:
     a = out.get("action")
     if a == "tool_call":
@@ -672,6 +781,13 @@ def normalize_agent_dict(d: dict, deps: AgentJsonDeps) -> dict:
                 break
         if out.get("tool") is None and isinstance(out.get("name"), str) and out["name"] in known_tools:
             out["tool"] = out["name"]
+
+    if not _is_tool_call_intent(out, known_tools) and out.get("answer") is None:
+        inferred = infer_tool_call_from_bare_args(out, known_tools)
+        if inferred:
+            out = dict(inferred)
+            action = "tool_call"
+            out["action"] = "tool_call"
 
     # Infer missing action after aliases / answer fields are filled in.
     if not action or (isinstance(action, str) and action.lower() in ("null", "none", "")):

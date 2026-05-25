@@ -76,3 +76,61 @@ def test_web_search_required_user_content_native_vs_json():
         "search_web", "q", tool_call_mode="native", primary_profile=LlmProfile(backend="hosted", base_url="https://x/v1", model="m", api_key="k")
     )
     assert "Respond with JSON only in tool_call form" in hosted_msg
+
+
+def test_invalid_agent_response_user_content_native_vs_json():
+    from agentlib.llm.tool_schemas import invalid_agent_response_user_content
+
+    native = invalid_agent_response_user_content(tool_call_mode="native")
+    assert "plain text" in native
+    assert "function-calling API" in native
+    assert "not valid agent JSON" not in native
+
+    json_msg = invalid_agent_response_user_content(tool_call_mode="json")
+    assert "not valid agent JSON" in json_msg
+    assert "Respond with JSON only" in json_msg
+
+
+def test_infer_bare_args_maps_common_native_shapes():
+    from agentlib.agent_json import infer_tool_call_from_bare_args, parse_agent_json
+    from agentlib.agent_json import AgentJsonDeps
+    from agentlib.tools import turn_support
+    from agentlib.tools.registry import ToolRegistry
+    import os
+
+    project = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    reg = ToolRegistry(default_tools_dir=os.path.join(project, "tools"))
+    reg.load_plugin_toolsets(reg.default_tools_dir)
+    reg.register_aliases()
+    known = reg.all_known_tools()
+    deps = AgentJsonDeps(
+        all_known_tools=reg.all_known_tools,
+        coerce_enabled_tools=reg.coerce_enabled_tools,
+        merge_tool_param_aliases=turn_support.merge_tool_param_aliases,
+    )
+
+    q = infer_tool_call_from_bare_args({"query": "Seattle Mariners schedule"}, known)
+    assert q["tool"] == "search_web"
+    assert q["parameters"]["query"] == "Seattle Mariners schedule"
+
+    u = infer_tool_call_from_bare_args({"url": "https://example.com"}, known)
+    assert u["tool"] == "fetch_page"
+
+    parsed = parse_agent_json('{"query": "who is president"}', deps)
+    assert parsed["action"] == "tool_call"
+    assert parsed["tool"] == "search_web"
+
+
+def test_tool_result_user_message_native_allows_plain_text():
+    from agentlib.tools import turn_support
+
+    msg = turn_support.tool_result_user_message(
+        "search_web",
+        {"query": "q"},
+        "results",
+        tool_output_max=1000,
+        native_transport=True,
+    )
+    assert "plain text" in msg
+    assert "native tool_calls" in msg
+    assert "respond with JSON only" not in msg

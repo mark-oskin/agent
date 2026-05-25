@@ -29,7 +29,8 @@ def test_build_agent_system_message_includes_contract():
     assert "You are a universal agent" in system
     assert "2026-05-18" in system
     assert "Native tool use" in system
-    assert "JSON output" in system
+    assert "Answering:" in system
+    assert "plain text is preferred" in system
 
 
 def test_native_tool_prompt_uses_function_calling_not_json_tool_shape():
@@ -55,7 +56,7 @@ def test_native_tool_prompt_uses_function_calling_not_json_tool_shape():
     assert "grep" in system
     assert "use_git" in system
     assert system.index("Native function tools") < system.index("JSON-only tools")
-    assert "Use native function calling for Native function tools" in system
+    assert "Final answers may be plain text" in system
 
 
 def test_effective_system_prompt_upgrades_template_override_for_native():

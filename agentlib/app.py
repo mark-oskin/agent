@@ -789,12 +789,13 @@ class AgentApp:
                 tool, params, settings=self.settings
             ),
             is_tool_result_weak_for_dedup=turn_support.is_tool_result_weak_for_dedup,
-            tool_result_user_message=lambda tool, params, result, deliverable_reminder="": turn_support.tool_result_user_message(
+            tool_result_user_message=lambda tool, params, result, deliverable_reminder="", **kwargs: turn_support.tool_result_user_message(
                 tool,
                 params,
                 result,
                 deliverable_reminder=deliverable_reminder,
                 tool_output_max=self.settings_get_int(("ollama", "tool_output_max"), 100000),
+                **kwargs,
             ),
             call_mcp_tool=lambda tid, p: (
                 self._mcp_cluster.invoke_composite(tid, p)

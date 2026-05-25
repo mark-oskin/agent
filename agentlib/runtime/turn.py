@@ -11,7 +11,12 @@ from agentlib.sink import sink_emit
 from agentlib.tools import mcp_registry, turn_support
 from agentlib.tools.routing import preferred_web_search_tool
 
-from agentlib.llm.tool_schemas import tool_call_only_nudge, web_search_required_user_content
+from agentlib.llm.tool_schemas import (
+    invalid_agent_response_user_content,
+    tool_call_only_nudge,
+    tool_transport_uses_native,
+    web_search_required_user_content,
+)
 
 from .deps import ConversationTurnDeps
 
@@ -754,11 +759,18 @@ def run_agent_conversation_turn(
                     "If you will satisfy this with write_file, plan to read_file that same path before answering."
                 )
             messages.append({"role": "assistant", "content": response_text})
+            native_transport = tool_transport_uses_native(
+                tool_call_mode=tool_call_mode, primary_profile=primary_profile
+            )
             messages.append(
                 {
                     "role": "user",
                     "content": deps.tool_result_user_message(
-                        tool, params, result, deliverable_reminder=deliverable_reminder
+                        tool,
+                        params,
+                        result,
+                        deliverable_reminder=deliverable_reminder,
+                        native_transport=native_transport,
                     ),
                 }
             )
@@ -767,11 +779,9 @@ def run_agent_conversation_turn(
             messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        "Your last message was not valid agent JSON. "
-                        "Respond with JSON only and include a non-null string action. "
-                        'Use {"action":"tool_call","tool":<one of the allowed tools>,'
-                        '"parameters":{...}} or {"action":"answer","answer":"..."}.'
+                    "content": invalid_agent_response_user_content(
+                        tool_call_mode=tool_call_mode,
+                        primary_profile=primary_profile,
                     ),
                 }
             )

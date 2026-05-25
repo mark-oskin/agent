@@ -425,6 +425,7 @@ def tool_result_user_message(
     deliverable_reminder: str = "",
     tool_output_max: int,
     scalar_to_str_fn=scalar_to_str,
+    native_transport: bool = False,
 ) -> str:
     """User follow-up after a tool run so the model reads output and stops re-querying."""
     params_s = json.dumps(params, ensure_ascii=False) if params else "{}"
@@ -435,24 +436,43 @@ def tool_result_user_message(
     extra = f"\n{deliverable_reminder}\n" if deliverable_reminder else ""
     wfh = web_tool_result_followup_hint((tool or ""), body)
     wfn = f"\n--- Web tool follow-up hint ---\n{wfh}\n" if wfh else ""
+    if native_transport:
+        answer_hint = (
+            "If the user’s question is now answered, reply with plain text (preferred) or "
+            '{"action":"answer","answer":"..."}. '
+        )
+        tool_hint = (
+            "Only call another tool if the output above is empty, is clearly an error, "
+            "or is still missing facts you need — use native tool_calls for native tools, "
+            'or JSON {"action":"tool_call",...} for JSON-only tools. '
+            "Do not repeat the same tool with the same parameters unless that step failed."
+        )
+        respond_with = "respond naturally"
+    else:
+        answer_hint = (
+            "If the user’s question is now answered, respond with "
+            '{"action":"answer","answer":"..."} '
+            "and nothing else. "
+        )
+        tool_hint = (
+            'Only use {"action":"tool_call",...} if the output above is empty, is clearly an error, '
+            "or is still missing facts you need (or contains conflicting/ambiguous facts that you must resolve) — "
+            "and do not repeat the same tool with the same parameters as a previous step unless that step failed."
+        )
+        respond_with = "respond with JSON only"
     return (
         f"Tool `{tool}` finished.\n"
         f"Parameters: {params_s}\n\n"
         f"Output:\n{body}\n\n"
         f"{extra}{wfn}"
-        "Using the output above (and earlier steps in this chat if any), respond with JSON only. "
+        f"Using the output above (and earlier steps in this chat if any), {respond_with}. "
         "IMPORTANT: Treat tool output as authoritative. If the tool output conflicts with your prior knowledge "
         "or training data, trust the tool output. "
         "If the tool output does not contain any concrete sources/URLs, treat it as insufficient for factual claims "
         "that could be outdated, and call your enabled web search tool again with a better query or call fetch_page on a credible URL. "
         "If snippets are not enough to verify or resolve ambiguity, use fetch_page on a credible URL "
         "(do NOT use run_command with curl/wget to scrape web pages). "
-        "If the user’s question is now answered, respond with "
-        '{"action":"answer","answer":"..."} '
-        "and nothing else. "
-        "Only use {\"action\":\"tool_call\",...} if the output above is empty, is clearly an error, "
-        "or is still missing facts you need (or contains conflicting/ambiguous facts that you must resolve) — "
-        "and do not repeat the same tool with the same parameters as a previous step unless that step failed."
+        f"{answer_hint}{tool_hint}"
     )
 
 
