@@ -75,10 +75,9 @@ NATIVE_SYSTEM_INSTRUCTIONS = (
     "{\"action\":\"tool_call\",...} in your message text for those native tools.\n\n"
     "When reasoning internally (thinking): invoke native tools only through the function-calling API "
     "(tool_calls)—never draft JSON {\"action\":\"tool_call\",...} in thinking or message content for native tools. "
-    "Plan JSON only when you need structured answer fields (next_action) or for JSON-only tools.\n\n"
+    "Plan JSON only for JSON-only tools when native function calling is unavailable.\n\n"
     "Answering: For final replies to the user, plain text is preferred—no JSON wrapper required. "
-    "Use a single JSON object only when you need structured fields (next_action for second_opinion, deliverable metadata) "
-    "or when calling JSON-only tools listed below. "
+    "Use a single JSON object only when calling JSON-only tools listed below. "
     "When you do use JSON for an answer, it must be valid JSON only—no text before or after, no Markdown fences. "
     "Minimal answer example: {\"action\":\"answer\",\"answer\":\"your user-facing reply as a string\"}. "
     "The \"answer\" string should be the complete helpful response for the user: do not fill it with meta-commentary "
@@ -110,14 +109,9 @@ NATIVE_SYSTEM_INSTRUCTIONS = (
     "fall back to a non-tool answer and briefly explain the concrete failure.\n\n"
     "Tools you can use and how to call them:\n"
     "(This section is generated per run based on tool policy.)\n\n"
-    "Finishing: reply with plain text when possible. Use "
-    "{\"action\":\"answer\",\"answer\":\"string\","
-    "\"next_action\":\"finalize\",\"rationale\":\"short note (e.g. why you are done)\"} "
-    "when you need structured fields. "
-    "To request an independent second opinion before finishing, use "
-    "{\"action\":\"answer\",\"answer\":\"your best draft so far\",\"next_action\":\"second_opinion\","
-    "\"rationale\":\"why you want a review\"}. "
-    "The program routes that using session configuration.\n"
+    "Finishing: reply with plain text when possible. "
+    "Before finalizing a high-stakes answer, you may call the native tool second_opinion with "
+    "draft_answer and rationale when it is enabled in this session.\n"
     "If you need to write and execute code, first use write_file then use run_command. "
     "If the user asked for a document/report/essay saved to disk, after write_file you should read_file that same path "
     "and put the full document text in the final answer field (unless the user explicitly asked only for a file path). "
@@ -184,14 +178,17 @@ def _enabled_tools_list(enabled_tools: Optional[AbstractSet[str]]) -> list[str]:
 
 
 def _tool_docs_block(
-    enabled_tools: Optional[AbstractSet[str]], *, native_tool_prompt: bool = False
+    enabled_tools: Optional[AbstractSet[str]], *, native_tool_prompt: bool = False, include_second_opinion: bool = False
 ) -> str:
     """Minimal per-tool parameter docs, filtered by tool policy."""
-    from agentlib.llm.tool_schemas import NATIVE_PHASE1_TOOL_IDS
+    from agentlib.llm.tool_schemas import native_tool_ids_for_enabled
 
     enabled = _enabled_tools_list(enabled_tools)
-    native_enabled = [tid for tid in enabled if tid in NATIVE_PHASE1_TOOL_IDS]
-    json_enabled = [tid for tid in enabled if tid not in NATIVE_PHASE1_TOOL_IDS]
+    native_ids = native_tool_ids_for_enabled(
+        frozenset(enabled), include_second_opinion=include_second_opinion
+    )
+    native_enabled = [tid for tid in enabled if tid in native_ids]
+    json_enabled = [tid for tid in enabled if tid not in native_ids]
 
     def _numbered_docs(tool_ids: list[str]) -> str:
         docs: list[str] = []
@@ -243,6 +240,7 @@ def effective_system_instruction_text_for_tools(
     native_tool_prompt: bool = False,
     tool_call_mode: Optional[str] = None,
     primary_profile=None,
+    include_second_opinion: bool = False,
 ) -> str:
     """
     Like `effective_system_instruction_text`, but the tools section is generated to match tool policy.
@@ -255,7 +253,9 @@ def effective_system_instruction_text_for_tools(
             tool_call_mode=tool_call_mode, primary_profile=primary_profile
         )
     base = _instruction_base_for_tools(override, native_tool_prompt=native_tool_prompt)
-    tool_block = _tool_docs_block(enabled_tools, native_tool_prompt=native_tool_prompt)
+    tool_block = _tool_docs_block(
+        enabled_tools, native_tool_prompt=native_tool_prompt, include_second_opinion=include_second_opinion
+    )
     start = base.find(_TOOLS_SECTION_MARKER)
     end = base.find("\n\nFinishing:", start if start >= 0 else 0)
     if start >= 0 and end >= 0 and end > start:
@@ -327,7 +327,7 @@ def runner_instruction_bits(
         bits.append(f"Runner: primary LLM is local Ollama ({ollama_model!r}).")
     if second_opinion or hosted_review_ready(cloud, reviewer_hosted_profile):
         bits.append(
-            "Runner: you may use next_action second_opinion in this session (see system instructions)."
+            "Runner: you may call the second_opinion native tool in this session before finalizing (see system instructions)."
         )
     tp = tool_policy_runner_text(enabled_tools)
     if tp:
@@ -339,7 +339,7 @@ def runner_instruction_bits(
 _JSON_ONLY_TAIL = "Respond with JSON only. No other text."
 _NATIVE_JSON_TAIL = (
     "Use native function calling for native tools. "
-    "Final answers may be plain text; use JSON when you need next_action or JSON-only tools."
+    "Final answers may be plain text; use JSON only for JSON-only tools."
 )
 
 
@@ -363,12 +363,16 @@ def build_agent_system_message(
     native_prompt = use_native_tool_prompt(
         tool_call_mode=tool_call_mode, primary_profile=primary_profile
     )
+    include_second_opinion = bool(
+        second_opinion or hosted_review_ready(cloud, reviewer_hosted_profile)
+    )
     si = effective_system_instruction_text_for_tools(
         system_instruction_override,
         enabled_tools,
         native_tool_prompt=native_prompt,
         tool_call_mode=tool_call_mode,
         primary_profile=primary_profile,
+        include_second_opinion=include_second_opinion,
     )
     suff = (skill_suffix or "").strip()
     if suff:
@@ -447,7 +451,15 @@ def normalize_transcript_messages(messages: list) -> list:
             content = str(content)
         if role == "user":
             content = strip_legacy_agent_turn_user_content(content)
-        out.append({"role": role, "content": content})
+        row: dict = {"role": role, "content": content}
+        if role == "assistant" and m.get("tool_calls"):
+            row["tool_calls"] = m["tool_calls"]
+        if role == "tool":
+            if m.get("tool_name"):
+                row["tool_name"] = m["tool_name"]
+            if m.get("tool_call_id"):
+                row["tool_call_id"] = m["tool_call_id"]
+        out.append(row)
     return out
 
 

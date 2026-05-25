@@ -1,12 +1,35 @@
-"""JSON Schema tool definitions for native LLM tool-calling (Phase 1: core Ollama tools)."""
+"""JSON Schema tool definitions for native LLM tool-calling."""
 
 from __future__ import annotations
 
+import json
 from typing import AbstractSet, Any, Optional
 
 from agentlib.tools.routing import CORE_TOOL_PROMPT_DOCS
 
-# Phase 1: hand-maintained schemas for a small core set (expand in later phases).
+SECOND_OPINION_TOOL_ID = "second_opinion"
+
+# Core tools with hand-maintained native schemas.
+NATIVE_CORE_TOOL_IDS: frozenset[str] = frozenset(
+    {
+        "search_web",
+        "search_web_fetch_top",
+        "read_file",
+        "run_command",
+        "fetch_page",
+        "write_file",
+        "grep",
+        "list_directory",
+        "replace_text",
+        "use_git",
+        "call_python",
+        "run_applescript",
+        "download_file",
+        "tail_file",
+    }
+)
+
+# Back-compat alias used in docs/tests.
 NATIVE_PHASE1_TOOL_IDS: frozenset[str] = frozenset(
     {
         "search_web",
@@ -182,21 +205,206 @@ _CORE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["path", "pattern", "replacement"],
         "additionalProperties": False,
     },
+    "use_git": {
+        "type": "object",
+        "properties": {
+            "op": {
+                "type": "string",
+                "description": "Git operation: status, log, diff, add, commit, push, pull, or branch.",
+            },
+            "worktree": {"type": "string", "description": "Repository path (optional)."},
+            "message": {"type": "string", "description": "Commit message (for commit)."},
+            "remote": {"type": "string", "description": "Remote name (for push/pull)."},
+            "branch": {"type": "string", "description": "Branch name (for push/pull/branch)."},
+            "staged": {"type": "boolean", "description": "Staged diff only (for diff)."},
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Paths for git add.",
+            },
+        },
+        "required": ["op"],
+        "additionalProperties": False,
+    },
+    "call_python": {
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "Syntactically valid Python source to execute.",
+            },
+            "globals": {
+                "type": "object",
+                "description": "Optional extra globals for exec.",
+            },
+        },
+        "required": ["code"],
+        "additionalProperties": False,
+    },
+    "run_applescript": {
+        "type": "object",
+        "properties": {
+            "script": {"type": "string", "description": "AppleScript source code."},
+            "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default 20000)."},
+            "echo_script": {"type": "boolean", "description": "Include script in tool output."},
+            "use_temp_file": {"type": "boolean", "description": "Run via temp .applescript file."},
+        },
+        "required": ["script"],
+        "additionalProperties": False,
+    },
+    "download_file": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Source URL."},
+            "path": {"type": "string", "description": "Destination file path."},
+        },
+        "required": ["url", "path"],
+        "additionalProperties": False,
+    },
+    "tail_file": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "File path."},
+            "lines": {"type": "integer", "description": "Number of lines from end (default 20)."},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    SECOND_OPINION_TOOL_ID: {
+        "type": "object",
+        "properties": {
+            "draft_answer": {
+                "type": "string",
+                "description": "Your best draft answer for the user so far.",
+            },
+            "rationale": {
+                "type": "string",
+                "description": "Why you want an independent review before finalizing.",
+            },
+        },
+        "required": ["draft_answer", "rationale"],
+        "additionalProperties": False,
+    },
 }
 
 
 def core_tool_parameters_schema(tool_id: str) -> Optional[dict[str, Any]]:
-    """Return JSON Schema for a Phase 1 core tool's parameters, or None."""
+    """Return JSON Schema for a core tool's parameters, or None."""
     return _CORE_TOOL_SCHEMAS.get(tool_id)
+
+
+def _generic_object_schema(*, description: str = "") -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "object", "additionalProperties": True}
+    if description:
+        schema["description"] = description
+    return schema
+
+
+def plugin_parameters_schema(tool_id: str) -> Optional[dict[str, Any]]:
+    """Build a JSON Schema for a plugin tool from its TOOLSET metadata."""
+    from agentlib.tools.plugins import PLUGIN_TOOLSETS
+
+    tid = (tool_id or "").strip()
+    if not tid:
+        return None
+    for ts in PLUGIN_TOOLSETS.values():
+        tools = ts.get("tools") if isinstance(ts, dict) else None
+        if not isinstance(tools, list):
+            continue
+        for td in tools:
+            if not isinstance(td, dict) or str(td.get("id") or "").strip() != tid:
+                continue
+            custom = td.get("parameters_schema")
+            if isinstance(custom, dict):
+                return custom
+            params = td.get("params")
+            if isinstance(params, dict) and params:
+                properties: dict[str, Any] = {}
+                required: list[str] = []
+                for key, desc in params.items():
+                    ds = str(desc or "")
+                    properties[str(key)] = {
+                        "type": "string",
+                        "description": ds or str(key),
+                    }
+                    if "optional" not in ds.lower():
+                        required.append(str(key))
+                schema: dict[str, Any] = {
+                    "type": "object",
+                    "properties": properties,
+                    "additionalProperties": True,
+                }
+                if required:
+                    schema["required"] = required
+                return schema
+            return _generic_object_schema(description=str(td.get("description") or tid))
+    return None
+
+
+def mcp_parameters_schema(tool_id: str) -> Optional[dict[str, Any]]:
+    from agentlib.tools import mcp_registry
+
+    schema = mcp_registry.parameters_schema(tool_id)
+    if isinstance(schema, dict):
+        return schema
+    return None
+
+
+def tool_parameters_schema(tool_id: str) -> Optional[dict[str, Any]]:
+    """Native schema for any known tool id (core, plugin, MCP, second_opinion)."""
+    tid = (tool_id or "").strip()
+    if not tid:
+        return None
+    core = core_tool_parameters_schema(tid)
+    if core is not None:
+        return core
+    plugin = plugin_parameters_schema(tid)
+    if plugin is not None:
+        return plugin
+    return mcp_parameters_schema(tid)
+
+
+def tool_has_native_schema(tool_id: str) -> bool:
+    return tool_parameters_schema(tool_id) is not None
+
+
+def native_tool_ids_for_enabled(
+    enabled_tools: Optional[AbstractSet[str]],
+    *,
+    include_second_opinion: bool = False,
+) -> frozenset[str]:
+    """Tool ids that will be sent on the Ollama ``tools`` API for this session."""
+    et = set(enabled_tools or ())
+    out: set[str] = set()
+    for tid in et:
+        if tool_has_native_schema(tid):
+            out.add(tid)
+    if include_second_opinion:
+        out.add(SECOND_OPINION_TOOL_ID)
+    return frozenset(out)
 
 
 def ollama_function_tool_definition(tool_id: str) -> Optional[dict[str, Any]]:
     """Build one OpenAI/Ollama-style tool entry for ``tool_id``."""
-    params = core_tool_parameters_schema(tool_id)
+    params = tool_parameters_schema(tool_id)
     if params is None:
         return None
     doc = CORE_TOOL_PROMPT_DOCS.get(tool_id, tool_id)
-    first_line = doc.split("\n", 1)[0].strip()
+    if tool_id == SECOND_OPINION_TOOL_ID:
+        doc = (
+            "second_opinion — Request an independent reviewer model before finalizing. "
+            "parameters.draft_answer (string), parameters.rationale (non-empty string)."
+        )
+    else:
+        from agentlib.tools import mcp_registry
+        from agentlib.tools.plugins import plugin_tool_prompt_doc
+
+        doc = (
+            plugin_tool_prompt_doc(tool_id)
+            or mcp_registry.prompt_doc(tool_id)
+            or CORE_TOOL_PROMPT_DOCS.get(tool_id, tool_id)
+        )
+    first_line = str(doc).split("\n", 1)[0].strip()
     description = first_line if first_line else tool_id
     return {
         "type": "function",
@@ -211,21 +419,14 @@ def ollama_function_tool_definition(tool_id: str) -> Optional[dict[str, Any]]:
 def ollama_tools_for_enabled(
     enabled_tools: Optional[AbstractSet[str]],
     *,
-    phase1_only: bool = True,
+    include_second_opinion: bool = False,
 ) -> list[dict[str, Any]]:
-    """
-    Build Ollama ``tools`` list for session-enabled tools that have native schemas.
-
-    When ``phase1_only`` is True, only ``NATIVE_PHASE1_TOOL_IDS`` are included.
-    """
-    et = set(enabled_tools or ())
-    if not et:
-        return []
-    allowed = NATIVE_PHASE1_TOOL_IDS if phase1_only else frozenset(_CORE_TOOL_SCHEMAS)
+    """Build Ollama ``tools`` list for session-enabled tools that have native schemas."""
+    native_ids = native_tool_ids_for_enabled(
+        enabled_tools, include_second_opinion=include_second_opinion
+    )
     out: list[dict[str, Any]] = []
-    for tid in sorted(allowed):
-        if tid not in et:
-            continue
+    for tid in sorted(native_ids):
         entry = ollama_function_tool_definition(tid)
         if entry is not None:
             out.append(entry)
@@ -286,21 +487,104 @@ def tool_call_only_nudge(*, tool_call_mode: str, primary_profile=None) -> str:
     return "Respond with JSON tool_call only."
 
 
+def _native_mode(*, tool_call_mode: str, primary_profile=None) -> bool:
+    return tool_transport_uses_native(tool_call_mode=tool_call_mode, primary_profile=primary_profile)
+
+
 def invalid_agent_response_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
     """User nudge when the model response could not be parsed as answer or tool call."""
-    if tool_transport_uses_native(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+    if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
         return (
             "Your last message was not a valid tool call or answer. "
             "To call a native tool, use the function-calling API (tool_calls), not bare parameter JSON in message text. "
-            "To answer the user, reply with plain text, or use "
-            '{"action":"answer","answer":"..."} when you need structured fields like next_action. '
-            'For JSON-only tools, use {"action":"tool_call","tool":<name>,"parameters":{...}}.'
+            "To answer the user, reply with plain text. "
+            f'To request review before finishing, call the native tool {SECOND_OPINION_TOOL_ID!r}.'
         )
     return (
         "Your last message was not valid agent JSON. "
         "Respond with JSON only and include a non-null string action. "
         'Use {"action":"tool_call","tool":<one of the allowed tools>,'
         '"parameters":{...}} or {"action":"answer","answer":"..."}.'
+    )
+
+
+def truncated_json_recovery_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
+    if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+        return (
+            "Your last response looked truncated or malformed. "
+            "Reply with plain text, issue a native tool_calls request, or send one complete JSON object."
+        )
+    return (
+        "Your last response looked like a JSON object but it was truncated/malformed "
+        "(missing closing braces/quotes). Respond again with a SINGLE valid JSON object "
+        "and no other text."
+    )
+
+
+def missing_answer_field_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
+    if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+        return (
+            'Your JSON had action "answer" but was missing a non-empty string field "answer". '
+            "Reply with plain text, or send "
+            '{"action":"answer","answer":"..."} with a non-empty answer string.'
+        )
+    return (
+        'Your JSON had action "answer" but was missing a non-empty string field "answer". '
+        "Respond again with a SINGLE valid JSON object in this exact shape:\n"
+        '{"action":"answer","answer":"..."}\n'
+        "No other keys, and no other text."
+    )
+
+
+def deliverable_full_document_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
+    if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+        return (
+            "Your answer is too short to be the requested multi-page document. "
+            "Use read_file to load the written file, then reply with plain text containing the FULL document "
+            "(the user asked for the document itself). "
+            "If the file is still too short, expand it with write_file and read_file again."
+        )
+    return (
+        "Your answer is too short to be the requested multi-page document. "
+        "Use read_file to load the written file, then respond with action answer whose "
+        "answer field contains the FULL document text (the user asked for the document itself). "
+        "If the file is still too short, expand it with write_file and read_file again."
+    )
+
+
+def second_opinion_missing_rationale_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
+    if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+        return (
+            f"The {SECOND_OPINION_TOOL_ID} tool requires a non-empty rationale parameter. "
+            f"Call {SECOND_OPINION_TOOL_ID!r} via native tool_calls with draft_answer and rationale."
+        )
+    return (
+        f"The {SECOND_OPINION_TOOL_ID} tool requires a non-empty rationale parameter. "
+        '{"action":"tool_call","tool":"second_opinion","parameters":{"draft_answer":"...","rationale":"..."}}'
+    )
+
+
+def second_opinion_unavailable_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
+    if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+        return (
+            "Second opinion is not available in this session. "
+            "Reply with plain text as your final answer."
+        )
+    return (
+        "Second opinion is not available in this session. Respond with JSON only using "
+        '{"action":"answer","answer":"...","next_action":"finalize","rationale":"..."}.'
+    )
+
+
+def second_opinion_limit_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
+    if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+        return (
+            "Second opinion limit reached for this session. "
+            "Reply with plain text as your final answer."
+        )
+    return (
+        "Second opinion limit reached for this session. Respond with JSON only using "
+        '{"action":"answer","answer":"...","next_action":"finalize","rationale":"..."}.'
     )
 
 

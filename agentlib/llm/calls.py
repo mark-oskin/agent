@@ -24,6 +24,21 @@ _NATIVE_JSON_FALLBACK_WARNING = (
 
 DEFAULT_TOOL_CALL_MODE = "native"
 
+_LAST_OLLAMA_RAW_MESSAGE: Optional[dict] = None
+
+
+def consume_last_ollama_raw_message() -> Optional[dict]:
+    """Return and clear the last Ollama ``message`` dict from an agent chat call."""
+    global _LAST_OLLAMA_RAW_MESSAGE
+    msg = _LAST_OLLAMA_RAW_MESSAGE
+    _LAST_OLLAMA_RAW_MESSAGE = None
+    return msg if isinstance(msg, dict) else None
+
+
+def _stash_ollama_raw_message(msg: object) -> None:
+    global _LAST_OLLAMA_RAW_MESSAGE
+    _LAST_OLLAMA_RAW_MESSAGE = msg if isinstance(msg, dict) else None
+
 
 def normalize_tool_call_mode(mode: object) -> str:
     """``native`` (default) or ``json`` (Ollama ``format: json`` agent protocol)."""
@@ -375,6 +390,7 @@ def call_ollama_chat(
     ] = None,
     ollama_tool_call_mode: str = DEFAULT_TOOL_CALL_MODE,
     for_agent_turn: bool = True,
+    include_second_opinion: bool = False,
 ) -> str:
     """
     Agent chat: local Ollama JSON /api/chat, or hosted OpenAI-compatible chat.completions.
@@ -401,7 +417,9 @@ def call_ollama_chat(
 
     tcm = normalize_tool_call_mode(ollama_tool_call_mode)
     use_native = for_agent_turn and tcm == "native"
-    native_tools = ollama_tools_for_enabled(enabled_tools) if use_native else []
+    native_tools = ollama_tools_for_enabled(
+        enabled_tools, include_second_opinion=include_second_opinion
+    ) if use_native else []
     use_native = use_native and bool(native_tools)
 
     def _payload(*, native: bool) -> dict:
@@ -437,6 +455,7 @@ def call_ollama_chat(
                             stream_chunks=stream_llm,
                         )
                     last_msg = msg if isinstance(msg, dict) else {}
+                    _stash_ollama_raw_message(last_msg)
                     if ollama_debug:
                         sink_emit({"type": "debug", "text": f"[DEBUG] Ollama merged message: {msg!r}"})
                     text = message_to_agent_json_text(msg, enabled_tools)
@@ -448,6 +467,7 @@ def call_ollama_chat(
                     sink_emit({"type": "debug", "text": f"[DEBUG] Ollama API response: {data!r}"})
                 msg = data.get("message") or {}
                 last_msg = msg if isinstance(msg, dict) else {}
+                _stash_ollama_raw_message(last_msg)
                 text = message_to_agent_json_text(msg, enabled_tools)
                 usage = ollama_usage_from_chat_response(data)
                 if stream_llm and text.strip():

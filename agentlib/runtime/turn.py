@@ -12,10 +12,23 @@ from agentlib.tools import mcp_registry, turn_support
 from agentlib.tools.routing import preferred_web_search_tool
 
 from agentlib.llm.tool_schemas import (
+    SECOND_OPINION_TOOL_ID,
+    deliverable_full_document_user_content,
     invalid_agent_response_user_content,
+    missing_answer_field_user_content,
+    second_opinion_limit_user_content,
+    second_opinion_unavailable_user_content,
     tool_call_only_nudge,
     tool_transport_uses_native,
+    truncated_json_recovery_user_content,
     web_search_required_user_content,
+)
+from agentlib.llm.calls import consume_last_ollama_raw_message
+from agentlib.llm.second_opinion import run_second_opinion_tool
+from agentlib.transcript_shape import (
+    assistant_transcript_message,
+    first_tool_call_id,
+    tool_transcript_message,
 )
 
 from .deps import ConversationTurnDeps
@@ -130,6 +143,49 @@ def _answer_refuses_despite_tools(answer_text: str) -> bool:
         return False
     return bool(_REFUSES_DUE_TO_ACCESS_RE.search(a))
 
+
+def _transcript_append_assistant_user(
+    messages: list,
+    raw_msg: Optional[dict],
+    response_text: str,
+    user_content: str,
+    *,
+    native_transport: bool,
+) -> None:
+    messages.append(
+        assistant_transcript_message(
+            raw_msg, fallback_content=response_text, use_provider_shape=native_transport
+        )
+    )
+    messages.append({"role": "user", "content": user_content})
+
+
+def _transcript_append_tool_followup(
+    messages: list,
+    raw_msg: Optional[dict],
+    response_text: str,
+    tool: str,
+    result: str,
+    user_followup: str,
+    *,
+    native_transport: bool,
+) -> None:
+    asst = assistant_transcript_message(
+        raw_msg, fallback_content=response_text, use_provider_shape=native_transport
+    )
+    body = result if isinstance(result, str) else str(result)
+    if native_transport and isinstance(raw_msg, dict) and raw_msg.get("tool_calls"):
+        tc_id = first_tool_call_id(raw_msg.get("tool_calls"))
+        messages.append(asst)
+        messages.append(tool_transcript_message(tool, body, tool_call_id=tc_id))
+        if user_followup:
+            messages.append({"role": "user", "content": user_followup})
+    else:
+        messages.append({"role": "assistant", "content": response_text})
+        if user_followup:
+            messages.append({"role": "user", "content": user_followup})
+
+
 def run_agent_conversation_turn(
     messages: list,
     user_query: str,
@@ -182,6 +238,10 @@ def run_agent_conversation_turn(
     verified_by_fetch = False
     forced_tool_attempt_after_refusal = False
     tool_call_mode = deps.ollama_tool_call_mode()
+    include_second_opinion = bool(
+        second_opinion_enabled
+        or deps.hosted_review_ready(cloud_ai_enabled, reviewer_hosted_profile)
+    )
     for _ in range(step_limit):
         messages = deps.maybe_compact_context_window(
             messages,
@@ -190,10 +250,19 @@ def run_agent_conversation_turn(
             verbose=verbose,
             context_cfg=context_cfg,
         )
-        api_messages = messages_for_agent_api_call(messages, agent_system_message or "")
-        response_text = deps.call_ollama_chat(
-            api_messages, primary_profile, et, verbose=verbose
+        native_transport = tool_transport_uses_native(
+            tool_call_mode=tool_call_mode, primary_profile=primary_profile
         )
+        api_messages = messages_for_agent_api_call(messages, agent_system_message or "")
+        api_et = frozenset(set(et) | {SECOND_OPINION_TOOL_ID}) if include_second_opinion else et
+        response_text = deps.call_ollama_chat(
+            api_messages,
+            primary_profile,
+            api_et,
+            verbose=verbose,
+            include_second_opinion=include_second_opinion,
+        )
+        raw_ollama_msg = consume_last_ollama_raw_message()
         response_data = deps.parse_agent_json(response_text)
         note = consume_last_json_parse_note()
         if note:
@@ -206,30 +275,28 @@ def run_agent_conversation_turn(
         if action == "answer":
             rt = (response_text or "").strip()
             if rt.startswith("{") and ("\"action\"" in rt or "'action'" in rt) and not rt.rstrip().endswith("}"):
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your last response looked like a JSON object but it was truncated/malformed "
-                            "(missing closing braces/quotes). Respond again with a SINGLE valid JSON object "
-                            "and no other text."
-                        ),
-                    }
+                _transcript_append_assistant_user(
+                    messages,
+                    raw_ollama_msg,
+                    response_text,
+                    truncated_json_recovery_user_content(
+                        tool_call_mode=tool_call_mode, primary_profile=primary_profile
+                    ),
+                    native_transport=native_transport,
                 )
                 continue
             if web_required and not saw_strong_web_result:
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "You must not answer from memory for this request because web verification is required. "
-                            "No usable web results have been obtained yet (or they were empty/blocked). "
-                            f"Call {mandatory_web_tool} again with a different, more effective query, or fetch_page on a credible source URL "
-                            f"from any results you do have. {tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
-                        ),
-                    }
+                _transcript_append_assistant_user(
+                    messages,
+                    raw_ollama_msg,
+                    response_text,
+                    (
+                        "You must not answer from memory for this request because web verification is required. "
+                        "No usable web results have been obtained yet (or they were empty/blocked). "
+                        f"Call {mandatory_web_tool} again with a different, more effective query, or fetch_page on a credible source URL "
+                        f"from any results you do have. {tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
+                    ),
+                    native_transport=native_transport,
                 )
                 continue
             ans_out0 = response_data.get("answer")
@@ -243,17 +310,17 @@ def run_agent_conversation_turn(
                 and et
             ):
                 forced_tool_attempt_after_refusal = True
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "You have permission to use the allowed tools in this session. "
-                            "Do not refuse due to lack of access when a relevant tool exists. "
-                            "Pick an appropriate tool and call it now. "
-                            f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
-                        ),
-                    }
+                _transcript_append_assistant_user(
+                    messages,
+                    raw_ollama_msg,
+                    response_text,
+                    (
+                        "You have permission to use the allowed tools in this session. "
+                        "Do not refuse due to lack of access when a relevant tool exists. "
+                        "Pick an appropriate tool and call it now. "
+                        f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
+                    ),
+                    native_transport=native_transport,
                 )
                 continue
             if web_required and not verified_by_fetch:
@@ -263,17 +330,17 @@ def run_agent_conversation_turn(
                 if isinstance(ans_out0, str) and _answer_is_clarifying_question(ans_out0):
                     pass
                 else:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Web verification is required. You must call fetch_page on a credible source URL "
-                                "before giving a final answer. If the current results don't include a good URL, "
-                                f"call {mandatory_web_tool} again with a better query to find a more direct page, then fetch_page it. "
-                                f"Do not answer yet. {tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
-                            ),
-                        }
+                    _transcript_append_assistant_user(
+                        messages,
+                        raw_ollama_msg,
+                        response_text,
+                        (
+                            "Web verification is required. You must call fetch_page on a credible source URL "
+                            "before giving a final answer. If the current results don't include a good URL, "
+                            f"call {mandatory_web_tool} again with a better query to find a more direct page, then fetch_page it. "
+                            f"Do not answer yet. {tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
+                        ),
+                        native_transport=native_transport,
                     )
                     continue
             if (
@@ -282,16 +349,16 @@ def run_agent_conversation_turn(
                 and isinstance(ans_out0, str)
                 and _answer_requests_more_web(ans_out0)
             ):
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "You said you need to search again. Do not respond with action answer yet. "
-                            f"Call {mandatory_web_tool} again with a more effective query (or fetch_page on a credible URL). "
-                            f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
-                        ),
-                    }
+                _transcript_append_assistant_user(
+                    messages,
+                    raw_ollama_msg,
+                    response_text,
+                    (
+                        "You said you need to search again. Do not give a final answer yet. "
+                        f"Call {mandatory_web_tool} again with a more effective query (or fetch_page on a credible URL). "
+                        f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
+                    ),
+                    native_transport=native_transport,
                 )
                 continue
             if (
@@ -300,124 +367,70 @@ def run_agent_conversation_turn(
                 and isinstance(ans_out0, str)
                 and _answer_deflects_instead_of_verifying(ans_out0)
             ):
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Web verification is required and you already have URL-backed search results. "
-                            "Do not punt the user to 'visit a website' or say you can't answer from snippets. "
-                            "Fetch and verify: call fetch_page on a credible source URL from the results (prefer official sites), "
-                            "then answer with the verified name and cite the source. "
-                            f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
-                        ),
-                    }
+                _transcript_append_assistant_user(
+                    messages,
+                    raw_ollama_msg,
+                    response_text,
+                    (
+                        "Web verification is required and you already have URL-backed search results. "
+                        "Do not punt the user to 'visit a website' or say you can't answer from snippets. "
+                        "Fetch and verify: call fetch_page on a credible source URL from the results (prefer official sites), "
+                        "then answer with the verified name and cite the source. "
+                        f"{tool_call_only_nudge(tool_call_mode=tool_call_mode, primary_profile=primary_profile)}"
+                    ),
+                    native_transport=native_transport,
                 )
                 continue
             if deliverable_wanted and deliverable_path and not deliverable_read_ok:
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": deps.deliverable_followup_block(deliverable_path),
-                    }
+                _transcript_append_assistant_user(
+                    messages,
+                    raw_ollama_msg,
+                    response_text,
+                    deps.deliverable_followup_block(deliverable_path),
+                    native_transport=native_transport,
                 )
                 continue
             if deliverable_wanted and deliverable_read_ok and deps.answer_missing_written_body(
                 response_data.get("answer") or "", deliverable_file_chars
             ):
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your answer is too short to be the requested multi-page document. "
-                            "Use read_file to load the written file, then respond with action answer whose "
-                            "answer field contains the FULL document text (the user asked for the document itself). "
-                            "If the file is still too short, expand it with write_file and read_file again."
-                        ),
-                    }
+                _transcript_append_assistant_user(
+                    messages,
+                    raw_ollama_msg,
+                    response_text,
+                    deliverable_full_document_user_content(
+                        tool_call_mode=tool_call_mode, primary_profile=primary_profile
+                    ),
+                    native_transport=native_transport,
                 )
                 continue
             na = (response_data.get("next_action") or "finalize").strip().lower()
             if na == "second_opinion":
-                rationale = deps.scalar_to_str(response_data.get("rationale"), "").strip()
-                primary = response_data.get("answer") or ""
-                if not rationale:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "second_opinion requires a non-empty string field \"rationale\" explaining why "
-                                "you want a review. Respond with JSON only."
-                            ),
-                        }
+                if not include_second_opinion:
+                    msg = second_opinion_unavailable_user_content(
+                        tool_call_mode=tool_call_mode, primary_profile=primary_profile
                     )
-                    continue
-                hosted_ready = deps.hosted_review_ready(
-                    cloud_ai_enabled, reviewer_hosted_profile
-                )
-                if not second_opinion_enabled and not hosted_ready:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Second opinion is not available in this session. Respond with JSON only using "
-                                '{"action":"answer","answer":"...","next_action":"finalize","rationale":"..."}.'
-                            ),
-                        }
+                elif second_opinion_rounds >= 3:
+                    msg = second_opinion_limit_user_content(
+                        tool_call_mode=tool_call_mode, primary_profile=primary_profile
                     )
-                    continue
-                backend = (
-                    "ollama"
-                    if second_opinion_enabled
-                    else ("openai" if hosted_ready else "")
-                )
-                if second_opinion_rounds >= 3:
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Second opinion limit reached for this session. Respond with JSON only using "
-                                '{"action":"answer","answer":"...","next_action":"finalize","rationale":"..."}.'
-                            ),
-                        }
-                    )
-                    continue
-                reviewer_msgs = deps.second_opinion_reviewer_messages(
-                    user_query, primary, rationale
-                )
-                if backend == "ollama":
-                    rm = (reviewer_ollama_model or "").strip() or deps.ollama_second_opinion_model()
-                    review = deps.call_ollama_plaintext(reviewer_msgs, rm)
                 else:
-                    if (
-                        reviewer_hosted_profile is not None
-                        and reviewer_hosted_profile.backend == "hosted"
-                        and (reviewer_hosted_profile.api_key or "").strip()
-                    ):
-                        review = deps.call_hosted_chat_plain(
-                            reviewer_msgs, reviewer_hosted_profile
-                        )
-                    else:
-                        review = deps.call_openai_chat_plain(reviewer_msgs)
-                second_opinion_rounds += 1
-                tool_executed = True
-                reviewed_tool_need = True
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": deps.second_opinion_result_user_message(review),
-                    }
+                    msg = (
+                        f"Use the {SECOND_OPINION_TOOL_ID} native tool instead of next_action in JSON. "
+                        f"Call {SECOND_OPINION_TOOL_ID!r} via tool_calls with draft_answer and rationale."
+                    )
+                _transcript_append_assistant_user(
+                    messages, raw_ollama_msg, response_text, msg, native_transport=native_transport
                 )
                 continue
             if not reviewed_tool_need and not tool_executed:
                 reviewed_tool_need = True
-                messages.append({"role": "assistant", "content": response_text})
+                messages.append(
+                    assistant_transcript_message(
+                        raw_ollama_msg,
+                        fallback_content=response_text,
+                        use_provider_shape=native_transport,
+                    )
+                )
                 proposed = response_data.get("answer") or ""
                 router_q2 = deps.route_requires_websearch_after_answer(
                     user_query,
@@ -451,7 +464,13 @@ def run_agent_conversation_turn(
                     follow = deps.tool_need_review_followup(user_query, proposed, et)
                 messages.append({"role": "user", "content": follow})
                 continue
-            messages.append({"role": "assistant", "content": response_text})
+            messages.append(
+                assistant_transcript_message(
+                    raw_ollama_msg,
+                    fallback_content=response_text,
+                    use_provider_shape=native_transport,
+                )
+            )
             ans_out = response_data.get("answer")
             if ans_out is None or (isinstance(ans_out, str) and not ans_out.strip()):
                 extracted = deps.extract_json_object_from_text(response_text)
@@ -472,11 +491,8 @@ def run_agent_conversation_turn(
                     messages.append(
                         {
                             "role": "user",
-                            "content": (
-                                'Your JSON had action "answer" but was missing a non-empty string field "answer". '
-                                "Respond again with a SINGLE valid JSON object in this exact shape:\n"
-                                '{"action":"answer","answer":"..."}\n'
-                                "No other keys, and no other text."
+                            "content": missing_answer_field_user_content(
+                                tool_call_mode=tool_call_mode, primary_profile=primary_profile
                             ),
                         }
                     )
@@ -487,7 +503,13 @@ def run_agent_conversation_turn(
             answered = True
             break
         elif action == "error":
-            messages.append({"role": "assistant", "content": response_text})
+            messages.append(
+                assistant_transcript_message(
+                    raw_ollama_msg,
+                    fallback_content=response_text,
+                    use_provider_shape=native_transport,
+                )
+            )
             err = response_data.get("error")
             sink_emit({"type": "error", "text": f"Agent error: {err}"})
             final_answer = str(err) if err is not None else None
@@ -542,7 +564,8 @@ def run_agent_conversation_turn(
                 )
             else:
                 tool_executed = True
-                tool_calls_executed += 1
+                if tool != SECOND_OPINION_TOOL_ID:
+                    tool_calls_executed += 1
                 if verbose < 1:
                     prog = deps.tool_progress_message(tool, params)
                     if tool_transport and tool_transport[0] == tool:
@@ -573,7 +596,7 @@ def run_agent_conversation_turn(
                         fetch_pages_executed += n_fetch
                 if policy_blocked:
                     pass
-                elif tool in known and tool not in et:
+                elif tool in known and tool not in et and tool != SECOND_OPINION_TOOL_ID:
                     policy_blocked = True
                     result = (
                         f"Tool error: {tool} is disabled for this run (tool policy). "
@@ -581,7 +604,28 @@ def run_agent_conversation_turn(
                     )
                 else:
                     try:
-                        if tool == "search_web":
+                        if tool == SECOND_OPINION_TOOL_ID:
+                            if second_opinion_rounds >= 3:
+                                result = "second_opinion error: limit reached for this session (max 3)."
+                            else:
+                                second_opinion_rounds += 1
+                                reviewed_tool_need = True
+                                result = run_second_opinion_tool(
+                                    params,
+                                    user_query,
+                                    second_opinion_enabled=second_opinion_enabled,
+                                    cloud_ai_enabled=cloud_ai_enabled,
+                                    reviewer_hosted_profile=reviewer_hosted_profile,
+                                    reviewer_ollama_model=reviewer_ollama_model,
+                                    hosted_review_ready=deps.hosted_review_ready,
+                                    second_opinion_reviewer_messages_fn=deps.second_opinion_reviewer_messages,
+                                    call_ollama_plaintext=deps.call_ollama_plaintext,
+                                    call_hosted_chat_plain=deps.call_hosted_chat_plain,
+                                    call_openai_chat_plain=deps.call_openai_chat_plain,
+                                    ollama_second_opinion_model=deps.ollama_second_opinion_model,
+                                    scalar_to_str=deps.scalar_to_str,
+                                )
+                        elif tool == "search_web":
                             result = deps.search_web(params.get("query"), params=params)
                         elif tool == "search_web_fetch_top":
                             result = deps.search_web_fetch_top(params.get("query"), params=params)
@@ -758,32 +802,31 @@ def run_agent_conversation_turn(
                     f"Goal reminder (user request): {user_query}\n"
                     "If you will satisfy this with write_file, plan to read_file that same path before answering."
                 )
-            messages.append({"role": "assistant", "content": response_text})
-            native_transport = tool_transport_uses_native(
-                tool_call_mode=tool_call_mode, primary_profile=primary_profile
-            )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": deps.tool_result_user_message(
-                        tool,
-                        params,
-                        result,
-                        deliverable_reminder=deliverable_reminder,
-                        native_transport=native_transport,
-                    ),
-                }
+            _transcript_append_tool_followup(
+                messages,
+                raw_ollama_msg,
+                response_text,
+                tool,
+                result,
+                deps.tool_result_user_message(
+                    tool,
+                    params,
+                    result,
+                    deliverable_reminder=deliverable_reminder,
+                    native_transport=native_transport,
+                ),
+                native_transport=native_transport,
             )
         else:
-            messages.append({"role": "assistant", "content": response_text})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": invalid_agent_response_user_content(
-                        tool_call_mode=tool_call_mode,
-                        primary_profile=primary_profile,
-                    ),
-                }
+            _transcript_append_assistant_user(
+                messages,
+                raw_ollama_msg,
+                response_text,
+                invalid_agent_response_user_content(
+                    tool_call_mode=tool_call_mode,
+                    primary_profile=primary_profile,
+                ),
+                native_transport=native_transport,
             )
             continue
     if not answered:

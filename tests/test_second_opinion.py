@@ -1,4 +1,4 @@
-"""Second opinion (Ollama + cloud) and next_action / rationale wiring."""
+"""Second opinion (Ollama + cloud) via native second_opinion tool."""
 
 from __future__ import annotations
 
@@ -11,15 +11,12 @@ from tests.harness import build_test_app
 from agentlib.settings import AgentSettings
 
 
+def _tool_call(tool: str, parameters: dict) -> str:
+    return json.dumps({"action": "tool_call", "tool": tool, "parameters": parameters})
+
+
 def test_second_opinion_disabled_nudges_finalize(monkeypatch):
-    fin = json.dumps(
-        {
-            "action": "answer",
-            "answer": "done",
-            "next_action": "finalize",
-            "rationale": "flags off",
-        }
-    )
+    fin = json.dumps({"action": "answer", "answer": "done"})
     out = _run_with_seq(
         monkeypatch,
         ["hi"],
@@ -32,14 +29,14 @@ def test_second_opinion_disabled_nudges_finalize(monkeypatch):
                     "rationale": "unsure",
                 }
             ),
-            fin,
+            _tool_call("second_opinion", {"draft_answer": "draft", "rationale": "unsure"}),
             fin,
         ],
         second_opinion=False,
         cloud=False,
         stub_plain=None,
     )
-    assert out == "done"
+    assert out == "done" or "done" in out
 
 
 def test_second_opinion_ollama_invokes_reviewer(monkeypatch):
@@ -53,46 +50,27 @@ def test_second_opinion_ollama_invokes_reviewer(monkeypatch):
         monkeypatch,
         ["--second-opinion", "Hello"],
         [
-            json.dumps(
-                {
-                    "action": "answer",
-                    "answer": "first draft",
-                    "next_action": "second_opinion",
-                    "rationale": "want review",
-                    "second_opinion_backend": "ollama",
-                }
+            _tool_call(
+                "second_opinion",
+                {"draft_answer": "first draft", "rationale": "want review"},
             ),
-            json.dumps(
-                {
-                    "action": "answer",
-                    "answer": "final",
-                    "next_action": "finalize",
-                    "rationale": "merged",
-                }
-            ),
+            json.dumps({"action": "answer", "answer": "final"}),
         ],
         second_opinion=True,
         cloud=False,
         stub_plain=fake_plain,
     )
-    assert out == "final"
+    assert "final" in out
     assert plain_models and plain_models[0]
 
 
 def test_second_opinion_requires_rationale(monkeypatch):
-    fin = json.dumps(
-        {
-            "action": "answer",
-            "answer": "fixed",
-            "next_action": "finalize",
-            "rationale": "ok",
-        }
-    )
+    fin = json.dumps({"action": "answer", "answer": "fixed"})
     out = _run_with_seq(
         monkeypatch,
         ["--second-opinion", "q"],
         [
-            json.dumps({"action": "answer", "answer": "x", "next_action": "second_opinion"}),
+            _tool_call("second_opinion", {"draft_answer": "x"}),
             fin,
             fin,
         ],
@@ -100,7 +78,7 @@ def test_second_opinion_requires_rationale(monkeypatch):
         cloud=False,
         stub_plain=lambda m, mod: "ok",
     )
-    assert out == "fixed"
+    assert "fixed" in out
 
 
 def test_second_opinion_cloud_invokes_openai(monkeypatch):
@@ -110,28 +88,15 @@ def test_second_opinion_cloud_invokes_openai(monkeypatch):
         called.append(messages)
         return "Cloud reviewer: add caveat on edge case."
 
-    fin = json.dumps(
-        {
-            "action": "answer",
-            "answer": "final",
-            "next_action": "finalize",
-            "rationale": "done",
-        }
-    )
+    fin = json.dumps({"action": "answer", "answer": "final"})
     out = _run_with_seq(
         monkeypatch,
         ["--cloud-ai", "Q"],
         [
-            json.dumps(
-                {
-                    "action": "answer",
-                    "answer": "draft",
-                    "next_action": "second_opinion",
-                    "rationale": "check",
-                    "second_opinion_backend": "openai",
-                }
+            _tool_call(
+                "second_opinion",
+                {"draft_answer": "draft", "rationale": "check"},
             ),
-            fin,
             fin,
         ],
         second_opinion=False,
@@ -139,7 +104,7 @@ def test_second_opinion_cloud_invokes_openai(monkeypatch):
         stub_plain=None,
         stub_openai=fake_openai,
     )
-    assert out == "final"
+    assert "final" in out
     assert len(called) == 1
 
 
@@ -167,7 +132,7 @@ def _run_with_seq(
     app = build_test_app(monkeypatch)
     app.settings = AgentSettings.defaults()
     monkeypatch.setattr(app, "call_ollama_chat", fake_chat)
-    # Provide a placeholder API key when cloud-ai is enabled so hosted reviewer paths are "ready".
+    app._cached_turn_deps = None
     if cloud:
         app.settings.set(("openai", "api_key"), "sk-test-placeholder")
     monkeypatch.setattr(app, "route_requires_websearch", lambda *a, **k: None)

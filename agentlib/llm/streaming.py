@@ -17,6 +17,11 @@ from agentlib.sink import sink_emit
 _assistant_answer_streamed: ContextVar[bool] = ContextVar("_assistant_answer_streamed", default=False)
 
 _TOOL_ACTION_RE = re.compile(r'"action"\s*:\s*"tool_call"', re.IGNORECASE)
+_ANSWER_ACTION_RE = re.compile(r'"action"\s*:\s*"answer"', re.IGNORECASE)
+_BARE_TOOL_JSON_RE = re.compile(
+    r'^\s*\{\s*"(query|url|urls|command|path|pattern|script|draft_answer)"\s*:',
+    re.IGNORECASE,
+)
 
 
 def reset_assistant_answer_streamed() -> None:
@@ -330,13 +335,30 @@ def _record_ollama_eval_from_chunk(
     _record_gen_tokens(state, delta, stream_user_visible=stream_user_visible)
 
 
-def _emit_visible_answer_delta(
-    content: str, state: _VisibleStreamState, *, stream_user_visible: bool
+def _content_should_stream_as_plain_answer(content: str) -> bool:
+    """True when accumulated content is user-facing prose, not JSON tool/agent protocol."""
+    text = (content or "").strip()
+    if not text:
+        return False
+    head = text[:4096]
+    if _TOOL_ACTION_RE.search(head):
+        return False
+    if not text.lstrip().startswith("{"):
+        return True
+    if _ANSWER_ACTION_RE.search(head):
+        return False
+    if _BARE_TOOL_JSON_RE.match(text):
+        return False
+    return False
+
+
+def _emit_visible_answer_text(
+    answer: str,
+    state: _VisibleStreamState,
+    *,
+    stream_user_visible: bool,
 ) -> None:
-    answer = _extract_json_string_field(
-        content, "answer", allow_unterminated=True, use_last=True
-    )
-    if answer is None:
+    if not answer:
         return
     if state.answer_emitted_len > 0:
         if len(answer) < state.answer_emitted_len:
@@ -371,6 +393,19 @@ def _emit_visible_answer_delta(
             estimate_tokens_from_text(delta, estimator=state.cpt_estimator),
             stream_user_visible=stream_user_visible,
         )
+
+
+def _emit_visible_answer_delta(
+    content: str, state: _VisibleStreamState, *, stream_user_visible: bool
+) -> None:
+    answer = _extract_json_string_field(
+        content, "answer", allow_unterminated=True, use_last=True
+    )
+    if answer is not None:
+        _emit_visible_answer_text(answer, state, stream_user_visible=stream_user_visible)
+        return
+    if _content_should_stream_as_plain_answer(content):
+        _emit_visible_answer_text(content, state, stream_user_visible=stream_user_visible)
 
 
 def _apply_content_chunk(

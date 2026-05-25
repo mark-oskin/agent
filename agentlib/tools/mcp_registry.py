@@ -9,21 +9,23 @@ if TYPE_CHECKING:
 
 _TOOL_IDS: FrozenSet[str] = frozenset()
 _PROMPTS: dict[str, str] = {}
+_SCHEMAS: dict[str, dict] = {}
 _UNION_ENABLED: bool = False
 _CONNECT_ERRORS: list[str] = []
 
 
 def clear() -> None:
-    global _TOOL_IDS, _PROMPTS, _UNION_ENABLED, _CONNECT_ERRORS
+    global _TOOL_IDS, _PROMPTS, _SCHEMAS, _UNION_ENABLED, _CONNECT_ERRORS
     _TOOL_IDS = frozenset()
     _PROMPTS = {}
+    _SCHEMAS = {}
     _UNION_ENABLED = False
     _CONNECT_ERRORS = []
 
 
 def install(cluster: Optional["McpCluster"], *, prefs_enabled: bool, connect_errors: Optional[list[str]] = None) -> None:
     """Replace registry contents after MCP sync."""
-    global _TOOL_IDS, _PROMPTS, _UNION_ENABLED, _CONNECT_ERRORS
+    global _TOOL_IDS, _PROMPTS, _SCHEMAS, _UNION_ENABLED, _CONNECT_ERRORS
     _UNION_ENABLED = bool(prefs_enabled)
     if connect_errors is not None:
         _CONNECT_ERRORS = list(connect_errors)
@@ -34,9 +36,11 @@ def install(cluster: Optional["McpCluster"], *, prefs_enabled: bool, connect_err
     if cluster is None:
         _TOOL_IDS = frozenset()
         _PROMPTS = {}
+        _SCHEMAS = {}
         return
     _TOOL_IDS = frozenset(cluster.tool_index.keys())
     _PROMPTS = dict(cluster.prompt_docs)
+    _SCHEMAS = dict(getattr(cluster, "input_schemas", {}) or {})
 
 
 def all_ids() -> FrozenSet[str]:
@@ -55,6 +59,12 @@ def union_into_session_enabled() -> bool:
 
 def prompt_doc(tool_id: str) -> str:
     return str(_PROMPTS.get(str(tool_id or "").strip(), "") or "")
+
+
+def parameters_schema(tool_id: str) -> Optional[dict]:
+    tid = str(tool_id or "").strip()
+    schema = _SCHEMAS.get(tid)
+    return schema if isinstance(schema, dict) else None
 
 
 def is_mcp_tool(tool_id: str) -> bool:

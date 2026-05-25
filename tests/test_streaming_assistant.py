@@ -155,6 +155,58 @@ def test_merge_stream_emits_partial_answer_events(monkeypatch):
     assert llm_streaming.assistant_answer_was_streamed()
 
 
+def test_merge_stream_plain_text_answer_events(monkeypatch):
+    """Native-mode plain text answers should Draft-stream like JSON answer field."""
+    emitted: list[dict] = []
+
+    def cap(ev: dict) -> None:
+        emitted.append(dict(ev))
+
+    monkeypatch.setattr(llm_streaming, "sink_emit", cap)
+    llm_streaming.reset_assistant_answer_streamed()
+
+    lines = [
+        json.dumps({"message": {"content": "The president is "}, "done": False}),
+        json.dumps({"message": {"content": "Joe Biden."}, "done": True}),
+    ]
+    msg, _, streamed = llm_streaming.merge_stream_message_chunks(
+        iter(lines),
+        stream_user_visible=True,
+        agent_stream_thinking_enabled=lambda: False,
+    )
+    assert msg["content"] == "The president is Joe Biden."
+    assert streamed is True
+    answer_events = [e for e in emitted if e.get("type") == "answer"]
+    assert answer_events
+    assert answer_events[-1]["text"] == "The president is Joe Biden."
+    assert llm_streaming.assistant_answer_was_streamed()
+
+
+def test_merge_stream_bare_tool_json_does_not_draft_stream(monkeypatch):
+    emitted: list[dict] = []
+
+    def cap(ev: dict) -> None:
+        emitted.append(dict(ev))
+
+    monkeypatch.setattr(llm_streaming, "sink_emit", cap)
+    llm_streaming.reset_assistant_answer_streamed()
+
+    lines = [
+        json.dumps(
+            {
+                "message": {"content": '{"query": "Seattle Mariners schedule"}'},
+                "done": True,
+            }
+        ),
+    ]
+    llm_streaming.merge_stream_message_chunks(
+        iter(lines),
+        stream_user_visible=True,
+        agent_stream_thinking_enabled=lambda: False,
+    )
+    assert not any(e.get("type") == "answer" for e in emitted)
+
+
 def test_merge_stream_tool_call_buffers_no_answer_stream(monkeypatch):
     emitted: list[dict] = []
 

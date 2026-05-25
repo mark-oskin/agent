@@ -441,6 +441,7 @@ class AgentApp:
         *,
         verbose: int = 0,
         for_agent_turn: bool = True,
+        include_second_opinion: bool = False,
     ) -> str:
         prof = primary_profile or default_primary_llm_profile()
         om = effective_ollama_model_from_profile(prof, self.ollama_model())
@@ -465,6 +466,7 @@ class AgentApp:
             merge_hosted_stream_chunks=self.merge_hosted_stream_chunks,
             ollama_tool_call_mode=self.ollama_tool_call_mode(),
             for_agent_turn=for_agent_turn,
+            include_second_opinion=include_second_opinion,
         )
 
     def call_ollama_plaintext(self, messages: list, model: str) -> str:
@@ -693,8 +695,8 @@ class AgentApp:
         deps = ConversationTurnDeps(
             coerce_enabled_tools=self.registry.coerce_enabled_tools,
             maybe_compact_context_window=_maybe_compact,
-            call_ollama_chat=lambda msgs, prof, tools, verbose=0: self.call_ollama_chat(
-                msgs, prof, tools, verbose=verbose
+            call_ollama_chat=lambda msgs, prof, tools, verbose=0, **kwargs: self.call_ollama_chat(
+                msgs, prof, tools, verbose=verbose, **kwargs
             ),
             parse_agent_json=lambda t: agent_json.parse_agent_json(t, self.agent_json_deps()),
             deliverable_followup_block=lambda p: deliverable_followup_block(p, scalar_to_str),

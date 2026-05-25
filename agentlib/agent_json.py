@@ -727,6 +727,16 @@ def infer_tool_call_from_bare_args(d: dict, known_tools: FrozenSet[str]) -> Opti
             "parameters": {"script": d["script"]},
         }
 
+    draft = d.get("draft_answer") or d.get("answer")
+    rationale = d.get("rationale")
+    if draft is not None and rationale is not None and "second_opinion" in known_tools:
+        if str(draft).strip() and str(rationale).strip():
+            return {
+                "action": "tool_call",
+                "tool": "second_opinion",
+                "parameters": {"draft_answer": draft, "rationale": rationale},
+            }
+
     return None
 
 

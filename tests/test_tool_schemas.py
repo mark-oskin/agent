@@ -20,8 +20,7 @@ def test_phase1_search_web_schema():
 def test_ollama_tools_for_enabled_filters_and_sorts():
     tools = ollama_tools_for_enabled(frozenset({"search_web", "grep", "read_file", "use_git"}))
     names = [t["function"]["name"] for t in tools]
-    assert names == ["grep", "read_file", "search_web"]
-    assert "use_git" not in names
+    assert names == ["grep", "read_file", "search_web", "use_git"]
 
 
 def test_grep_list_directory_replace_text_native_schemas():
@@ -46,9 +45,27 @@ def test_ollama_tools_empty_when_none_enabled():
     assert ollama_tools_for_enabled(None) == []
 
 
-def test_phase1_tool_ids_cover_schemas():
-    for tid in NATIVE_PHASE1_TOOL_IDS:
-        assert ollama_function_tool_definition(tid) is not None
+def test_use_git_call_python_native_schemas():
+    for tid in ("use_git", "call_python", "run_applescript", "download_file", "tail_file"):
+        tool = ollama_function_tool_definition(tid)
+        assert tool is not None
+        assert tool["function"]["name"] == tid
+
+
+def test_second_opinion_native_schema():
+    tool = ollama_function_tool_definition("second_opinion")
+    assert tool is not None
+    assert "draft_answer" in tool["function"]["parameters"]["properties"]
+
+
+def test_ollama_tools_includes_plugins_when_enabled():
+    from agentlib.tools.plugins import PLUGIN_TOOL_HANDLERS
+
+    if not PLUGIN_TOOL_HANDLERS:
+        return
+    tid = next(iter(PLUGIN_TOOL_HANDLERS))
+    tools = ollama_tools_for_enabled(frozenset({tid}))
+    assert any(t["function"]["name"] == tid for t in tools)
 
 
 def test_web_search_required_user_content_native_vs_json():

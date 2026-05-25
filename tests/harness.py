@@ -314,6 +314,7 @@ def run_main(
     app = build_test_app(monkeypatch)
     from agentlib.tools import builtins as tool_builtins
     monkeypatch.setattr(app, "call_ollama_chat", fake_call_ollama_chat)
+    app._cached_turn_deps = None
     monkeypatch.setattr(app, "route_requires_websearch", fake_route_requires_websearch)
     monkeypatch.setattr(app, "route_requires_websearch_after_answer", fake_route_after_answer)
     if stub_search_web is not None:

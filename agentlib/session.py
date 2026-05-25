@@ -3133,6 +3133,18 @@ class AgentSession:
                         ("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE
                     ),
                     primary_profile=self.primary_profile,
+                    include_second_opinion=bool(
+                        self.second_opinion_on
+                        or (
+                            self.reviewer_hosted_profile is not None
+                            and getattr(self.reviewer_hosted_profile, "backend", "") == "hosted"
+                            and (getattr(self.reviewer_hosted_profile, "api_key", "") or "").strip()
+                        )
+                        or (
+                            self.cloud_ai_enabled
+                            and bool(self.settings.get_str(("openai", "api_key"), "").strip())
+                        )
+                    ),
                 )
                 sink_print_compat(f"Effective system prompt ({len(body)} chars):\n{body}")
                 if self.session_system_prompt_path:

@@ -134,10 +134,13 @@ def canonicalize_user_tool_phrase(phrase: str) -> str:
 
 
 def all_known_tools() -> frozenset[str]:
+    from agentlib.llm.tool_schemas import SECOND_OPINION_TOOL_ID
+
     return frozenset(
         {tid for tid, _label, _aliases in CORE_TOOL_ENTRIES}
         | set(PLUGIN_TOOL_HANDLERS.keys())
         | set(mcp_registry.all_ids())
+        | {SECOND_OPINION_TOOL_ID}
     )
 
 
@@ -179,7 +182,7 @@ def format_unknown_tool_hint(phrase: str) -> str:
             bits = []
             for m in near:
                 if m == "second_opinion":
-                    bits.append("second_opinion (feature, not a tool)")
+                    bits.append("second_opinion (native tool when enabled in session)")
                     continue
                 internal = resolve_tool_token(m) or m
                 bits.append(f"{m} → {internal}" if m != internal else internal)

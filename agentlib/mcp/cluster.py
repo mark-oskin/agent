@@ -113,6 +113,7 @@ class McpCluster:
         self._by_server: Dict[str, _Conn] = {}
         self.tool_index: Dict[str, Tuple[str, str]] = {}
         self.prompt_docs: Dict[str, str] = {}
+        self.input_schemas: Dict[str, dict] = {}
         self.connect_errors: List[str] = []
 
     def disconnect_all(self) -> None:
@@ -221,6 +222,11 @@ class McpCluster:
                 cid = composite_tool_id(name, orig, used_ids)
                 cluster.tool_index[cid] = (name, orig)
                 cluster.prompt_docs[cid] = _prompt_line_for_tool(cid, name, td)
+                schema = td.get("inputSchema")
+                if isinstance(schema, dict):
+                    cluster.input_schemas[cid] = schema
+                else:
+                    cluster.input_schemas[cid] = {"type": "object", "additionalProperties": True}
         return cluster
 
     def invoke_composite(self, composite_id: str, params: Dict[str, Any]) -> str:
