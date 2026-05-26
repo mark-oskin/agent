@@ -69,6 +69,49 @@ def test_save_context_via_run_main(tmp_path: Path, monkeypatch):
     assert any("hello" in m.get("content", "") for m in data["messages"] if m["role"] == "user")
 
 
+def test_parse_context_messages_native_tool_shape():
+    msgs = [
+        {"role": "user", "content": "search iran"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "function": {"name": "search_web", "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "content": "results…",
+            "tool_name": "search_web",
+            "tool_call_id": "call_1",
+        },
+        {"role": "assistant", "content": "Summary here."},
+    ]
+    loaded = parse_context_messages_data(msgs)
+    assert loaded == msgs
+
+
+def test_save_and_reload_native_tool_roundtrip(tmp_path: Path):
+    from agentlib.prompts import normalize_transcript_messages
+
+    p = tmp_path / "native_ctx.json"
+    messages = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "grep", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "hits", "tool_name": "grep", "tool_call_id": "c1"},
+        {"role": "assistant", "content": "done"},
+    ]
+    save_context_bundle(str(p), messages, "q", "done", True)
+    loaded = load_context_messages(str(p))
+    assert loaded == messages
+    normalized = normalize_transcript_messages(loaded)
+    assert normalized[1]["tool_calls"]
+    assert normalized[2]["tool_name"] == "grep"
+    assert normalized[2]["tool_call_id"] == "c1"
+
+
 def test_load_context_file_reads_bundle(tmp_path: Path):
     p = tmp_path / "c.json"
     p.write_text(

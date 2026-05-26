@@ -3,9 +3,37 @@
 from __future__ import annotations
 
 import json
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from agentlib.coercion import scalar_to_str
+
+_VALID_CONTEXT_ROLES = frozenset({"user", "assistant", "system", "tool"})
+
+
+def _coerce_message_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        return str(content)
+    return content
+
+
+def _parse_one_context_message(m: dict, index: int) -> dict:
+    role = (m.get("role") or "").strip().lower()
+    if role not in _VALID_CONTEXT_ROLES:
+        raise ValueError(f"message {index}: invalid role {role!r}")
+    content = _coerce_message_content(m.get("content"))
+    row: dict = {"role": role, "content": content}
+    if role == "assistant" and m.get("tool_calls"):
+        row["tool_calls"] = m["tool_calls"]
+    if role == "tool":
+        tool_name = m.get("tool_name")
+        if tool_name is not None and str(tool_name).strip():
+            row["tool_name"] = str(tool_name).strip()
+        tool_call_id = m.get("tool_call_id")
+        if isinstance(tool_call_id, str) and tool_call_id.strip():
+            row["tool_call_id"] = tool_call_id.strip()
+    return row
 
 
 def parse_context_messages_data(raw) -> list:
@@ -20,22 +48,14 @@ def parse_context_messages_data(raw) -> list:
     for i, m in enumerate(msgs):
         if not isinstance(m, dict):
             continue
-        role = (m.get("role") or "").strip()
-        if role not in ("user", "assistant", "system"):
-            raise ValueError(f"message {i}: invalid role {role!r}")
-        content = m.get("content")
-        if content is None:
-            content = ""
-        elif not isinstance(content, str):
-            content = str(content)
-        out.append({"role": role, "content": content})
+        out.append(_parse_one_context_message(m, i))
     if not out:
         raise ValueError("no valid messages in context file")
     return out
 
 
 def load_context_messages(path: str, *, scalar_to_str_fn: Callable[..., str] = scalar_to_str) -> list:
-    """Load a prior chat from JSON written by --save_context (or a bare list of {role, content})."""
+    """Load a prior chat from JSON written by --save_context (or a bare list of messages)."""
     p = scalar_to_str_fn(path, "").strip()
     if not p:
         raise ValueError("empty path")

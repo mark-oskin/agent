@@ -26,7 +26,7 @@ Load/save logic lives in **`agentlib/context/io.py`**. A file may be:
 1. A **JSON array** of message objects: `[{"role":"user","content":"…"}, …]`, or  
 2. A **bundle object**: `{"messages": [ … ], …}`.
 
-Each message must be a dict with **`role`** one of `user`, `assistant`, or `system`, and **`content`** (string or coerced to string). Invalid entries are skipped or rejected with a clear error (see `parse_context_messages_data`).
+Each message must be a dict with **`role`** one of `user`, `assistant`, `system`, or **`tool`** (native tool results), and **`content`** (string or coerced to string). Assistant rows may include **`tool_calls`** (Ollama/native shape); tool rows may include **`tool_name`** and **`tool_call_id`**. Non-dict entries are skipped; invalid roles are rejected (see `parse_context_messages_data` in `agentlib/context/io.py`).
 
 **Written bundles** (snapshots from this agent) also include metadata:
 
