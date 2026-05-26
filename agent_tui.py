@@ -565,6 +565,8 @@ class AgentTuiApp(App[None]):
         self._chat_stream_open: Dict[int, bool] = {}
         # RichLog.lines index where the in-progress assistant block starts (one write() may add many lines).
         self._chat_stream_line_start: Dict[int, int] = {}
+        # Monotonic per-lane turn id; stale workers must not finalize or reset a newer turn's stream.
+        self._lane_turn_seq: Dict[int, int] = {}
         self._lane_gen_tok_s: Dict[int, float] = {}
         self._lane_rate_tracker: Dict[int, GenRateTracker] = {}
         self._lane_gen_rate_paint_at: Dict[int, float] = {}
@@ -682,6 +684,7 @@ class AgentTuiApp(App[None]):
             sess.enabled_tools.add("agent_send")
             self._chat_live_buf[i] = ""
             self._chat_stream_open[i] = False
+            self._lane_turn_seq[i] = 0
             self._thinking_buf[i] = ""
             self._thinking_follow[i] = False
             self._lane_verticals.append(self.query_one(f"#lane-{i}", Vertical))
@@ -961,6 +964,7 @@ class AgentTuiApp(App[None]):
         self._sessions.append(new_sess)
         self._chat_live_buf[new_idx] = ""
         self._chat_stream_open[new_idx] = False
+        self._lane_turn_seq[new_idx] = 0
         self._thinking_buf[new_idx] = ""
         self._thinking_follow[new_idx] = False
         self._n += 1
@@ -1075,12 +1079,18 @@ class AgentTuiApp(App[None]):
         cmd_stripped = (cmd or "").strip()
         # Match _run_line: show the user message in this lane's chat before the model runs. Delegate
         # used to call execute_line alone, so the transcript stayed blank until the assistant reply.
-        self.call_from_thread(self._prepare_turn_ui, lane_idx, cmd_stripped)
+        turn_box: List[int] = []
+
+        def prep() -> None:
+            turn_box.append(self._prepare_turn_ui(lane_idx, cmd_stripped))
+
+        self.call_from_thread(prep)
+        turn_seq = turn_box[0]
         self.call_from_thread(self._set_lane_busy, lane_idx, True)
         captured: List[str] = []
 
-        def emit_fn(ev, ln=lane_idx):
-            self._emit_for(ln, ev)
+        def emit_fn(ev, ln=lane_idx, ts=turn_seq):
+            self._emit_for(ln, ev, ts)
             sink_delegate_capture_append(ev, captured)
 
         try:
@@ -1098,7 +1108,9 @@ class AgentTuiApp(App[None]):
         # Delegate bypasses _run_line → _turn_done; still append final assistant / command
         # output to this lane's transcript (same as _apply_turn_result after a normal turn).
         self.call_from_thread(
-            lambda li=lane_idx, r=res: self._apply_turn_result(li, r, finalize_busy=False)
+            lambda li=lane_idx, r=res, ts=turn_seq: self._apply_turn_result(
+                li, r, finalize_busy=False, turn_seq=ts
+            )
         )
         return res
 
@@ -1278,6 +1290,7 @@ class AgentTuiApp(App[None]):
 
         self._chat_live_buf[dst] = self._chat_live_buf.get(src, "")
         self._chat_stream_open[dst] = self._chat_stream_open.get(src, False)
+        self._lane_turn_seq[dst] = self._lane_turn_seq.get(src, 0)
         if src in self._chat_stream_line_start:
             self._chat_stream_line_start[dst] = self._chat_stream_line_start[src]
         else:
@@ -1298,6 +1311,7 @@ class AgentTuiApp(App[None]):
 
             self._chat_live_buf[k] = self._chat_live_buf[last]
             self._chat_stream_open[k] = self._chat_stream_open.get(last, False)
+            self._lane_turn_seq[k] = self._lane_turn_seq.get(last, 0)
             if last in self._chat_stream_line_start:
                 self._chat_stream_line_start[k] = self._chat_stream_line_start[last]
             else:
@@ -1310,6 +1324,8 @@ class AgentTuiApp(App[None]):
         del self._chat_live_buf[last]
         self._chat_stream_open.pop(last, None)
         self._chat_stream_open.pop(k, None)
+        self._lane_turn_seq.pop(last, None)
+        self._lane_turn_seq.pop(k, None)
         self._chat_stream_line_start.pop(last, None)
         self._chat_stream_line_start.pop(k, None)
         del self._thinking_buf[last]
@@ -1390,17 +1406,29 @@ class AgentTuiApp(App[None]):
         session = self._sessions[lane]
 
         def worker() -> None:
-            emit: Callable[[dict], None] = lambda ev, ln=lane: self._emit_for(ln, ev)
             try:
                 for i, ln in enumerate(lines):
                     last = i == len(lines) - 1
-                    self.call_from_thread(self._prepare_turn_ui, lane, ln)
+                    turn_box: List[int] = []
+
+                    def prep(l=ln) -> None:
+                        turn_box.append(self._prepare_turn_ui(lane, l))
+
+                    self.call_from_thread(prep)
+                    turn_seq = turn_box[0]
+                    line_emit: Callable[[dict], None] = (
+                        lambda ev, ln=lane, ts=turn_seq: self._emit_for(ln, ev, ts)
+                    )
                     try:
-                        res = session.execute_line(ln, emit=emit)
+                        res = session.execute_line(ln, emit=line_emit)
                     except KeyboardInterrupt:
                         self.call_from_thread(self._turn_cancelled, lane)
                         return
-                    self.call_from_thread(self._apply_turn_result, lane, res, finalize_busy=last)
+                    self.call_from_thread(
+                        lambda r=res, ts=turn_seq: self._apply_turn_result(
+                            lane, r, finalize_busy=last, turn_seq=ts
+                        )
+                    )
             except BaseException:
                 tb = traceback.format_exc()
                 self.call_from_thread(self._turn_error, lane, tb)
@@ -1414,6 +1442,18 @@ class AgentTuiApp(App[None]):
         th = threading.Thread(target=worker, name=f"agent-chain-{lane}", daemon=True)
         self._lane_worker_threads[lane] = th
         th.start()
+
+    def _turn_seq_current(self, lane: int) -> int:
+        return int(self._lane_turn_seq.get(lane, 0))
+
+    def _turn_seq_is_current(self, lane: int, turn_seq: int) -> bool:
+        return self._turn_seq_current(lane) == int(turn_seq)
+
+    def _discard_chat_live_answer(self, lane: int) -> None:
+        """Drop the in-progress assistant block from the log and clear stream tracking."""
+        if self._chat_stream_open.get(lane):
+            self._chat_truncate_live_block(lane)
+        self._reset_chat_live_answer(lane)
 
     def _reset_chat_live_answer(self, lane: int) -> None:
         self._chat_live_buf[lane] = ""
@@ -1446,13 +1486,22 @@ class AgentTuiApp(App[None]):
         if self._show_draft_enabled(lane):
             body = Text.from_markup(f"[bold dim]Draft[/bold dim]\n{escape(buf)}")
         else:
-            body = Text.from_markup(escape(buf))
+            body = Text.from_markup(f"[bold cyan]Assistant[/bold cyan]\n{escape(buf)}")
         chat.write(body, scroll_end=True)
         chat.refresh()
+
+    def _streamed_answer_matches_final(self, lane: int, body: str) -> bool:
+        if not self._chat_stream_open.get(lane):
+            return False
+        live = self._chat_live_buf.get(lane, "").strip()
+        return bool(live) and live == body
 
     def _write_final_answer_block(self, lane: int, text: str) -> None:
         body = (text or "").strip()
         if not body:
+            return
+        if not self._show_draft_enabled(lane) and self._streamed_answer_matches_final(lane, body):
+            self._chat_close_live_answer(lane)
             return
         self._chat_close_live_answer(lane)
         chat = self._chat_logs[lane]
@@ -1554,14 +1603,19 @@ class AgentTuiApp(App[None]):
         else:
             header.icon = ""
 
-    def _prepare_turn_ui(self, lane: int, line: str) -> None:
+    def _prepare_turn_ui(self, lane: int, line: str) -> int:
+        if self._chat_stream_open.get(lane):
+            self._chat_truncate_live_block(lane)
+        self._reset_chat_live_answer(lane)
+        seq = self._turn_seq_current(lane) + 1
+        self._lane_turn_seq[lane] = seq
         chat = self._chat_logs[lane]
         chat.write(Text.from_markup(f"[bold green]You[/bold green]\n{escape(line)}\n"))
-        self._reset_chat_live_answer(lane)
         self._reset_lane_gen_rate_tracker(lane)
         self._thinking_buf[lane] = ""
         self._thinking_follow[lane] = False
         self._hide_thinking_panel(lane)
+        return seq
 
     def _show_lane(self, index: int) -> None:
         index = max(0, min(index, self._n - 1))
@@ -1586,11 +1640,13 @@ class AgentTuiApp(App[None]):
         _set_prompt_text(pr, "")
         self._sync_prompt_enabled()
 
-    def _emit_for(self, lane: int, ev: dict) -> None:
+    def _emit_for(self, lane: int, ev: dict, turn_seq: Optional[int] = None) -> None:
         payload = dict(ev)
-        self.call_from_thread(self._dispatch_emit, lane, payload)
+        self.call_from_thread(self._dispatch_emit, lane, payload, turn_seq)
 
-    def _dispatch_emit(self, lane: int, ev: dict) -> None:
+    def _dispatch_emit(self, lane: int, ev: dict, turn_seq: Optional[int] = None) -> None:
+        if turn_seq is not None and not self._turn_seq_is_current(lane, turn_seq):
+            return
         t = ev.get("type") or "output"
 
         text = ev.get("text")
@@ -1639,7 +1695,7 @@ class AgentTuiApp(App[None]):
 
         if t == "answer_reset":
             self._hide_thinking_panel(lane)
-            self._reset_chat_live_answer(lane)
+            self._discard_chat_live_answer(lane)
             return
 
         if t == "answer":
@@ -1720,16 +1776,16 @@ class AgentTuiApp(App[None]):
         self._run_line(lane, line)
 
     def _run_line(self, lane: int, line: str) -> None:
-        self._prepare_turn_ui(lane, line)
+        turn_seq = self._prepare_turn_ui(lane, line)
         self._set_lane_busy(lane, True)
 
         session = self._sessions[lane]
 
         def worker() -> None:
-            emit: Callable[[dict], None] = lambda ev, ln=lane: self._emit_for(ln, ev)
+            emit: Callable[[dict], None] = lambda ev, ln=lane, ts=turn_seq: self._emit_for(ln, ev, ts)
             try:
                 res = session.execute_line(line, emit=emit)
-                self.call_from_thread(self._turn_done, lane, res)
+                self.call_from_thread(self._turn_done, lane, res, turn_seq)
             except KeyboardInterrupt:
                 self.call_from_thread(self._turn_cancelled, lane)
             except BaseException:
@@ -1764,10 +1820,14 @@ class AgentTuiApp(App[None]):
         self._hide_thinking_panel(lane)
         self._set_lane_busy(lane, False)
 
-    def _turn_done(self, lane: int, res: dict) -> None:
-        self._apply_turn_result(lane, res, finalize_busy=True)
+    def _turn_done(self, lane: int, res: dict, turn_seq: int) -> None:
+        self._apply_turn_result(lane, res, finalize_busy=True, turn_seq=turn_seq)
 
-    def _apply_turn_result(self, lane: int, res: dict, *, finalize_busy: bool) -> None:
+    def _apply_turn_result(
+        self, lane: int, res: dict, *, finalize_busy: bool, turn_seq: int
+    ) -> None:
+        if not self._turn_seq_is_current(lane, turn_seq):
+            return
         try:
             if res.get("quit"):
                 self.exit()
@@ -1794,6 +1854,8 @@ class AgentTuiApp(App[None]):
                 if isinstance(ans, str) and ans.strip():
                     self._write_final_answer_block(lane, ans)
         finally:
+            if not self._turn_seq_is_current(lane, turn_seq):
+                return
             self._reset_chat_live_answer(lane)
             self._thinking_buf[lane] = ""
             self._thinking_follow[lane] = False

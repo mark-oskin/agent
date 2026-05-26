@@ -27,6 +27,14 @@ def sink_show_draft_enabled() -> bool:
     return bool(_show_draft_cv.get())
 
 
+def suppress_final_after_streamed_answer(body: str) -> bool:
+    """True when live-streamed CLI text already matches the final answer and Draft was off."""
+    if sink_show_draft_enabled():
+        return False
+    streamed = (_cli_answer_stream_buf.get() or "").strip()
+    return bool(streamed) and streamed == (body or "").strip()
+
+
 def reset_cli_answer_display() -> None:
     """Clear CLI draft accumulation (call at start of each agent turn)."""
     _cli_answer_stream_buf.set("")
@@ -69,6 +77,8 @@ def print_turn_final_answer(text: str) -> None:
     fn = _emit_cv.get()
     if fn is not None:
         fn({"type": "final_answer", "text": body})
+        return
+    if suppress_final_after_streamed_answer(body):
         return
     if _cli_draft_header_printed.get():
         print(file=sys.stdout)

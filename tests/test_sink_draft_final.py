@@ -11,6 +11,7 @@ from agentlib.sink import (
     reset_cli_answer_display,
     set_sink_show_draft,
     sink_emit,
+    suppress_final_after_streamed_answer,
 )
 
 
@@ -35,11 +36,24 @@ def test_cli_stream_without_draft_label_when_show_draft_off(capsys):
     set_sink_show_draft(False)
     sink_emit({"type": "answer", "text": "hello", "partial": True, "end": "", "flush": True})
     sink_emit({"type": "answer", "text": " world", "partial": True, "end": "", "flush": True})
+    assert suppress_final_after_streamed_answer("hello world")
     print_turn_final_answer("hello world")
     out = capsys.readouterr().out
     assert DRAFT_LABEL not in out
-    assert "hello world" in out
-    assert f"{FINAL_LABEL}\nhello world\n" in out
+    assert FINAL_LABEL not in out
+    assert out == "hello world"
+
+
+def test_cli_stream_with_draft_still_prints_final(capsys):
+    llm_streaming.reset_assistant_answer_streamed()
+    reset_cli_answer_display()
+    set_sink_show_draft(True)
+    sink_emit({"type": "answer", "text": "hi", "partial": True, "end": "", "flush": True})
+    assert not suppress_final_after_streamed_answer("hi")
+    print_turn_final_answer("hi")
+    out = capsys.readouterr().out
+    assert DRAFT_LABEL in out
+    assert f"{FINAL_LABEL}\nhi\n" in out
 
 
 def test_cli_final_only_when_no_stream(capsys):
