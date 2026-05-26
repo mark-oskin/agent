@@ -1675,7 +1675,10 @@ class AgentSession:
                 ln = (raw or "").strip()
                 if not ln:
                     continue
-                self.execute_line(ln)
+                res = self.execute_line(ln)
+                out = (res.get("output") or "").strip() if isinstance(res, dict) else ""
+                if out:
+                    sink_print_compat(out)
         finally:
             self._repl_post_load_depth -= 1
 
@@ -2627,10 +2630,8 @@ class AgentSession:
         return SessionLineResult()
 
     def _emit_repl_command_text(self, text: str) -> SessionLineResult:
-        """Print to the REPL sink and return ``output`` for ``execute_line`` / ``session_command``."""
+        """Return ``output`` for the host (REPL loop, TUI, ``session_command``). Do not also ``sink_print`` — hosts with ``emit=`` would show the line twice."""
         t = (text or "").rstrip("\n")
-        if t:
-            sink_print_compat(t)
         return SessionLineResult(output=t)
 
     def _cmd_show(self, s: str) -> SessionLineResult:

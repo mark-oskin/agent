@@ -83,6 +83,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         res = session.execute_line(line, emit=emit)
         if res.get("quit"):
             break
+        out = res.get("output") or ""
+        if str(out).strip():
+            print(out)
         # In an embedding scenario, you likely render `res["answer"]` in your UI:
         ans = res.get("answer")
         if isinstance(ans, str) and ans.strip():
