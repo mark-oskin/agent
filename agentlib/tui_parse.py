@@ -193,19 +193,23 @@ def parse_fork_background_command(line: str) -> tuple[str, list[str]] | None:
     return parse_fork_command("/fork " + tail)
 
 
-def parse_send_command(line: str) -> tuple[str, list[str]] | None:
+def parse_agent_dispatch_command(line: str, verb: str) -> tuple[str, list[str]] | None:
     """
-    Parse ``/send <name> COMMAND…`` or ``/send <name> "cmd1,cmd2,…"``.
+    Parse ``/<verb> <name> COMMAND…`` or ``/<verb> <name> "cmd1,cmd2,…"``.
 
-    The optional double-quoted segment uses the same comma / single-quote / ``\\,`` rules as
-    :func:`parse_fork_command`. An unquoted remainder after the agent name is a single command.
+    Used for ``/send`` (async) and ``/turn`` (blocking). The optional double-quoted segment uses
+    the same comma / single-quote / ``\\,`` rules as :func:`parse_fork_command`.
 
     Returns ``(agent_name, commands)`` or ``None`` if invalid. At least one command is required.
     """
-    s = (line or "").strip()
-    if not s.startswith("/send"):
+    v = (verb or "").strip().lower()
+    if not v:
         return None
-    rest = s[5:].lstrip()
+    prefix = f"/{v}"
+    s = (line or "").strip()
+    if not s.lower().startswith(prefix):
+        return None
+    rest = s[len(prefix) :].lstrip()
     if not rest:
         return None
 
@@ -243,6 +247,28 @@ def parse_send_command(line: str) -> tuple[str, list[str]] | None:
     if cmds is None or not cmds:
         return None
     return name, cmds
+
+
+def parse_send_command(line: str) -> tuple[str, list[str]] | None:
+    """Parse ``/send <name> COMMAND…`` (see :func:`parse_agent_dispatch_command`)."""
+    return parse_agent_dispatch_command(line, "send")
+
+
+def parse_turn_command(line: str) -> tuple[str, list[str]] | None:
+    """Parse ``/turn <name> COMMAND…`` (see :func:`parse_agent_dispatch_command`)."""
+    return parse_agent_dispatch_command(line, "turn")
+
+
+def format_turn_command_line(name: str, commands: list[str] | None = None) -> str:
+    """Build a ``/turn`` line understood by :func:`parse_turn_command`."""
+    nm = (name or "").strip()
+    commands = commands or []
+    cmds = [str(c).strip() for c in commands if str(c).strip()]
+    head = f"/turn {shlex.quote(nm)}" if nm else "/turn"
+    if not cmds:
+        return head
+    inner = ",".join(_format_fork_command_segment(c) for c in cmds)
+    return f'{head} "{inner}"'
 
 
 def format_send_command_line(name: str, commands: list[str] | None = None) -> str:

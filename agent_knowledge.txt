@@ -50,6 +50,8 @@ This file is **mostly for humans** who will run **`/call_python path/to/driver.p
 
 **Not allowed via `session_command`:** **`/quit`**, **`/while`**, **`/skill`** (and **`/use-skill`** / **`/reuse-skill`**). Other slash lines and **`!`** shell escapes are allowed.
 
+**Ask this agent a question from a tool:** **`session_command`** with **`/turn self <prompt>`** (blocking; answer in tool output). **`/send self <prompt>`** queues until the current turn ends (async).
+
 **Driver scripts** (human runs **`/call_python script.py`**) may still use **`ai("/set …")`** — see below.
 
 ## Basics

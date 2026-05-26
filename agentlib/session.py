@@ -23,7 +23,7 @@ from agentlib.tools.registry import ToolRegistry
 from agentlib.tools.routing import preferred_web_search_tool
 from agentlib.tools.turn_support import resolve_path_under_session
 from agentlib import prompts as agent_prompts
-from agentlib.tui_parse import parse_send_command
+from agentlib.tui_parse import parse_send_command, parse_turn_command
 from agentlib.tools import builtins as tool_builtins
 from agentlib.context.compaction import (
     approx_message_tokens,
@@ -230,6 +230,9 @@ class AgentSession:
         # Last normal (non-slash) user line and last structured model answer for /last_* .
         self.repl_last_user_query: Optional[str] = None
         self.repl_last_assistant_answer: Optional[str] = None
+        # Nested agent turns: /send queues until depth returns to 0; /turn runs synchronously.
+        self._agent_turn_depth: int = 0
+        self._after_turn_send_queue: list[dict] = []
 
         # injected helpers / callbacks
         self._agent_progress = agent_progress
@@ -921,64 +924,174 @@ class AgentSession:
             return self._emit_repl_command_text(r.get("text") or "")
         return self._emit_repl_command_text(r.get("error") or "failed")
 
-    def _cmd_send_to_agent(self, s: str) -> SessionLineResult:
-        """Forward one or more lines to another agent (async enqueue when ``python_enqueue_line`` is set)."""
-        parsed = parse_send_command(s)
-        if parsed is None:
-            sink_print_compat('Usage: /send AGENT COMMAND…  or  /send AGENT "cmd1,cmd2,…"')
-            return SessionLineResult()
-        agent_name, cmds = parsed
+    @staticmethod
+    def _is_self_agent_name(name: str) -> bool:
+        return (name or "").strip().casefold() == "self"
+
+    def _format_dispatch_result(self, agent_name: str, res: dict) -> str:
+        """Human-readable summary of one ``execute_line`` result for /turn or queued /send."""
+        lab = "self" if self._is_self_agent_name(agent_name) else (agent_name or "?").strip()
+        if res.get("quit"):
+            return f"[turn → {lab}] quit requested"
+        if res.get("type") == "turn":
+            ans = res.get("answer")
+            if isinstance(ans, str) and ans.strip():
+                return ans.strip()
+            return f"[turn → {lab}] (turn finished with no answer)"
+        if res.get("type") == "command":
+            out = (res.get("output") or "").strip()
+            return out or f"[turn → {lab}] OK"
+        return f"[turn → {lab}] done"
+
+    def _execute_line_on_self(self, line: str) -> dict:
+        """Run one REPL line or user prompt on this session (may nest agent turns)."""
+        s = (line or "").strip()
+        if not s:
+            return {"type": "noop", "quit": False}
+        if s.startswith("/") or s.startswith("!"):
+            return self.execute_line(s)
+        from agentlib.llm import streaming as llm_streaming
+
+        answered, final_answer = self._execute_user_request(s)
+        return {
+            "type": "turn",
+            "quit": False,
+            "answered": bool(answered),
+            "answer": final_answer,
+            "answer_streamed": llm_streaming.assistant_answer_was_streamed(),
+        }
+
+    def _execute_turn_for_agent(self, agent_name: str, cmd: str) -> dict:
+        """Blocking dispatch to ``self`` or another agent (``python_delegate_line``)."""
+        if self._is_self_agent_name(agent_name):
+            return self._execute_line_on_self(cmd)
+        dl = self.python_delegate_line
+        if dl is None:
+            return {
+                "type": "command",
+                "quit": False,
+                "output": (
+                    f"/turn to {agent_name!r} requires a multi-agent host (e.g. agent_tui.py) "
+                    "with delegate hook configured."
+                ),
+            }
+        try:
+            return dl(agent_name, cmd)
+        except BaseException as e:
+            return {
+                "type": "command",
+                "quit": False,
+                "output": f"/turn: {type(e).__name__}: {e}",
+            }
+
+    def _run_send_async_now(self, agent_name: str, cmds: list[str]) -> str:
+        """Enqueue or delegate without waiting (used when no agent turn is in progress)."""
         eq = self.python_enqueue_line
+        dl = self.python_delegate_line
+        if eq is None and dl is None:
+            if self._is_self_agent_name(agent_name):
+                import threading
+
+                def _bg() -> None:
+                    for cmd in cmds:
+                        self._execute_line_on_self(cmd)
+
+                threading.Thread(target=_bg, name="send-self", daemon=True).start()
+                return f"Started on self ({len(cmds)} command(s))."
+            return (
+                "/send requires a multi-agent host (e.g. agent_tui.py); "
+                "enqueue/delegate hook not configured."
+            )
         if eq is not None:
+            lines: list[str] = []
             for cmd in cmds:
                 try:
                     r = eq(agent_name, cmd)
                 except BaseException as e:
-                    sink_print_compat(f"/send: {type(e).__name__}: {e}")
-                    return SessionLineResult()
+                    return f"/send: {type(e).__name__}: {e}"
                 if isinstance(r, dict) and r.get("ok"):
                     lab = str(r.get("label") or agent_name)
                     if r.get("queued"):
-                        sink_print_compat(f"[queued → {lab}] {cmd}")
+                        lines.append(f"[queued → {lab}] {cmd}")
                     else:
-                        sink_print_compat(f"[started → {lab}] {cmd}")
+                        lines.append(f"[started → {lab}] {cmd}")
                 elif isinstance(r, dict):
-                    sink_print_compat(str(r.get("error") or "/send failed"))
-                    return SessionLineResult()
+                    return str(r.get("error") or "/send failed")
                 else:
-                    sink_print_compat("[send] scheduled.")
-            return SessionLineResult()
-        dl = self.python_delegate_line
-        if dl is None:
-            sink_print_compat(
-                "/send requires a multi-agent host (e.g. agent_tui.py); enqueue/delegate hook not configured."
-            )
-            return SessionLineResult()
+                    lines.append(f"[send] scheduled: {cmd}")
+            return "\n".join(lines) if lines else "OK"
+        lines = []
         for cmd in cmds:
             try:
                 res = dl(agent_name, cmd)
             except BaseException as e:
-                sink_print_compat(f"/send: {type(e).__name__}: {e}")
-                return SessionLineResult()
-            if isinstance(res, dict):
-                if res.get("type") == "command":
-                    out = res.get("output") or ""
-                    if isinstance(out, str) and out.strip():
-                        sink_print_compat(out.strip())
-                    else:
-                        sink_print_compat(f"[sent → {agent_name}] command finished.")
-                elif res.get("type") == "turn":
-                    if res.get("answered"):
-                        ans = res.get("answer")
-                        n = len(ans) if isinstance(ans, str) else 0
-                        sink_print_compat(f"[sent → {agent_name}] turn answered ({n} chars).")
-                    else:
-                        sink_print_compat(f"[sent → {agent_name}] turn finished.")
-                else:
-                    sink_print_compat(f"[sent → {agent_name}] done.")
+                return f"/send: {type(e).__name__}: {e}"
+            if isinstance(res, dict) and res.get("type") == "turn":
+                ans = res.get("answer")
+                n = len(ans) if isinstance(ans, str) else 0
+                lines.append(f"[sent → {agent_name}] turn answered ({n} chars).")
+            elif isinstance(res, dict) and (res.get("output") or "").strip():
+                lines.append(str(res.get("output")).strip())
             else:
-                sink_print_compat(f"[sent → {agent_name}] done.")
-        return SessionLineResult()
+                lines.append(f"[sent → {agent_name}] command finished.")
+        return "\n".join(lines) if lines else "OK"
+
+    def _schedule_send(self, agent_name: str, cmds: list[str]) -> str:
+        """Async send: queue during an in-flight turn, else start immediately."""
+        if self._agent_turn_depth > 0:
+            self._after_turn_send_queue.append(
+                {"agent": agent_name.strip(), "cmds": list(cmds)}
+            )
+            lab = "self" if self._is_self_agent_name(agent_name) else agent_name.strip()
+            return (
+                f"Queued for {lab} after current turn ({len(cmds)} command(s))."
+            )
+        return self._run_send_async_now(agent_name, cmds)
+
+    def _flush_after_turn_send_queue(self) -> None:
+        """Run queued ``/send`` items after the outermost agent turn completes."""
+        while self._after_turn_send_queue:
+            item = self._after_turn_send_queue.pop(0)
+            agent = str(item.get("agent") or "").strip()
+            cmds = item.get("cmds") or []
+            if not agent or not cmds:
+                continue
+            msg = self._run_send_async_now(agent, list(cmds))
+            if msg.strip():
+                sink_print_compat(msg.strip())
+
+    def _cmd_turn_to_agent(self, s: str) -> SessionLineResult:
+        """Blocking: run command(s) on ``self`` or another agent and return output."""
+        parsed = parse_turn_command(s)
+        if parsed is None:
+            sink_print_compat(
+                'Usage: /turn AGENT COMMAND…  or  /turn AGENT "cmd1,cmd2,…"\n'
+                "  AGENT may be self (this session) or another agent label in a multi-agent host.\n"
+                "  Plain text runs a full agent turn; slash lines run as REPL commands."
+            )
+            return SessionLineResult()
+        agent_name, cmds = parsed
+        chunks: list[str] = []
+        for cmd in cmds:
+            res = self._execute_turn_for_agent(agent_name, cmd)
+            if res.get("quit"):
+                chunks.append(self._format_dispatch_result(agent_name, res))
+                return self._emit_repl_command_text("\n\n".join(chunks))
+            chunks.append(self._format_dispatch_result(agent_name, res))
+        return self._emit_repl_command_text("\n\n".join(chunks) if chunks else "OK")
+
+    def _cmd_send_to_agent(self, s: str) -> SessionLineResult:
+        """Async: queue for after the current turn, or enqueue/delegate immediately."""
+        parsed = parse_send_command(s)
+        if parsed is None:
+            sink_print_compat(
+                'Usage: /send AGENT COMMAND…  or  /send AGENT "cmd1,cmd2,…"\n'
+                "  AGENT may be self. Use /turn for blocking execution with output."
+            )
+            return SessionLineResult()
+        agent_name, cmds = parsed
+        msg = self._schedule_send(agent_name, cmds)
+        return self._emit_repl_command_text(msg)
 
     def execute_line(self, line: str, *, emit: Optional[Callable[[dict], None]] = None) -> dict:
         """
@@ -1145,6 +1258,18 @@ class AgentSession:
 
     def _execute_user_request(self, user_query: str) -> tuple[bool, Optional[str]]:
         """One normal REPL turn: append messages and run the agent loop."""
+        from agentlib.llm import streaming as llm_streaming
+
+        self._agent_turn_depth += 1
+        try:
+            return self._execute_user_request_body(user_query)
+        finally:
+            self._agent_turn_depth -= 1
+            if self._agent_turn_depth <= 0:
+                self._agent_turn_depth = 0
+                self._flush_after_turn_send_queue()
+
+    def _execute_user_request_body(self, user_query: str) -> tuple[bool, Optional[str]]:
         from agentlib.llm import streaming as llm_streaming
 
         llm_streaming.reset_assistant_answer_streamed()
@@ -1845,6 +1970,8 @@ class AgentSession:
             return self._cmd_fork_background(s)
         if low.startswith("/fork"):
             return self._cmd_fork(s)
+        if s.startswith("/turn"):
+            return self._cmd_turn_to_agent(s)
         if s.startswith("/send"):
             return self._cmd_send_to_agent(s)
         if low in ("/help", "/?"):
@@ -1871,8 +1998,12 @@ class AgentSession:
             delegate_extras = ""
             if self.python_enqueue_line is not None or self.python_delegate_line is not None:
                 delegate_extras = (
-                    "  /send NAME CMD…  ·  "
-                    '/send NAME "cmd1,cmd2,…"\n'
+                    "  /send NAME CMD…  ·  /turn NAME CMD…  (async vs blocking; NAME may be self)\n"
+                    '  /send NAME "cmd1,cmd2,…"  ·  /turn NAME "cmd1,cmd2,…"\n'
+                )
+            else:
+                delegate_extras = (
+                    "  /send self CMD…  ·  /turn self CMD…  (self only without multi-agent host)\n"
                 )
             ext_help = self._repl_extension_help_text()
             sink_print_compat(
@@ -2330,7 +2461,8 @@ class AgentSession:
                 "  ai(cmd)                       Same as typing ``cmd`` here (LLM or ``/command``).\n"
                 "  ai(cmd, agent_name)           Target another agent when multi-agent hooks exist.\n"
                 "  fork_agent(name [, cmds])     Fork a lane when ``python_fork_agent`` is wired.\n"
-                "  send(name, cmd | cmds)       Forward one or several cmds to another agent (async when supported).\n"
+                "  send(name, cmd | cmds)       Async dispatch (queued during an in-flight turn).\n"
+                "  turn(name, cmd | cmds)       Blocking dispatch; returns output (use turn('self', '…')).\n"
                 "  list_agents()                 Snapshots lanes when ``python_host_command`` is wired.\n"
                 "  switch_agent(name)            Focus lane by label (host).\n"
                 "  last_answer([name]) · last_question([name])   Same as ``/last answer|question`` (host).\n"
@@ -2388,46 +2520,43 @@ class AgentSession:
             a = (agent_name or "").strip()
             return session.host_ctl("last_question", a if a else None)
 
+        def _cmds_from_send_arg(cmd) -> list[str]:
+            if isinstance(cmd, str):
+                sline = cmd.strip()
+                return [sline] if sline else []
+            try:
+                return [str(x).strip() for x in cmd if str(x).strip()]
+            except TypeError:
+                return []
+
         def send(agent_name: str, cmd) -> dict:
             nm = str(agent_name or "").strip()
             if not nm:
                 sink_print_compat("send() requires a non-empty agent name.")
                 return {"type": "command", "quit": False, "output": "bad send"}
-            cmds: list[str]
-            if isinstance(cmd, str):
-                sline = cmd.strip()
-                cmds = [sline] if sline else []
-            else:
-                try:
-                    cmds = [str(x).strip() for x in cmd if str(x).strip()]
-                except TypeError:
-                    cmds = []
+            cmds = _cmds_from_send_arg(cmd)
             if not cmds:
                 sink_print_compat("send() requires a non-empty command.")
                 return {"type": "command", "quit": False, "output": "bad send"}
-            eq = session.python_enqueue_line
-            if eq is not None:
-                try:
-                    last_r = None
-                    for line in cmds:
-                        last_r = eq(nm, line)
-                    return last_r if last_r is not None else {"ok": False, "error": "enqueue returned no result"}
-                except BaseException as e:
-                    return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-            dl = session.python_delegate_line
-            if dl is None:
-                sink_print_compat(
-                    "send() requires a multi-agent host (e.g. agent_tui.py); enqueue/delegate hook not configured."
-                )
-                return {"type": "command", "quit": False, "output": "delegate unavailable"}
-            try:
-                last = None
-                for line in cmds:
-                    last = dl(nm, line)
-                return last if last is not None else {"type": "command", "quit": False}
-            except BaseException as e:
-                sink_print_compat(f"send(): {type(e).__name__}: {e}")
-                return {"type": "command", "quit": False, "output": "send failed"}
+            out = session._schedule_send(nm, cmds)
+            return {"type": "command", "quit": False, "output": out}
+
+        def turn(agent_name: str, cmd) -> dict:
+            nm = str(agent_name or "").strip()
+            if not nm:
+                sink_print_compat("turn() requires a non-empty agent name.")
+                return {"type": "command", "quit": False, "output": "bad turn"}
+            cmds = _cmds_from_send_arg(cmd)
+            if not cmds:
+                sink_print_compat("turn() requires a non-empty command.")
+                return {"type": "command", "quit": False, "output": "bad turn"}
+            chunks: list[str] = []
+            for line in cmds:
+                res = session._execute_turn_for_agent(nm, line)
+                chunks.append(session._format_dispatch_result(nm, res))
+                if res.get("quit"):
+                    break
+            return {"type": "command", "quit": False, "output": "\n\n".join(chunks) if chunks else "OK"}
 
         g = {
             "__builtins__": __builtins__,
@@ -2435,6 +2564,7 @@ class AgentSession:
             "ai": ai,
             "fork_agent": fork_agent,
             "send": send,
+            "turn": turn,
             "list_agents": list_agents,
             "switch_agent": switch_agent,
             "last_answer": last_answer,

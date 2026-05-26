@@ -105,7 +105,8 @@ Repeat **`--agent LABEL` or `--agent LABEL:MODEL`** for more lanes. Omit **`:MOD
 | **`/fork NAME ["cmd1,cmd2,…"]`** | New lane; optional quoted list runs initial commands (commas split; use `'…'` or **`\,`** inside the quotes for a literal comma—the same rules as **`/fork help`**) |
 | **`/fork_background …`** | Same as **`/fork`** but keep the current lane focused |
 | **`/kill NAME`** | Remove a lane by display name (**one** lane must stay) |
-| **`/send AGENT WORDS…`** | Run one prompt or slash line on another lane without blocking this one |
+| **`/send AGENT WORDS…`** | Async: run on another lane (or **`self`**) without blocking; queues during an in-flight turn |
+| **`/turn AGENT WORDS…`** | Blocking: run on **`self`** or another lane and get output (e.g. **`/turn self What is 2+2?`**) |
 | **`/send AGENT "a,b"`** | Run **several** lines on another lane (`a` then `b`); inner quoting matches **`/fork`** (single-quoted fragments, **`\,`** for literal commas) |
 | **`/clipboard`** | **`copy`** last assistant reply · **`copy all`** session JSON · **`paste`** loads the OS clipboard into the **prompt for editing** (nothing runs until you press Enter) |
 

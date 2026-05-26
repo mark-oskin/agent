@@ -1,10 +1,12 @@
 from agentlib.tui_parse import (
     format_fork_command_line,
     format_send_command_line,
+    format_turn_command_line,
     parse_fork_background_command,
     parse_fork_command,
     parse_kill_command,
     parse_send_command,
+    parse_turn_command,
 )
 
 
@@ -86,6 +88,15 @@ def test_parse_send_not_send():
 def test_format_send_roundtrip():
     line = format_send_command_line("Lane", ["x,y", "/help"])
     assert parse_send_command(line) == ("Lane", ["x,y", "/help"])
+
+
+def test_parse_turn_matches_send():
+    assert parse_turn_command("/turn self 2+2") == ("self", ["2+2"])
+
+
+def test_format_turn_roundtrip():
+    line = format_turn_command_line("self", ["2+2", "/help"])
+    assert parse_turn_command(line) == ("self", ["2+2", "/help"])
 
 
 def test_parse_fork_background_matches_fork_body():

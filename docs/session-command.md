@@ -30,6 +30,8 @@ The tool result is the command’s **full printed output** plus any structured `
 | Enable second opinion | `/set enable second_opinion` |
 | Command reference | `/help` |
 | Last token usage | `/usage` |
+| Ask this agent a question (blocking) | `/turn self What is 2+2?` |
+| Ask after current turn (async) | `/send self follow-up question` |
 
 Progress in the TUI/CLI still shows lines like `→ [native] session_command Tool: session_command command='/set thinking show'`.
 
@@ -37,7 +39,9 @@ Progress in the TUI/CLI still shows lines like `→ [native] session_command Too
 
 ## Allowed vs blocked
 
-**Allowed:** Most single-line REPL lines: slash commands (`/set`, `/show`, `/help`, `/send`, `/fork`, `/call_python`, `/run_command`, `/source`, `/import`, `/set lock`, …) and shell escapes (`! cmd`, same as the REPL).
+**Allowed:** Most single-line REPL lines: slash commands (`/set`, `/show`, `/help`, `/send`, `/turn`, `/fork`, …) and shell escapes (`! cmd`, same as the REPL).
+
+**`/send` vs `/turn`:** Both accept an agent name; **`self`** is the current session. **`/turn`** runs **blocking** and returns output (for tool use: `session_command` with `/turn self …`). **`/send`** is **async** — during an in-flight agent turn it is **queued** until that turn finishes; otherwise it enqueues on another lane (TUI) or starts in the background (`self` on plain CLI).
 
 **Blocked** (tool returns an error string):
 

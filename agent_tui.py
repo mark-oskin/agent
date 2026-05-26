@@ -37,8 +37,9 @@ Inspect or jump lanes without running the model::
 
     /list
     /switch Planner
-    /send Coder /help                    # runs on Coder without blocking this lane
-    /send Planner What is the capital of France?
+    /send Coder /help                    # async on Coder (queues if that lane is busy)
+    /turn self What is 2+2?              # blocking on this lane; returns the answer
+    /send self follow-up question        # async after the current turn on this lane finishes
     /send Worker "/help,/show model"     # comma-separated list in "…"; use '…' or \, inside for literal commas (/fork rules)
 
     /last answer|question [NAME]   (aliases: /last_answer, /last_question)
@@ -102,6 +103,7 @@ from agentlib.tui_parse import (
     parse_fork_command,
     parse_kill_command,
     parse_send_command,
+    parse_turn_command,
 )
 
 
@@ -1033,7 +1035,44 @@ class AgentTuiApp(App[None]):
 
     def _lanes_matching_name(self, name: str) -> List[int]:
         key = name.casefold().strip()
+        if key == "self":
+            if 0 <= self._active_lane < len(self._lane_labels):
+                return [self._active_lane]
+            return []
         return [i for i, lab in enumerate(self._lane_labels) if lab.casefold().strip() == key]
+
+    def _resolve_lane_for_agent(self, agent_name: str) -> tuple[Optional[int], Optional[str]]:
+        matches = self._lanes_matching_name(agent_name)
+        if not matches:
+            return None, f"No agent named {agent_name!r}."
+        if len(matches) > 1:
+            lanes_s = ", ".join(str(i + 1) for i in matches)
+            return None, f"Ambiguous name {agent_name!r} (lanes {lanes_s})."
+        return matches[0], None
+
+    def _run_turn_for_lane_sync(self, agent_name: str, cmd: str) -> dict:
+        """Blocking ``execute_line`` on a lane (waits for worker thread)."""
+        lane_idx, err = self._resolve_lane_for_agent(agent_name)
+        if err:
+            return {"ok": False, "error": err}
+        if lane_idx in self._busy_lanes:
+            return {
+                "ok": False,
+                "error": "Agent busy; use /send to queue after the current turn.",
+            }
+        session = self._sessions[lane_idx]
+        box: List[dict] = []
+
+        def worker() -> None:
+            try:
+                box.append(session.execute_line(cmd.strip()))
+            except BaseException as e:
+                box.append({"type": "command", "quit": False, "output": f"{type(e).__name__}: {e}"})
+
+        th = threading.Thread(target=worker, name=f"agent-turn-sync-{lane_idx}", daemon=True)
+        th.start()
+        th.join()
+        return {"ok": True, "result": box[0] if box else {"type": "command", "quit": False, "output": ""}}
 
     def _fork_lane_hook(
         self,
@@ -1129,13 +1168,9 @@ class AgentTuiApp(App[None]):
 
     def _enqueue_turn_for_lane(self, agent_name: str, cmd: str) -> dict:
         """Must run on the Textual UI thread. Starts ``cmd`` on ``lane`` or appends to its queue."""
-        matches = self._lanes_matching_name(agent_name)
-        if not matches:
-            return {"ok": False, "error": f"No agent named {agent_name!r}"}
-        if len(matches) > 1:
-            lanes_s = ", ".join(str(i + 1) for i in matches)
-            return {"ok": False, "error": f"Ambiguous name {agent_name!r} (lanes {lanes_s})"}
-        lane_idx = matches[0]
+        lane_idx, err = self._resolve_lane_for_agent(agent_name)
+        if err:
+            return {"ok": False, "error": err}
         label = self._lane_labels[lane_idx]
         if lane_idx in self._busy_lanes:
             self._lane_turn_queues.setdefault(lane_idx, []).append(cmd)
@@ -1151,6 +1186,35 @@ class AgentTuiApp(App[None]):
         if not q:
             self._lane_turn_queues.pop(lane, None)
         self._run_line(lane, nxt)
+
+    def _handle_turn(self, line: str) -> None:
+        lane = self._active_lane
+        parsed = parse_turn_command(line)
+        if parsed is None:
+            self._feedback_chat(
+                lane,
+                "[yellow]Usage:[/yellow] /turn AGENT COMMAND…  ·  "
+                '/turn self "cmd1,cmd2,…" (blocking; use /send to queue)',
+            )
+            return
+        agent_name, cmds = parsed
+        for cmd in cmds:
+            r = self._run_turn_for_lane_sync(agent_name, cmd)
+            if not r.get("ok"):
+                self._feedback_chat(
+                    lane,
+                    f"[yellow]{escape(str(r.get('error', '/turn failed')))}[/yellow]",
+                )
+                return
+            res = r.get("result") if isinstance(r.get("result"), dict) else {}
+            if res.get("type") == "turn":
+                ans = res.get("answer")
+                if isinstance(ans, str) and ans.strip():
+                    self._write_final_answer_block(lane, ans.strip())
+                    continue
+            out = (res.get("output") or "").strip() if isinstance(res, dict) else ""
+            if out:
+                self._feedback_chat(lane, f"[dim]{escape(out)}[/dim]")
 
     def _handle_send(self, line: str) -> None:
         lane = self._active_lane
@@ -1787,6 +1851,9 @@ class AgentTuiApp(App[None]):
         self._record_prompt_submission(lane, line)
         if line.startswith("/send"):
             self._handle_send(line)
+            return
+        if line.startswith("/turn"):
+            self._handle_turn(line)
             return
         if line.startswith("/kill"):
             self._handle_kill(line)
