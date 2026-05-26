@@ -13,13 +13,6 @@ _BLOCKED_PREFIXES = (
     "/use-skill",
     "/use-skills",
     "/reuse-skill",
-    "/send",
-    "/fork_background",
-    "/fork",
-    "/call_python",
-    "/run_command",
-    "/source",
-    "/import",
 )
 
 
@@ -48,22 +41,7 @@ def session_command_blocked_reason(line: str) -> Optional[str]:
         if low == prefix or low.startswith(prefix + " ") or low.startswith(prefix + "\t"):
             return (
                 f"session_command error: {prefix} is not allowed via session_command "
-                "(unbounded side effects or arbitrary code). Run it manually in the REPL."
-            )
-    if low.startswith("!"):
-        return (
-            "session_command error: shell escapes (!) are not allowed via session_command. "
-            "Use /run_command manually if needed."
-        )
-    try:
-        toks = shlex.split(raw)
-    except ValueError:
-        return None
-    if toks and toks[0].lower() in ("/set", "/settings") and len(toks) >= 2:
-        if toks[1].lower().replace("-", "_") == "lock":
-            return (
-                "session_command error: /set lock is not allowed via session_command "
-                "(permanent for the session). The user must run it manually."
+                "(unbounded agent loop). Run it manually in the REPL."
             )
     return None
 
@@ -79,10 +57,10 @@ def validate_session_command(line: str) -> Tuple[Optional[str], Optional[str]]:
         return None, "session_command error: command must be a non-empty string."
     if "\n" in raw or "\r" in raw:
         return None, "session_command error: command must be a single line."
-    if not raw.startswith("/"):
+    if not (raw.startswith("/") or raw.startswith("!")):
         return (
             None,
-            "session_command error: must be a slash command (e.g. /show models, /set thinking show).",
+            "session_command error: must be a slash command (e.g. /show models) or shell escape (! cmd).",
         )
     try:
         shlex.split(raw)

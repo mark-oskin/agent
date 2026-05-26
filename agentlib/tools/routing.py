@@ -125,7 +125,7 @@ CORE_TOOL_PROMPT_DOCS: dict[str, str] = {
         "session_command — parameters.command (string, one REPL slash command). "
         "Runs it immediately and returns the command output (same as the user typing in the REPL). "
         "Examples: /set thinking show, /show models, /set tools list, /set agent show, /help, /usage. "
-        "Not allowed: /quit, /while, /skill, /send, /fork, /call_python, /run_command, /set lock. "
+        "Not allowed: /quit, /while, /skill. Shell escapes (! cmd) allowed. "
         "Answer status questions from the tool result text, not from guesswork. "
         "Do not use call_python to run slash commands."
     ),

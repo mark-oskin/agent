@@ -37,20 +37,15 @@ Progress in the TUI/CLI still shows lines like `→ [native] session_command Too
 
 ## Allowed vs blocked
 
-**Allowed:** Most single-line slash commands: `/set`, `/show`, `/help`, `/clear`, `/cd`, `/context`, `/mcp`, `/compact`, `/usage`, `/set save`, `/set model …`, etc.
+**Allowed:** Most single-line REPL lines: slash commands (`/set`, `/show`, `/help`, `/send`, `/fork`, `/call_python`, `/run_command`, `/source`, `/import`, `/set lock`, …) and shell escapes (`! cmd`, same as the REPL).
 
-**Blocked** (user must run manually; tool returns an error string):
+**Blocked** (tool returns an error string):
 
 | Pattern | Reason |
 |---------|--------|
 | `/quit`, `/exit`, `/q` | Ends the session |
 | `/while` | Unbounded agent loop |
-| `/skill`, `/use-skill`, … | Multi-step agent workflows |
-| `/send`, `/fork`, `/fork_background` | Multi-agent side effects |
-| `/call_python`, `/run_command` | Arbitrary code / shell |
-| `/source`, `/import` | Batch or inject arbitrary lines |
-| `/set lock` | Permanent session freeze |
-| `!command` | Shell escape |
+| `/skill`, `/use-skill`, `/use-skills`, `/reuse-skill` | Multi-step agent workflows |
 
 When **`/set lock`** is active, mutating `/set` lines are rejected by the session (read-only **`show`** / **`list`** still work); the captured error text is returned to the model.
 
@@ -67,7 +62,7 @@ When **`/set lock`** is active, mutating `/set` lines are rejected by the sessio
 ## Related docs
 
 - [Settings (`/set`)](settings-repl.md) — full topic map; **`/set help`** in the REPL is authoritative
-- [REPL session & context](repl-session.md) — `/cd`, `/context`, `/source` (note: `/source` is blocked for `session_command`)
+- [REPL session & context](repl-session.md) — `/cd`, `/context`, `/source`, `/import`
 - [Core tools](core-tools.md) — tool table including `session_command`
 - [README — Tools](../README.md#tools)
 - **`agent_knowledge.txt`** — chat-assistant guidance (also mention in system context when automating)

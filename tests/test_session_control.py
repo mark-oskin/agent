@@ -33,11 +33,26 @@ def test_validate_accepts_common_slash_commands():
 
 
 def test_blocked_commands():
-    assert normalize_allowlisted_session_command("/set lock") is None
     assert normalize_allowlisted_session_command("/quit") is None
-    assert normalize_allowlisted_session_command("/call_python print(1)") is None
     assert normalize_allowlisted_session_command("/while 'x' do 'y'") is None
-    assert session_command_blocked_reason("!ls") is not None
+    assert normalize_allowlisted_session_command("/skill auto hi") is None
+
+
+def test_previously_blocked_commands_now_allowed():
+    for line in (
+        "/set lock",
+        "/call_python -c pass",
+        "/run_command echo hi",
+        "/source setup.txt",
+        "/import notes.txt",
+        "/send other hi",
+        "/fork LaneA",
+        "/fork_background LaneB",
+        "!echo hello",
+    ):
+        norm, err = validate_session_command(line)
+        assert err is None, (line, err)
+        assert norm == line
 
 
 def test_merge_command_transcript_output_dedupes():

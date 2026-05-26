@@ -48,7 +48,7 @@ This file is **mostly for humans** who will run **`/call_python path/to/driver.p
 
 **`session_command` runs REPL slash commands** and returns their output to you. Use it whenever you need session facts or must change config (same lines the user would type). Examples: **`/set thinking show`**, **`/show models`**, **`/set tools list`**, **`/set agent show`**, **`/help`**. Full list and blocklist: **`docs/session-command.md`** in the repo.
 
-**Not allowed via `session_command`** (user must run manually): **`/quit`**, **`/while`**, **`/skill`**, **`/send`**, **`/fork`**, **`/call_python`**, **`/run_command`**, **`/set lock`**, shell **`!`** escapes.
+**Not allowed via `session_command`:** **`/quit`**, **`/while`**, **`/skill`** (and **`/use-skill`** / **`/reuse-skill`**). Other slash lines and **`!`** shell escapes are allowed.
 
 **Driver scripts** (human runs **`/call_python script.py`**) may still use **`ai("/set …")`** — see below.
 
