@@ -41,7 +41,9 @@ Progress in the TUI/CLI still shows lines like `→ [native] session_command Too
 
 **Allowed:** Most single-line REPL lines: slash commands (`/set`, `/show`, `/help`, `/send`, `/turn`, `/fork`, …) and shell escapes (`! cmd`, same as the REPL).
 
-**`/send` vs `/turn`:** Both accept an agent name; **`self`** is the current session. **`/turn`** runs **blocking** and returns output (for tool use: `session_command` with `/turn self …`). **`/send`** is **async** — during an in-flight agent turn it is **queued** until that turn finishes; otherwise it enqueues on another lane (TUI) or starts in the background (`self` on plain CLI).
+**Multi-agent (TUI):** Use **`/fork NAME`** to create a new lane (e.g. `command="/fork worker"` when the user wants an agent named worker). Use **`/list`** to see names. **`agent_send`** only messages lanes that already exist; it does not fork.
+
+**`/send` vs `/turn`:** Both accept an agent name; **`self`** is the current session. **`/turn`** is **fully blocking**: it waits for the target lane to finish any in-flight work (TUI), runs the command with streaming UI updates, and **returns the full reply** in command output (so `session_command` with `/turn self …` gets the answer text). When `/turn self` runs **during** an agent turn (typical `session_command` path), it executes **in-process** on the same session (no extra TUI “You” line) and the nested turn **cannot** call `session_command` again (prevents `/turn self` loops). **`/send`** is **async** — during an in-flight agent turn it is **queued** until that turn finishes; otherwise it enqueues on another lane (TUI) or starts in the background (`self` on plain CLI).
 
 **Blocked** (tool returns an error string):
 

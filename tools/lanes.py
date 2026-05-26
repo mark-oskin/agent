@@ -32,6 +32,26 @@ def _missing_host_msg() -> str:
     )
 
 
+_CREATE_LANE_HINT = (
+    " To create a new lane, use session_command with command=\"/fork NAME\" "
+    '(e.g. command="/fork worker"). agent_send only targets existing lanes; '
+    'use session_command command="/list" to list lane names.'
+)
+
+
+def _hint_if_unknown_lane(payload: dict) -> dict:
+    """Append fork guidance when the host reports a missing lane label."""
+    err = payload.get("error")
+    if isinstance(err, str) and "no agent named" in err.casefold():
+        payload = {**payload, "error": err + _CREATE_LANE_HINT}
+    inner = payload.get("result")
+    if isinstance(inner, dict):
+        inner_err = inner.get("error")
+        if isinstance(inner_err, str) and "no agent named" in inner_err.casefold():
+            payload = {**payload, "result": {**inner, "error": inner_err + _CREATE_LANE_HINT}}
+    return payload
+
+
 def agent_send(params: dict) -> str:
     """
     Send one REPL line to another agent lane (agent_tui host).
@@ -76,7 +96,8 @@ def agent_send(params: dict) -> str:
             out = eq(agent, line)
         except Exception as e:
             out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-        return json.dumps({"ok": True, "wait": False, "mode": "enqueue", "result": out}, ensure_ascii=False)
+        wrapped = {"ok": True, "wait": False, "mode": "enqueue", "result": out}
+        return json.dumps(_hint_if_unknown_lane(wrapped), ensure_ascii=False)
 
     # Blocking: requires delegate (or emulate with delegate fallback).
     if dl is None:
@@ -116,7 +137,10 @@ def agent_send(params: dict) -> str:
 
 TOOLSET = {
     "name": "lanes",
-    "description": "Cross-lane control for agent_tui (send one REPL line to another lane).",
+    "description": (
+        "Cross-lane messaging for agent_tui (agent_send → existing lanes only). "
+        "Create lanes with session_command /fork, not agent_send."
+    ),
     "triggers": [],
     "tools": [
         {
@@ -130,14 +154,17 @@ TOOLSET = {
                 "timeout_ms": "Optional: timeout for wait=true in ms (int).",
             },
             "prompt_doc": (
-                "agent_send — send one REPL line to another agent_tui lane. "
+                "agent_send — send one REPL line to an **existing** agent_tui lane (by label). "
+                "Does **not** create or fork lanes. To spawn a new agent when the user asks "
+                '(e.g. "start an agent called worker"), use session_command with command="/fork worker" '
+                '(or "/fork_background worker"); use session_command command="/list" to see labels. '
                 "parameters.agent (string lane label), parameters.line (string REPL line), "
                 "optional parameters.wait (bool, default false), parameters.timeout_ms (int; only for wait=true). "
                 "Use wait=true when you need the other lane's result; if timeout happens, the other lane may still be running. "
                 "Examples: "
-                "{\"action\":\"tool_call\",\"tool\":\"agent_send\",\"parameters\":{\"agent\":\"agent2\",\"line\":\"/show model\"}} "
+                "{\"action\":\"tool_call\",\"tool\":\"agent_send\",\"parameters\":{\"agent\":\"Worker\",\"line\":\"/show model\"}} "
                 "or "
-                "{\"action\":\"tool_call\",\"tool\":\"agent_send\",\"parameters\":{\"agent\":\"agent2\",\"line\":\"who is the president of France?\",\"wait\":true,\"timeout_ms\":30000}}."
+                "{\"action\":\"tool_call\",\"tool\":\"agent_send\",\"parameters\":{\"agent\":\"Worker\",\"line\":\"Summarize the task\",\"wait\":true,\"timeout_ms\":30000}}."
             ),
             "returns": "JSON string: queued ack for wait=false, or target lane result for wait=true (may timeout).",
             "handler": agent_send,

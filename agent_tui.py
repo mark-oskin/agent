@@ -871,16 +871,18 @@ class AgentTuiApp(App[None]):
             pass
 
     def _mount_lane_widgets(self, idx: int, *, hidden: bool) -> SelectableRichLog:
+        # Keep direct refs — query_one on an unmounted Vertical fails in Textual (dynamic /fork).
+        thinking_log = SelectableRichLog(
+            classes="thinking_log",
+            id=f"thinking-{idx}",
+            highlight=False,
+            markup=True,
+            wrap=True,
+            auto_scroll=True,
+        )
         thinking_panel = Vertical(
             NoSelectStatic("Thinking", classes="thinking_title"),
-            SelectableRichLog(
-                classes="thinking_log",
-                id=f"thinking-{idx}",
-                highlight=False,
-                markup=True,
-                wrap=True,
-                auto_scroll=True,
-            ),
+            thinking_log,
             classes="thinking_panel",
             id=f"thinking-panel-{idx}",
         )
@@ -896,7 +898,7 @@ class AgentTuiApp(App[None]):
         lane_cls = "lane-pane hidden" if hidden else "lane-pane"
         lane = Vertical(thinking_panel, chat_lane, classes=lane_cls, id=f"lane-{idx}")
         self._lane_verticals.append(lane)
-        self._thinking_logs.append(thinking_panel.query_one(f"#thinking-{idx}", SelectableRichLog))
+        self._thinking_logs.append(thinking_log)
         self._chat_logs.append(chat)
         container = self.query_one("#lanes_container", Vertical)
         container.mount(lane)
@@ -946,8 +948,39 @@ class AgentTuiApp(App[None]):
         parent_lane: int,
         *,
         switch_to_new: bool,
-    ) -> None:
+    ) -> Optional[int]:
+        """
+        Create a lane or reuse an existing label. Returns lane index, or ``None`` on failure.
+        """
         from agentlib import fork_embedded_session
+
+        nm = (name or "").strip()
+        if not nm:
+            return None
+        matches = self._lanes_matching_name(nm)
+        if len(matches) > 1:
+            lanes_s = ", ".join(str(i + 1) for i in matches)
+            self._feedback_chat(
+                parent_lane,
+                f"[yellow]Cannot fork {nm!r}: ambiguous name (lanes {lanes_s}).[/yellow]",
+            )
+            return None
+        if len(matches) == 1:
+            lane_idx = matches[0]
+            ol = self.query_one("#agent_list", OptionList)
+            if switch_to_new:
+                self._show_lane(lane_idx)
+                ol.highlighted = lane_idx
+            self._chat_logs[parent_lane].write(
+                Text.from_markup(
+                    f"[dim]Reused existing lane [bold]{escape(nm)}[/bold] (no duplicate fork).[/dim]\n"
+                )
+            )
+            filtered = [c.strip() for c in cmds if c.strip()]
+            if filtered:
+                self._execute_lines_chain(lane_idx, filtered)
+            self._sync_prompt_enabled()
+            return lane_idx
 
         parent_sess = self._sessions[parent_lane]
         new_idx = self._n
@@ -961,7 +994,7 @@ class AgentTuiApp(App[None]):
 
         chat = self._mount_lane_widgets(new_idx, hidden=not switch_to_new)
         ol = self.query_one("#agent_list", OptionList)
-        self._lane_labels.append(name)
+        self._lane_labels.append(nm)
         ol.add_option(Option(self._sidebar_line_for_lane(new_idx), id=f"agent-{new_idx}"))
         self._sessions.append(new_sess)
         self._chat_live_buf[new_idx] = ""
@@ -973,16 +1006,16 @@ class AgentTuiApp(App[None]):
 
         if switch_to_new:
             hint = (
-                f"[bold]{escape(name)}[/bold] — [dim]forked from lane {parent_lane + 1}[/dim]\n"
+                f"[bold]{escape(nm)}[/bold] — [dim]forked from lane {parent_lane + 1}[/dim]\n"
                 f"[dim]Ctrl+Q quit · /help · /fork …[/dim]"
             )
-            parent_note = f"[dim]Fork → [bold]{escape(name)}[/bold][/dim]\n"
+            parent_note = f"[dim]Fork → [bold]{escape(nm)}[/bold][/dim]\n"
         else:
             hint = (
-                f"[bold]{escape(name)}[/bold] — [dim]background fork from lane {parent_lane + 1}[/dim]\n"
+                f"[bold]{escape(nm)}[/bold] — [dim]background fork from lane {parent_lane + 1}[/dim]\n"
                 f"[dim]Select in sidebar when ready · /fork · /fork_background …[/dim]"
             )
-            parent_note = f"[dim]Fork (background) → [bold]{escape(name)}[/bold][/dim]\n"
+            parent_note = f"[dim]Fork (background) → [bold]{escape(nm)}[/bold][/dim]\n"
         chat.write(Text.from_markup(hint))
         self._chat_logs[parent_lane].write(Text.from_markup(parent_note))
 
@@ -996,6 +1029,7 @@ class AgentTuiApp(App[None]):
         self._prompt_hist_idx.pop(new_idx, None)
         if filtered:
             self._execute_lines_chain(new_idx, filtered)
+        return new_idx
 
     def _handle_fork(self, line: str) -> None:
         parent_lane = self._active_lane
@@ -1041,6 +1075,25 @@ class AgentTuiApp(App[None]):
             return []
         return [i for i, lab in enumerate(self._lane_labels) if lab.casefold().strip() == key]
 
+    def _run_on_ui_thread(self, fn: Callable[[], None], *, timeout_s: float = 300.0) -> None:
+        """Run ``fn`` on the Textual UI thread and block until it finishes (fork/send hooks)."""
+        done = threading.Event()
+        err_box: List[BaseException] = []
+
+        def wrapper() -> None:
+            try:
+                fn()
+            except BaseException as e:
+                err_box.append(e)
+            finally:
+                done.set()
+
+        self.call_from_thread(wrapper)
+        if not done.wait(timeout=timeout_s):
+            raise TimeoutError("Timed out waiting for UI thread")
+        if err_box:
+            raise err_box[0]
+
     def _resolve_lane_for_agent(self, agent_name: str) -> tuple[Optional[int], Optional[str]]:
         matches = self._lanes_matching_name(agent_name)
         if not matches:
@@ -1050,22 +1103,39 @@ class AgentTuiApp(App[None]):
             return None, f"Ambiguous name {agent_name!r} (lanes {lanes_s})."
         return matches[0], None
 
+    def _is_lane_worker_thread(self, lane_idx: int) -> bool:
+        from agentlib.tui_busy import is_lane_worker_thread
+
+        return is_lane_worker_thread(self._lane_worker_threads, lane_idx)
+
+    def _wait_until_lane_idle(self, lane_idx: int, poll: float = 0.05) -> None:
+        """Block until ``lane_idx`` is not busy (``/turn`` semantics). No-op when already on that lane's worker."""
+        from agentlib.tui_busy import wait_until_lane_idle
+
+        def is_busy(ln: int) -> bool:
+            busy_box: List[bool] = []
+            self.call_from_thread(
+                lambda: busy_box.append(ln in self._busy_lanes)
+            )
+            return bool(busy_box and busy_box[0])
+
+        wait_until_lane_idle(
+            lane_idx,
+            is_busy=is_busy,
+            lane_worker_threads=self._lane_worker_threads,
+            poll=poll,
+        )
+
     def _run_turn_for_lane_sync(self, agent_name: str, cmd: str) -> dict:
-        """Blocking ``execute_line`` on a lane (waits for worker thread)."""
+        """Blocking turn on a lane: wait until idle, run with emit + transcript, return full result."""
         lane_idx, err = self._resolve_lane_for_agent(agent_name)
         if err:
             return {"ok": False, "error": err}
-        if lane_idx in self._busy_lanes:
-            return {
-                "ok": False,
-                "error": "Agent busy; use /send to queue after the current turn.",
-            }
-        session = self._sessions[lane_idx]
         box: List[dict] = []
 
         def worker() -> None:
             try:
-                box.append(session.execute_line(cmd.strip()))
+                box.append(self._python_delegate_bridge(agent_name, cmd.strip()))
             except BaseException as e:
                 box.append({"type": "command", "quit": False, "output": f"{type(e).__name__}: {e}"})
 
@@ -1091,12 +1161,36 @@ class AgentTuiApp(App[None]):
 
         def ui() -> None:
             try:
-                self._fork_new_lane(nm, cmds, parent_lane, switch_to_new=not background)
-                box.append({"type": "fork", "ok": True})
+                before_n = self._n
+                lane_idx = self._fork_new_lane(nm, cmds, parent_lane, switch_to_new=not background)
+                if lane_idx is None:
+                    box.append({"type": "fork", "ok": False, "error": f"fork {nm!r} failed"})
+                elif self._n == before_n:
+                    box.append(
+                        {
+                            "type": "fork",
+                            "ok": True,
+                            "reused": True,
+                            "lane": lane_idx,
+                            "label": nm,
+                        }
+                    )
+                else:
+                    box.append(
+                        {
+                            "type": "fork",
+                            "ok": True,
+                            "lane": lane_idx,
+                            "label": nm,
+                        }
+                    )
             except Exception as e:
                 box.append({"type": "fork", "ok": False, "error": str(e)})
 
-        self.call_from_thread(ui)
+        try:
+            self._run_on_ui_thread(ui)
+        except Exception as e:
+            return {"type": "fork", "ok": False, "error": str(e)}
         return box[0] if box else {"type": "fork", "ok": False, "error": "no result"}
 
     def _python_delegate_bridge(self, agent_name: str, cmd: str) -> dict:
@@ -1116,6 +1210,7 @@ class AgentTuiApp(App[None]):
         lane_idx = matches[0]
         sess = self._sessions[lane_idx]
         cmd_stripped = (cmd or "").strip()
+        self._wait_until_lane_idle(lane_idx)
         # Match _run_line: show the user message in this lane's chat before the model runs. Delegate
         # used to call execute_line alone, so the transcript stayed blank until the assistant reply.
         turn_box: List[int] = []
@@ -1125,7 +1220,9 @@ class AgentTuiApp(App[None]):
 
         self.call_from_thread(prep)
         turn_seq = turn_box[0]
-        self.call_from_thread(self._set_lane_busy, lane_idx, True)
+        nested_worker = self._is_lane_worker_thread(lane_idx)
+        if not nested_worker:
+            self.call_from_thread(self._set_lane_busy, lane_idx, True)
         captured: List[str] = []
 
         def emit_fn(ev, ln=lane_idx, ts=turn_seq):
@@ -1136,13 +1233,23 @@ class AgentTuiApp(App[None]):
             with emit_sink_scope(emit_fn):
                 res = sess.execute_line(cmd_stripped)
         finally:
-            self.call_from_thread(self._set_lane_busy, lane_idx, False)
+            if not nested_worker:
+                self.call_from_thread(self._set_lane_busy, lane_idx, False)
 
-        if isinstance(res, dict) and res.get("type") == "command":
-            cap = "".join(captured).rstrip()
-            cur = (res.get("output") or "").strip()
-            if cap and not cur:
-                res = {**res, "output": cap}
+        cap = "".join(captured).rstrip()
+        if isinstance(res, dict) and cap:
+            from agentlib.tools.session_control import merge_command_transcript_output
+
+            if res.get("type") == "command":
+                cur = (res.get("output") or "").strip()
+                merged = merge_command_transcript_output(cur, cap)
+                if merged != cur:
+                    res = {**res, "output": merged}
+            elif res.get("type") == "turn":
+                ans = (res.get("answer") or "").strip()
+                merged = merge_command_transcript_output(ans, cap)
+                if merged:
+                    res = {**res, "answer": merged}
 
         # Delegate bypasses _run_line → _turn_done; still append final assistant / command
         # output to this lane's transcript (same as _apply_turn_result after a normal turn).
@@ -1163,7 +1270,10 @@ class AgentTuiApp(App[None]):
             except Exception as e:
                 box.append({"ok": False, "error": str(e)})
 
-        self.call_from_thread(ui)
+        try:
+            self._run_on_ui_thread(ui)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
         return box[0] if box else {"ok": False, "error": "no result"}
 
     def _enqueue_turn_for_lane(self, agent_name: str, cmd: str) -> dict:
@@ -1194,7 +1304,7 @@ class AgentTuiApp(App[None]):
             self._feedback_chat(
                 lane,
                 "[yellow]Usage:[/yellow] /turn AGENT COMMAND…  ·  "
-                '/turn self "cmd1,cmd2,…" (blocking; use /send to queue)',
+                '/turn self "cmd1,cmd2,…" (blocking; waits if agent is busy)',
             )
             return
         agent_name, cmds = parsed
@@ -1206,15 +1316,7 @@ class AgentTuiApp(App[None]):
                     f"[yellow]{escape(str(r.get('error', '/turn failed')))}[/yellow]",
                 )
                 return
-            res = r.get("result") if isinstance(r.get("result"), dict) else {}
-            if res.get("type") == "turn":
-                ans = res.get("answer")
-                if isinstance(ans, str) and ans.strip():
-                    self._write_final_answer_block(lane, ans.strip())
-                    continue
-            out = (res.get("output") or "").strip() if isinstance(res, dict) else ""
-            if out:
-                self._feedback_chat(lane, f"[dim]{escape(out)}[/dim]")
+            # Transcript + streaming: _python_delegate_bridge → _apply_turn_result on target lane.
 
     def _handle_send(self, line: str) -> None:
         lane = self._active_lane
@@ -1259,7 +1361,10 @@ class AgentTuiApp(App[None]):
             except Exception as e:
                 box.append({"ok": False, "error": str(e)})
 
-        self.call_from_thread(ui)
+        try:
+            self._run_on_ui_thread(ui)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
         return box[0] if box else {"ok": False, "error": "no result"}
 
     def _host_ctl_dispatch(self, payload: dict) -> dict:

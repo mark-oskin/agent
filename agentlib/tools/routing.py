@@ -126,6 +126,8 @@ CORE_TOOL_PROMPT_DOCS: dict[str, str] = {
         "Runs it immediately and returns the command output (same as the user typing in the REPL). "
         "Examples: /set thinking show, /show models, /set tools list, /set agent show, /help, /usage. "
         "Use /turn self <prompt> for blocking answers; /send self <prompt> to queue after this turn. "
+        "Multi-agent host: /fork NAME creates a new lane (e.g. command=\"/fork worker\"); /fork_background NAME "
+        "creates without switching focus; /list shows lane names. Do not use agent_send to create lanes. "
         "Not allowed: /quit, /while, /skill. "
         "Answer status questions from the tool result text, not from guesswork. "
         "Do not use call_python to run slash commands."

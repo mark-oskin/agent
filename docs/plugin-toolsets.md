@@ -33,7 +33,7 @@ Each module exports a **`TOOLSET`** dict: `name`, `description`, optional `trigg
 | `queue` | `list_add`, `list_remove`, `list_peek`, `list_length`, `list_clear`, `list_names` — see [Queue toolset and `/queue`](queue.md). |
 | `browser` | Playwright-backed automation: `browser_navigate`, `browser_click`, `browser_fill`, `browser_type`, `browser_press`, `browser_snapshot`, `browser_wait`, `browser_close`. Engines include **chromium** (default) and **webkit** (Safari engine, not Safari.app). Default when the model omits `engine` / `browser`: prefs **`agent.default_browser_engine`**. Install with **`uv sync --extra browser`**; without Playwright, enable fails with a clear message. |
 | `applescript` | `run_applescript` — runs AppleScript via `osascript` (timeouts, optional script echo, temp file mode for better error locations). **macOS only; side effects.** |
-| `lanes` | `agent_send` — in **agent_tui**, send one REPL line to another lane (optional `wait` / `timeout_ms`). In a plain stdin REPL, behavior is limited to what the host wires. |
+| `lanes` | `agent_send` — in **agent_tui**, send one REPL line to an **existing** lane (optional `wait` / `timeout_ms`). **Creating** a lane: `session_command` with `/fork NAME` or `/fork_background NAME`, not `agent_send`. List lanes: `session_command` with `/list`. |
 
 ---
 

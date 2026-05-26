@@ -42,6 +42,22 @@ def test_agent_send_enqueue_nonblocking(monkeypatch):
     assert data["result"]["ok"] is True
 
 
+def test_agent_send_unknown_lane_includes_fork_hint(monkeypatch):
+    from tools import lanes
+
+    lanes.set_lanes_host(
+        enqueue_line=lambda agent, line: {
+            "ok": False,
+            "error": f"No agent named {agent!r}.",
+        },
+        delegate_line=None,
+    )
+    out = lanes.agent_send({"agent": "worker", "line": "hi"})
+    data = json.loads(out)
+    assert "/fork" in out
+    assert data["result"]["error"].count("/fork") >= 1
+
+
 def test_agent_send_delegate_timeout(monkeypatch):
     from tools import lanes
 

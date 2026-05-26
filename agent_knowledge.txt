@@ -78,6 +78,8 @@ Scripts that control the agent must run **inside** an interactive agent session 
 
 Optional when the host wires them (e.g. multi-agent TUI): **`ai(line, agent_name)`**, **`send`**, **`fork_agent`**, **`list_agents`**, **`switch_agent`**, **`last_answer`**, **`last_question`**, **`session.host_ctl(...)`**. If missing, code must degrade gracefully.
 
+**Native tools (TUI):** To **create** a lane when the user wants a new agent (e.g. named `worker`), use **`session_command`** with **`command="/fork worker"`** — not **`agent_send`**. **`agent_send`** only sends a line to a lane that **already exists**; list names with **`session_command`** **`command="/list"`**. Fork syntax is **`/fork NAME`** (one name), not `/fork agent NAME`.
+
 Do **not** assume driver scripts work when run as plain `python script.py` from the shell — **`ai` / `session` will not exist** unless you inject them yourself for tests.
 
 ### Injected names — do not import them

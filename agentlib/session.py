@@ -963,26 +963,31 @@ class AgentSession:
 
     def _execute_turn_for_agent(self, agent_name: str, cmd: str) -> dict:
         """Blocking dispatch to ``self`` or another agent (``python_delegate_line``)."""
-        if self._is_self_agent_name(agent_name):
+        # During an in-flight turn (e.g. session_command → /turn self), run in-process on
+        # this session — do not use the TUI delegate (avoids duplicate "You" lines and
+        # recursive session_command → /turn self loops).
+        if self._is_self_agent_name(agent_name) and self._agent_turn_depth > 0:
             return self._execute_line_on_self(cmd)
         dl = self.python_delegate_line
-        if dl is None:
-            return {
-                "type": "command",
-                "quit": False,
-                "output": (
-                    f"/turn to {agent_name!r} requires a multi-agent host (e.g. agent_tui.py) "
-                    "with delegate hook configured."
-                ),
-            }
-        try:
-            return dl(agent_name, cmd)
-        except BaseException as e:
-            return {
-                "type": "command",
-                "quit": False,
-                "output": f"/turn: {type(e).__name__}: {e}",
-            }
+        if dl is not None:
+            try:
+                return dl(agent_name, cmd)
+            except BaseException as e:
+                return {
+                    "type": "command",
+                    "quit": False,
+                    "output": f"/turn: {type(e).__name__}: {e}",
+                }
+        if self._is_self_agent_name(agent_name):
+            return self._execute_line_on_self(cmd)
+        return {
+            "type": "command",
+            "quit": False,
+            "output": (
+                f"/turn to {agent_name!r} requires a multi-agent host (e.g. agent_tui.py) "
+                "with delegate hook configured."
+            ),
+        }
 
     def _run_send_async_now(self, agent_name: str, cmds: list[str]) -> str:
         """Enqueue or delegate without waiting (used when no agent turn is in progress)."""
@@ -1284,6 +1289,8 @@ class AgentSession:
             enabled_toolsets=self.enabled_toolsets,
             user_query=user_query,
         )
+        if self._agent_turn_depth > 1:
+            et_turn = frozenset(t for t in et_turn if t != "session_command")
         if self.verbose >= 1:
             d0 = (
                 f"trigger match: longest substring {tr0!r} (skill {sid0!r})"
@@ -2055,6 +2062,11 @@ class AgentSession:
             return SessionLineResult()
         out = ""
         if isinstance(r, dict):
+            if r.get("ok") and r.get("reused"):
+                lab = r.get("label") or name
+                return self._emit_repl_command_text(
+                    f"Reused existing lane {lab!r} (no duplicate fork)."
+                )
             try:
                 out = json.dumps(r, ensure_ascii=False)
             except (TypeError, ValueError):
