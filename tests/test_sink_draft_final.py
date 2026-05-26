@@ -9,6 +9,7 @@ from agentlib.sink import (
     emit_sink_scope,
     print_turn_final_answer,
     reset_cli_answer_display,
+    set_sink_show_draft,
     sink_emit,
 )
 
@@ -16,6 +17,7 @@ from agentlib.sink import (
 def test_cli_draft_then_final(capsys):
     llm_streaming.reset_assistant_answer_streamed()
     reset_cli_answer_display()
+    set_sink_show_draft(True)
     sink_emit({"type": "answer", "text": "2 + 2 = ", "partial": True, "end": "", "flush": True})
     sink_emit({"type": "answer", "text": "4", "partial": True, "end": "", "flush": True})
     sink_emit({"type": "answer", "text": "2 + 2 = 4", "partial": True, "end": "", "flush": True})
@@ -25,6 +27,19 @@ def test_cli_draft_then_final(capsys):
     assert out.count(FINAL_LABEL) == 1
     assert "2 + 2 = 4" in out
     assert "2 + 2 = 42 + 2 = 4" not in out
+
+
+def test_cli_stream_without_draft_label_when_show_draft_off(capsys):
+    llm_streaming.reset_assistant_answer_streamed()
+    reset_cli_answer_display()
+    set_sink_show_draft(False)
+    sink_emit({"type": "answer", "text": "hello", "partial": True, "end": "", "flush": True})
+    sink_emit({"type": "answer", "text": " world", "partial": True, "end": "", "flush": True})
+    print_turn_final_answer("hello world")
+    out = capsys.readouterr().out
+    assert DRAFT_LABEL not in out
+    assert "hello world" in out
+    assert f"{FINAL_LABEL}\nhello world\n" in out
 
 
 def test_cli_final_only_when_no_stream(capsys):

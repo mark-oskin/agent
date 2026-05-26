@@ -211,7 +211,9 @@ def run_agent_conversation_turn(
     agent_system_message: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     from agentlib.llm import streaming as llm_streaming
+    from agentlib.sink import set_sink_show_draft
 
+    set_sink_show_draft(bool(deps.show_draft_enabled()))
     llm_streaming.reset_assistant_answer_streamed()
     et = deps.coerce_enabled_tools(enabled_tools)
     mandatory_web_tool = preferred_web_search_tool(et)

@@ -805,6 +805,7 @@ class AgentApp:
                 else "MCP error: not initialized (enable agent.mcp_enabled and configure agent.mcp_servers)."
             ),
             ollama_tool_call_mode=self.ollama_tool_call_mode,
+            show_draft_enabled=lambda: self.settings_get_bool(("agent", "show_draft"), False),
         )
         if agent_progress is None:
             self._cached_turn_deps = deps

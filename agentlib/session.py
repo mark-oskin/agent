@@ -2918,7 +2918,7 @@ class AgentSession:
                 "Usage:\n"
                 "  /set save\n"
                 "  /set model <ollama-model>   (local Ollama only; for hosted/Grok use /set primary llm hosted …)\n"
-                "  /set enable|disable <feature>   (second_opinion, stream_thinking, verbose, …)\n"
+                "  /set enable|disable <feature>   (second_opinion, stream_thinking, show_draft, verbose, …)\n"
                 "  /set tools <tool|toolset> enable|disable\n"
                 "  /set tools list|reload|describe …\n"
                 "  /set system_prompt ...\n"
@@ -3547,6 +3547,12 @@ class AgentSession:
                     "stream_thinking enabled for this session (streams model thinking when available). Use /set save to persist."
                 )
                 return SessionLineResult()
+            if feat in ("show_draft", "showdraft", "draft", "draft_label"):
+                self._settings_set(("agent", "show_draft"), True)
+                sink_print_compat(
+                    "show_draft enabled for this session (live Draft: label while streaming answers). Use /set save to persist."
+                )
+                return SessionLineResult()
             if feat in (
                 "native_tool_calls",
                 "native_tools",
@@ -3595,6 +3601,12 @@ class AgentSession:
             if feat in ("stream_thinking", "streamthinking", "stream_think", "thinking_stream", "showthinking", "show_thinking"):
                 self._settings_set(("agent", "stream_thinking"), False)
                 sink_print_compat("stream_thinking disabled for this session. Use /set save to persist.")
+                return SessionLineResult()
+            if feat in ("show_draft", "showdraft", "draft", "draft_label"):
+                self._settings_set(("agent", "show_draft"), False)
+                sink_print_compat(
+                    "show_draft disabled for this session (stream answer text without Draft: label; Final: still shown). Use /set save to persist."
+                )
                 return SessionLineResult()
             if feat == "verbose":
                 self.verbose = 0

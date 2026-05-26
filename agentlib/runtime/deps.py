@@ -61,4 +61,5 @@ class ConversationTurnDeps:
     tool_result_user_message: Callable[..., str]
     call_mcp_tool: Callable[[str, dict], str]
     default_browser_engine: Callable[[], str]
+    show_draft_enabled: Callable[[], bool] = lambda: False
     session_cwd: Optional[str] = None

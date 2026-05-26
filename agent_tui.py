@@ -1430,6 +1430,11 @@ class AgentTuiApp(App[None]):
         chat._line_cache.clear()
         chat.refresh()
 
+    def _show_draft_enabled(self, lane: int) -> bool:
+        if 0 <= lane < len(self._sessions):
+            return self._sessions[lane].settings.get_bool(("agent", "show_draft"), False)
+        return False
+
     def _chat_rewrite_live_draft(self, lane: int) -> None:
         buf = self._chat_live_buf.get(lane, "")
         chat = self._chat_logs[lane]
@@ -1438,10 +1443,11 @@ class AgentTuiApp(App[None]):
         else:
             self._chat_stream_line_start[lane] = len(chat.lines)
         self._chat_stream_open[lane] = True
-        chat.write(
-            Text.from_markup(f"[bold dim]Draft[/bold dim]\n{escape(buf)}"),
-            scroll_end=True,
-        )
+        if self._show_draft_enabled(lane):
+            body = Text.from_markup(f"[bold dim]Draft[/bold dim]\n{escape(buf)}")
+        else:
+            body = Text.from_markup(escape(buf))
+        chat.write(body, scroll_end=True)
         chat.refresh()
 
     def _write_final_answer_block(self, lane: int, text: str) -> None:

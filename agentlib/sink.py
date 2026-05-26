@@ -15,6 +15,16 @@ FINAL_LABEL = "Final:"
 _emit_cv: ContextVar[Optional[EmitCallable]] = ContextVar("_agent_emit_sink", default=None)
 _cli_answer_stream_buf: ContextVar[str] = ContextVar("_cli_answer_stream_buf", default="")
 _cli_draft_header_printed: ContextVar[bool] = ContextVar("_cli_draft_header_printed", default=False)
+_show_draft_cv: ContextVar[bool] = ContextVar("_sink_show_draft", default=False)
+
+
+def set_sink_show_draft(enabled: bool) -> None:
+    """Configure whether partial answer streaming uses the Draft: label (CLI)."""
+    _show_draft_cv.set(bool(enabled))
+
+
+def sink_show_draft_enabled() -> bool:
+    return bool(_show_draft_cv.get())
 
 
 def reset_cli_answer_display() -> None:
@@ -107,23 +117,27 @@ def sink_emit(ev: dict) -> None:
 
     if typ == "answer" and ev.get("partial"):
         buf = _cli_answer_stream_buf.get()
+        show_draft = sink_show_draft_enabled()
+
+        def _ensure_draft_header() -> None:
+            if not show_draft or _cli_draft_header_printed.get():
+                return
+            print(f"{DRAFT_LABEL}\n", end="", file=fil, flush=flush)
+            _cli_draft_header_printed.set(True)
+
         if ev.get("full_snapshot"):
             if text == buf:
                 return
             if not text.startswith(buf):
                 if _cli_draft_header_printed.get() and buf:
                     print(file=fil, flush=flush)
-                if not _cli_draft_header_printed.get():
-                    print(f"{DRAFT_LABEL}\n", end="", file=fil, flush=flush)
-                    _cli_draft_header_printed.set(True)
+                _ensure_draft_header()
                 print(text, end=end, file=fil, flush=flush)
             else:
                 delta = text[len(buf) :]
                 if not delta:
                     return
-                if not _cli_draft_header_printed.get():
-                    print(f"{DRAFT_LABEL}\n", end="", file=fil, flush=flush)
-                    _cli_draft_header_printed.set(True)
+                _ensure_draft_header()
                 print(delta, end=end, file=fil, flush=flush)
             _cli_answer_stream_buf.set(text)
             return
@@ -137,9 +151,7 @@ def sink_emit(ev: dict) -> None:
         _cli_answer_stream_buf.set(merged)
         if not delta:
             return
-        if not _cli_draft_header_printed.get():
-            print(f"{DRAFT_LABEL}\n", end="", file=fil, flush=flush)
-            _cli_draft_header_printed.set(True)
+        _ensure_draft_header()
         print(delta, end=end, file=fil, flush=flush)
         return
 
