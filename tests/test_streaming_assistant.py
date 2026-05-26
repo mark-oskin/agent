@@ -232,7 +232,7 @@ def test_merge_stream_tool_call_buffers_no_answer_stream(monkeypatch):
         agent_stream_thinking_enabled=lambda: False,
     )
     assert not any(e.get("type") == "answer" for e in emitted)
-    assert any(e.get("type") == "progress" for e in emitted)
+    assert not any(e.get("type") == "progress" for e in emitted)
 
 
 def test_merge_stream_cumulative_chunks_do_not_double_answer(monkeypatch):

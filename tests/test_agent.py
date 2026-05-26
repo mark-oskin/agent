@@ -86,6 +86,10 @@ def test_tool_progress_message_includes_useful_params():
     assert "query" in s1 and "hello world" in s1
     s2 = tool_progress_message_with_settings("read_file", {"path": "/tmp/x.txt"}, settings=settings)
     assert "path" in s2 and "/tmp/x.txt" in s2
+    s3 = tool_progress_message_with_settings(
+        "session_command", {"command": "/set thinking show"}, settings=settings
+    )
+    assert "/set thinking show" in s3
 
 
 def test_plugin_toolsets_load_and_route(monkeypatch):

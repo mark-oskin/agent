@@ -60,6 +60,9 @@ def tool_progress_message(tool: str, params: dict, *, search_backend_banner: str
         return f"Tool: use_git op={op!r}"
     if t == "call_python":
         return "Tool: call_python"
+    if t == "session_command":
+        cmd = _clip(p.get("command"))
+        return f"Tool: session_command command={cmd!r}" if cmd else "Tool: session_command"
     return f"Tool: {t}"
 
 

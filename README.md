@@ -195,6 +195,7 @@ These are always defined by the agent; you can **disable** ones you do not want 
 | `tail_file` | Read the end of a file |
 | `replace_text` | Search-and-replace in a file |
 | `call_python` | Run Python in-process |
+| `session_command` | Run one REPL slash command (e.g. `/set thinking show`, `/show models`) and return its output to the model — **[docs/session-command.md](docs/session-command.md)** |
 
 Aliases exist for natural phrasing (e.g. “web search” → `search_web`); the REPL suggests names if you mistype one. Full table and parameter lines: **[docs/core-tools.md](docs/core-tools.md)**.
 

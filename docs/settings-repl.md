@@ -9,6 +9,8 @@ description: Topic map for persisted and session preferences; /set help is the l
 
 **Authoritative usage:** run **`/set help`** in the REPL — it tracks the code in `agentlib/session.py` (`_cmd_settings`). This page is a **compact map** so you know where to look; it does not duplicate every error message or edge case.
 
+**Agent access:** during a chat turn the model can run most `/set` and `/show` lines via the native tool **`session_command`** (same output you would see in the REPL). Use **`/set thinking show`** for thinking status. Details: **[session-command.md](session-command.md)**.
+
 **Config file:** defaults to **`~/.agent.json`** (override with **`--config`**). Most changes apply to the **current session** until you run **`/set save`** (see [Extension settings](extension-settings.md) for `full` / `--full` snapshot mode).
 
 ---
@@ -50,5 +52,5 @@ description: Topic map for persisted and session preferences; /set help is the l
 - [Configuration & environment](environment.md)
 - [Extension settings (`/set extensions`)](extension-settings.md)
 - [README — Configuration](../README.md#configuration)
-- [Core tools](core-tools.md) · [Plugin toolsets](plugin-toolsets.md)
+- [session_command](session-command.md) · [Core tools](core-tools.md) · [Plugin toolsets](plugin-toolsets.md)
 - Implementation: **`agentlib/session.py`** (`_cmd_settings`, `_cmd_set_extensions`, …)

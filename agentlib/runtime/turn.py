@@ -672,6 +672,10 @@ def run_agent_conversation_turn(
                             )
                         elif tool == "call_python":
                             result = deps.call_python(params.get("code"), params.get("globals"))
+                        elif tool == "session_command":
+                            result = deps.execute_session_command(
+                                deps.scalar_to_str(params.get("command"), "")
+                            )
                         elif mcp_registry.is_mcp_tool(tool):
                             result = deps.call_mcp_tool(tool, params if isinstance(params, dict) else {})
                         elif tool in deps.plugin_tool_handlers:
@@ -739,6 +743,10 @@ def run_agent_conversation_turn(
                                 result = turn_support.run_command_with_session_cwd(deps, cmd)
                         elif tool == "call_python":
                             result = deps.call_python(params.get("code"), params.get("globals"))
+                        elif tool == "session_command":
+                            result = deps.execute_session_command(
+                                deps.scalar_to_str(params.get("command"), "")
+                            )
                         elif tool == "search_web":
                             result = deps.search_web(params.get("query"), params=params)
                         elif tool == "search_web_fetch_top":

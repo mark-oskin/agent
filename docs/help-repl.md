@@ -27,6 +27,8 @@ There is **no** `/help <topic>` router in the session: discovery is **`/help`** 
 
 Tool and toolset documentation in-session: **`/set tools describe <tool-id>`** (and toolset names where supported).
 
+During a chat turn, the model can invoke most of these slash lines via the native tool **`session_command`** and must answer from the returned text — see **[session-command.md](session-command.md)**.
+
 ---
 
 ## Related commands not duplicated on `/help`

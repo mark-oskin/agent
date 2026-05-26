@@ -6,10 +6,7 @@ import json
 
 from agentlib import agent_json
 from agentlib.agent_json import AgentJsonDeps, consume_last_tool_transport
-from agentlib.llm.tool_schemas import (
-    preparing_tool_progress_line,
-    tool_transport_label,
-)
+from agentlib.llm.tool_schemas import tool_transport_label
 from agentlib.tools import turn_support
 from agentlib.tools.registry import ToolRegistry
 import os
@@ -49,11 +46,5 @@ def test_message_to_agent_json_text_records_json_transport():
     assert consume_last_tool_transport() == ("grep", "json")
 
 
-def test_preparing_tool_progress_line_native_vs_json():
-    tc = [{"function": {"name": "search_web", "arguments": "{}"}}]
-    assert "native" in preparing_tool_progress_line(tool_calls=tc, content="")
-    assert "JSON" in preparing_tool_progress_line(
-        tool_calls=None,
-        content='{"action":"tool_call","tool":"grep"}',
-    )
+def test_tool_transport_label():
     assert tool_transport_label("search_web", "native") == "[native] search_web"

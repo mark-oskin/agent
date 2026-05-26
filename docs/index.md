@@ -18,6 +18,7 @@ These pages complement [README.md](../README.md) with deeper, website-style guid
 | [`/while` loop](while-repl.md) | Model-judged condition loop, `--max`, comma-separated body prompts |
 | [Extension settings (`/set extensions`)](extension-settings.md) | Prefs keys under `extensions.<id>` (e.g. `code_pipeline`), `/set save` minimal vs full |
 | [Settings (`/set`, `/settings`)](settings-repl.md) | Topic map: tools, primary LLM, context manager, templates, `save` — use `/set help` for full syntax |
+| [session_command](session-command.md) | Native tool: model runs REPL slash commands and reads captured output |
 | [REPL help (`/help`)](help-repl.md) | Built-in listing, extension lines, `<command> help` pattern |
 | [MCP (Model Context Protocol)](mcp.md) | External tools via **`/mcp`**; stdio vs HTTP; **`--framing ndjson`** for Python SDK servers |
 | [Configuration & environment](environment.md) | Prefs JSON vs env; `agent.default_browser_engine`; context manager keys; MCP prefs detail |

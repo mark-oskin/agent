@@ -26,6 +26,7 @@ NATIVE_CORE_TOOL_IDS: frozenset[str] = frozenset(
         "run_applescript",
         "download_file",
         "tail_file",
+        "session_command",
     }
 )
 
@@ -241,6 +242,20 @@ _CORE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["code"],
         "additionalProperties": False,
     },
+    "session_command": {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": (
+                    "One REPL slash command, e.g. /set thinking show, /show models, /set tools list, "
+                    "/set agent show, /help. Returns command output for you to read."
+                ),
+            },
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    },
     "run_applescript": {
         "type": "object",
         "properties": {
@@ -433,41 +448,11 @@ def ollama_tools_for_enabled(
     return out
 
 
-def first_tool_call_name(tool_calls) -> Optional[str]:
-    """Best-effort tool name from Ollama/OpenAI ``tool_calls`` chunks."""
-    if not tool_calls:
-        return None
-    for tc in tool_calls:
-        if not isinstance(tc, dict):
-            continue
-        fn = tc.get("function") or {}
-        if not isinstance(fn, dict):
-            continue
-        name = (fn.get("name") or "").strip()
-        if name:
-            return name
-    return None
-
-
 def tool_transport_label(tool_id: str, transport: str) -> str:
     """Short tag for logs, e.g. ``[native] search_web``."""
     tid = (tool_id or "?").strip() or "?"
     kind = (transport or "json").strip().lower()
     return f"[{kind}] {tid}"
-
-
-def preparing_tool_progress_line(*, tool_calls, content: str) -> str:
-    """
-    User-visible progress while the model is selecting a tool.
-
-    ``tool_calls`` (API field) → native transport; JSON in ``content`` → json transport.
-    """
-    name = first_tool_call_name(tool_calls)
-    if name:
-        return f"Preparing native tool call ({name})…"
-    if content and '"action"' in content and "tool_call" in content:
-        return "Preparing JSON tool call (message content)…"
-    return "Preparing tool call…"
 
 
 def tool_transport_uses_native(*, tool_call_mode: str, primary_profile=None) -> bool:

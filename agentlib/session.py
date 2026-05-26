@@ -252,7 +252,11 @@ class AgentSession:
         # Per-session isolation is handled via ``replace(session_cwd=…)`` and ``_rebind_session_fs_tools``.
         self._conversation_turn_deps = copy.copy(conversation_turn_deps)
         self.session_cwd = os.path.abspath(os.getcwd())
-        self._conversation_turn_deps = replace(self._conversation_turn_deps, session_cwd=self.session_cwd)
+        self._conversation_turn_deps = replace(
+            self._conversation_turn_deps,
+            session_cwd=self.session_cwd,
+            execute_session_command=self._execute_session_command_for_tool,
+        )
         self._rebind_session_fs_tools()
         self._save_context_bundle = save_context_bundle
         self._load_context_messages = load_context_messages
@@ -353,6 +357,37 @@ class AgentSession:
             pattern,
             replacement,
             replace_all,
+        )
+
+    def _execute_slash_command_line_for_tool(self, line: str) -> dict:
+        """Run one slash command and merge sink output into ``execute_line`` result for tools."""
+        from agentlib.sink import emit_sink_active, sink_capture_scope
+        from agentlib.tools.session_control import merge_command_transcript_output
+
+        with sink_capture_scope(tee=emit_sink_active()) as cap:
+            res = self.execute_line(line)
+        if not isinstance(res, dict):
+            return {"type": "command", "output": str(res)}
+        cap_text = "".join(cap).strip()
+        if res.get("type") == "command":
+            merged = merge_command_transcript_output(res.get("output") or "", cap_text)
+            out: dict = {**res, "output": merged}
+            return out
+        if res.get("type") == "turn":
+            ans = (res.get("answer") or "").strip()
+            merged_ans = merge_command_transcript_output(ans, cap_text)
+            return {**res, "answer": merged_ans or ans}
+        if cap_text:
+            return {"type": "command", "output": cap_text}
+        return res
+
+    def _execute_session_command_for_tool(self, line: str) -> str:
+        """Native ``session_command`` tool: run REPL slash commands (blocklist + captured output)."""
+        from agentlib.tools.session_control import execute_session_slash_command
+
+        return execute_session_slash_command(
+            line,
+            execute_line=self._execute_slash_command_line_for_tool,
         )
 
     def _rebind_session_fs_tools(self) -> None:
@@ -883,10 +918,8 @@ class AgentSession:
 
     def _sink_host_ctl_result(self, r: dict) -> SessionLineResult:
         if r.get("ok"):
-            sink_print_compat(r.get("text") or "")
-        else:
-            sink_print_compat(r.get("error") or "failed")
-        return SessionLineResult()
+            return self._emit_repl_command_text(r.get("text") or "")
+        return self._emit_repl_command_text(r.get("error") or "failed")
 
     def _cmd_send_to_agent(self, s: str) -> SessionLineResult:
         """Forward one or more lines to another agent (async enqueue when ``python_enqueue_line`` is set)."""
@@ -1734,14 +1767,16 @@ class AgentSession:
             self.last_reuse_skill_id = None
             self.repl_last_user_query = None
             self.repl_last_assistant_answer = None
-            sink_print_compat("Context cleared (including stored skill for /skill reuse).")
-            return SessionLineResult()
+            return self._emit_repl_command_text(
+                "Context cleared (including stored skill for /skill reuse)."
+            )
         if cmd == "/compact":
             return self._cmd_compact(s)
         if low in ("/usage", "/tokens"):
             text = self._format_last_ollama_usage_for_repl()
-            sink_print_compat(text.strip() if text.strip() else "No data available.")
-            return SessionLineResult()
+            return self._emit_repl_command_text(
+                text.strip() if text.strip() else "No data available."
+            )
         if s.startswith("/show"):
             return self._cmd_show(s)
         if s.startswith("/while"):
@@ -2449,25 +2484,31 @@ class AgentSession:
 
         return SessionLineResult()
 
+    def _emit_repl_command_text(self, text: str) -> SessionLineResult:
+        """Print to the REPL sink and return ``output`` for ``execute_line`` / ``session_command``."""
+        t = (text or "").rstrip("\n")
+        if t:
+            sink_print_compat(t)
+        return SessionLineResult(output=t)
+
     def _cmd_show(self, s: str) -> SessionLineResult:
+        _SHOW_USAGE = (
+            "Usage:\n"
+            "  /show model                 Primary LLM in use (Ollama or hosted)\n"
+            "  /show model <name> info     Ollama model details (POST /api/show; local Ollama only)\n"
+            "  /show models                Local Ollama models available on this machine\n"
+            "  /show reviewer              Second-opinion reviewer model\n"
+            "\n"
+            "Settings that already have a show line: /set tools, /set context show, "
+            "/set thinking show, /set system_prompt show, /set prompt_template show, "
+            "/set ollama|openai|agent show"
+        )
         try:
             toks = shlex.split(s)
         except ValueError as e:
-            sink_print_compat(f"/show: {e}")
-            return SessionLineResult()
+            return self._emit_repl_command_text(f"/show: {e}")
         if len(toks) < 2 or toks[1].lower() in ("help", "-h", "--help"):
-            sink_print_compat(
-                "Usage:\n"
-                "  /show model                 Primary LLM in use (Ollama or hosted)\n"
-                "  /show model <name> info     Ollama model details (POST /api/show; local Ollama only)\n"
-                "  /show models                Local Ollama models available on this machine\n"
-                "  /show reviewer              Second-opinion reviewer model\n"
-                "\n"
-                "Settings that already have a show line: /set tools, /set context show, "
-                "/set thinking show, /set system_prompt show, /set prompt_template show, "
-                "/set ollama|openai|agent show"
-            )
-            return SessionLineResult()
+            return self._emit_repl_command_text(_SHOW_USAGE)
         if (
             len(toks) >= 4
             and toks[1].lower() == "model"
@@ -2475,14 +2516,12 @@ class AgentSession:
         ):
             model_name = " ".join(toks[2:-1]).strip()
             if not model_name:
-                sink_print_compat("Usage: /show model <model-name> info")
-                return SessionLineResult()
+                return self._emit_repl_command_text("Usage: /show model <model-name> info")
             if getattr(self.primary_profile, "backend", "") != "ollama":
-                sink_print_compat(
+                return self._emit_repl_command_text(
                     "/show model <name> info only works with local Ollama "
                     "(primary LLM is not ollama; use /set primary llm ollama …)."
                 )
-                return SessionLineResult()
             base = (self.settings.get_str(("ollama", "host"), "") or "").strip().rstrip("/")
             if not base:
                 base = "http://localhost:11434"
@@ -2490,31 +2529,34 @@ class AgentSession:
                 data = fetch_ollama_model_show(
                     base, model_name, http_post=requests.post, timeout=60
                 )
-                sink_print_compat(json.dumps(data, ensure_ascii=False, indent=2))
+                return self._emit_repl_command_text(
+                    json.dumps(data, ensure_ascii=False, indent=2)
+                )
             except Exception as e:
-                sink_print_compat(f"/show model … info error: {e}")
-            return SessionLineResult()
+                return self._emit_repl_command_text(f"/show model … info error: {e}")
         sub = toks[1].lower().replace("-", "_")
         if sub in ("models", "local_models"):
             try:
                 names = self._fetch_ollama_local_model_names()
-                sink_print_compat("\n".join(names) if names else "(no models returned)")
+                return self._emit_repl_command_text(
+                    "\n".join(names) if names else "(no models returned)"
+                )
             except Exception as e:
-                sink_print_compat(f"/show models error: {e}")
-            return SessionLineResult()
+                return self._emit_repl_command_text(f"/show models error: {e}")
         if sub in ("model", "primary", "llm"):
-            sink_print_compat(f"Primary LLM: {self._format_session_primary_llm_line(self.primary_profile)}")
-            return SessionLineResult()
-        if sub in ("reviewer", "second_opinion", "2nd"):
-            sink_print_compat(
-                "Second-opinion reviewer: "
-                + self._format_session_reviewer_line(self.reviewer_hosted_profile, self.reviewer_ollama_model)
+            return self._emit_repl_command_text(
+                f"Primary LLM: {self._format_session_primary_llm_line(self.primary_profile)}"
             )
-            return SessionLineResult()
-        sink_print_compat(
+        if sub in ("reviewer", "second_opinion", "2nd"):
+            return self._emit_repl_command_text(
+                "Second-opinion reviewer: "
+                + self._format_session_reviewer_line(
+                    self.reviewer_hosted_profile, self.reviewer_ollama_model
+                )
+            )
+        return self._emit_repl_command_text(
             "Unknown /show topic. Try: /show model, /show model <name> info, /show models, or /show reviewer"
         )
-        return SessionLineResult()
 
     def _cmd_while(self, s: str) -> SessionLineResult:
         try:
@@ -3637,11 +3679,10 @@ class AgentSession:
                     self.settings.get_str(("agent", "tool_call_mode"), DEFAULT_TOOL_CALL_MODE)
                 )
                 tools = ", ".join(sorted(NATIVE_PHASE1_TOOL_IDS))
-                sink_print_compat(
+                return self._emit_repl_command_text(
                     f"tool_call_mode: {mode}; native Phase 1 tools: {tools}\n"
                     "Progress lines tag tool transport: [native] (Ollama tool_calls API) vs [json] (content/thinking JSON)."
                 )
-                return SessionLineResult()
             if sub in ("json", "legacy", "content"):
                 self._settings_set(("agent", "tool_call_mode"), "json")
                 sink_print_compat(
@@ -3678,10 +3719,19 @@ class AgentSession:
                 lvl = self._agent_thinking_level()
                 on = self._agent_thinking_enabled_default_false()
                 st = "on" if on else "off"
-                sink_print_compat(
-                    f"thinking: {st}; level: {lvl or '(none)'}; ollama think value: {think_v!r}; stream_thinking: {self._agent_stream_thinking_enabled()}"
+                stream_on = self._agent_stream_thinking_enabled()
+                detail = (
+                    f"thinking: {st}; level: {lvl or '(none)'}; "
+                    f"ollama think value: {think_v!r}; stream_thinking: {stream_on}"
                 )
-                return SessionLineResult()
+                conclusion = (
+                    "Extended thinking is ENABLED for this session "
+                    "(Ollama `think` is active; UI may show [Thinking] when stream_thinking is on)."
+                    if on
+                    else "Extended thinking is DISABLED for this session "
+                    "(Ollama `think` is off). Reasoning text in chat is not session thinking."
+                )
+                return self._emit_repl_command_text(f"{detail}\n\n{conclusion}")
             if sub in ("on", "enable", "enabled", "true"):
                 self._settings_set(("agent", "thinking"), True)
                 self._settings_set(("agent", "stream_thinking"), True)

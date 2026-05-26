@@ -2,12 +2,71 @@
 #
 # The file "agent_knowledge.txt" contains concise instructions for writing Python that drives this agent from inside a session. Read it before proposing automation scripts.
 
+## If you are the chat assistant (read this first)
+
+This file is **mostly for humans** who will run **`/call_python path/to/driver.py`** from the REPL/TUI. It is **not** a recipe for code you run with the native **`call_python` tool** during a normal turn.
+
+**When the user asks which models are available, which model is in use, or the reviewer model** (e.g. “what models are available?”, “what LLM am I using?”):
+
+1. **Do** call **`session_command`** with **`/show models`**, **`/show model`**, or **`/show reviewer`** — then answer from the tool output.
+2. **Do** tell the user they can type the same slash line in the REPL/TUI (e.g. **`/show models`**).
+3. **Do not** suggest **`ai("/set agent show")`**, **`ai("/set ollama show")`**, or any **`ai(...)`** in normal chat — **`ai`** exists only inside **`/call_python`** driver scripts.
+4. **Do not** use **`search_web`** (or similar) to list local Ollama models; use **`/show`** instead.
+5. To **change** the active Ollama model, the user must run **`/set model <name>`** themselves (not allowlisted for **`session_command`**).
+
+| User intent | **`session_command` `command`** · user can also type |
+|-------------|------------------------------------------------------|
+| List local Ollama models on this machine | **`/show models`** |
+| Primary LLM in use | **`/show model`** |
+| Second-opinion reviewer | **`/show reviewer`** |
+| Ollama metadata for one model | **`/show model <name> info`** (local Ollama primary only) |
+
+**When the user asks whether thinking (or another session toggle) is on** (e.g. “is thinking enabled?”):
+
+1. **Do** call **`session_command`** with **`/set thinking show`** (not a guess from chat).
+2. **Do** answer **only** from the tool result. If it says **`thinking: off`** or **Extended thinking is DISABLED**, tell the user thinking is **off**.
+3. **Do not** confuse model reasoning prose or old UI **[Thinking]** blocks with session thinking — check **`stream_thinking`** in the tool output too.
+
+| User intent | **`session_command` `command`** |
+|-------------|-----------------------------------|
+| Is extended thinking on? | **`/set thinking show`** |
+
+**When the user asks to change session settings** (e.g. “turn on thinking”, “disable second opinion”, “use verbose logging”):
+
+1. **Do** call **`session_command`** with the matching **`/set`** line (runs immediately, same as the user typing it).
+2. **Do not** use **`call_python`** for **`/set`** — **`ai`** is not defined there (`NameError`).
+3. Optionally mention the slash line so the user can repeat it manually later.
+
+| User intent | **`session_command` `command` parameter** |
+|-------------|-------------------------------------------|
+| Turn on thinking | **`/set thinking on`** |
+| Turn off thinking | **`/set thinking off`** |
+| Thinking level | **`/set thinking level medium`** (`low`, `medium`, `high`) |
+| Hide thinking stream only | **`/set disable stream_thinking`** |
+| Second opinion on/off | **`/set enable second_opinion`** · **`/set disable second_opinion`** |
+| Verbose logging | **`/set verbose on`** · **`/set verbose 2`** · **`/set verbose off`** |
+
+**`session_command` runs REPL slash commands** and returns their output to you. Use it whenever you need session facts or must change config (same lines the user would type). Examples: **`/set thinking show`**, **`/show models`**, **`/set tools list`**, **`/set agent show`**, **`/help`**. Full list and blocklist: **`docs/session-command.md`** in the repo.
+
+**Not allowed via `session_command`** (user must run manually): **`/quit`**, **`/while`**, **`/skill`**, **`/send`**, **`/fork`**, **`/call_python`**, **`/run_command`**, **`/set lock`**, shell **`!`** escapes.
+
+**Driver scripts** (human runs **`/call_python script.py`**) may still use **`ai("/set …")`** — see below.
+
 ## Basics
 Load the "README.md" file and learn more about the agent.
 
+## Two different “call_python” mechanisms (do not confuse them)
+
+| Mechanism | Who triggers it | Are **`ai`** / **`session`** defined? |
+|-----------|-----------------|--------------------------------------|
+| **Slash command** **`/call_python`** `-c` *code* or **`/call_python`** *script.py* | Human types it in the REPL/TUI prompt | **Yes** — injected by `AgentSession` |
+| **Native tool** **`call_python`** (`code`, optional `globals`) | Model during a chat turn | **No** — only plain Python unless you pass a custom `globals` dict (do **not** use this to fake `ai`) |
+
+Driver patterns below apply **only** to the **slash** form. For the **tool**, use normal Python (stdlib, small computations, parsing). To change agent settings from a tool call, you **cannot** — use slash commands the user types, or a **driver script** the user runs with **`/call_python script.py`**.
+
 ## Where driver scripts run
 
-Scripts that control the agent must run **inside** an interactive agent session via **`/call_python`** (path to a `.py` file or `-c` code). Only then are these names defined:
+Scripts that control the agent must run **inside** an interactive agent session via the **slash command** **`/call_python`** (path to a `.py` file or `-c` code). Only that path defines:
 
 | Name | Role |
 |------|------|
@@ -76,6 +135,124 @@ Slash command:
 r = ai("/show models")
 if r.get("type") == "command" and r.get("output"):
     print(r["output"])
+```
+
+## Session settings: slash commands vs driver scripts
+
+**In chat:** use **`session_command`** for allowlisted **`/show`** and **`/set`** lines (see tables above), or tell the user the slash line. **In a driver script** (slash **`/call_python` only**): pass the same line to **`ai(...)`**; the return dict is usually **`type`** **`"command"`** with human-readable text in **`output`**.
+
+**Never** put `ai("/set …")` or `ai("/show …")` inside the native **`call_python` tool** — it will fail.
+
+**Session vs disk:** Most **`/set`** changes apply to the **current session** only. To write prefs to **`~/.agent.json`**, run **`ai("/set save")`** afterward (optional **`full`** for a full snapshot). In driver scripts, list models with **`ai("/show models")`**; inspect prefs with **`ai("/set agent show")`** or **`ai("/set thinking show")`** — not **`ai("/set agent show")`** when the user only asked which Ollama models exist.
+
+**Lock:** **`ai("/set lock")`** permanently freezes settings and MCP for this session (no unlock). Automation should not call **`lock`** unless the user asked for it.
+
+**Authoritative list:** **`ai("/set help")`** in a live session; see also **`docs/settings-repl.md`** in the repo.
+
+### Thinking and streaming UI
+
+| Goal | Example line for **`ai(...)`** |
+|------|--------------------------------|
+| Turn off model thinking + thinking stream | **`/set thinking off`** |
+| Turn on thinking | **`/set thinking on`** |
+| Set Ollama think level | **`/set thinking level medium`** (also **`low`**, **`high`**) |
+| Hide thinking stream only (thinking may stay on) | **`/set disable stream_thinking`** |
+| Show thinking stream | **`/set enable stream_thinking`** |
+| Stream answer text while generating | **`/set enable stream_assistant`** |
+| Stop streaming assistant text | **`/set disable stream_assistant`** |
+| Show live “Draft” label while streaming (TUI/CLI) | **`/set enable show_draft`** |
+| Stream answers without Draft label (default) | **`/set disable show_draft`** |
+
+```python
+def run_set(line: str) -> str:
+    r = ai(line.strip())
+    if r.get("type") == "command":
+        return (r.get("output") or "").strip()
+    return f"unexpected: {r!r}"
+
+# User asked to stop showing thinking in the UI:
+print(run_set("/set thinking off"))
+```
+
+### Features, verbosity, second opinion
+
+| Goal | Example |
+|------|---------|
+| Enable/disable second opinion for the session | **`/set enable second_opinion`** · **`/set disable second_opinion`** |
+| Verbose logging | **`/set verbose on`** · **`/set verbose 2`** · **`/set verbose off`** |
+| Native vs JSON tool protocol | **`/set tool_call_mode native`** · **`/set tool_call_mode json`** · **`/set tool_call_mode show`** |
+
+### Model, primary LLM, Ollama/OpenAI/agent prefs
+
+| Goal | Example |
+|------|---------|
+| Local Ollama model (primary must be Ollama) | **`/set model qwen3.6:latest`** |
+| Primary backend | **`/set primary llm ollama`** · **`/set primary llm hosted <base_url> <model> [api_key]`** |
+| Inspect a prefs group | **`/set agent show`** · **`/set ollama show`** · **`/set openai show`** |
+| List keys in a group | **`/set agent keys`** |
+| Set one agent pref | **`/set agent set stream_assistant false`** |
+| Unset a key | **`/set agent unset thinking_level`** |
+| Second-opinion reviewer | **`/set second_opinion llm ollama`** · **`/set second_opinion llm hosted …`** |
+
+Boolean and numeric values in **`/set agent set …`** are parsed as JSON/boolean/number when possible; strings can be quoted if they contain spaces.
+
+### Tools and MCP
+
+| Goal | Example |
+|------|---------|
+| List tools / toolsets | **`/set tools list`** |
+| Enable or disable a tool or toolset | **`/set tools search_web enable`** · **`/set tools browser disable`** |
+| Reload plugin toolsets | **`/set tools reload`** |
+| Tool help text | **`/set tools describe search_web`** |
+| MCP (when configured) | **`/mcp help`** · **`/mcp list`** · **`/mcp status`** |
+
+### Context manager, prompts, templates
+
+| Goal | Example |
+|------|---------|
+| Context window manager | **`/set context show`** · **`/set context off`** · **`/set context tokens 32000`** · **`/set context trigger 0.75`** · **`/set context target 0.55`** |
+| System prompt | **`/set system_prompt show`** · **`/set system_prompt reset`** · **`/set system_prompt file path.txt`** |
+| Prompt templates | **`/set prompt_template list`** · **`/set prompt_template use NAME`** |
+
+### Chaining configuration in a driver
+
+```python
+for cmd in (
+    "/set thinking off",
+    "/set disable show_draft",
+    "/set enable stream_assistant",
+    "/set verbose 1",
+):
+    r = ai(cmd)
+    if r.get("type") != "command":
+        print(f"failed: {cmd} -> {r}")
+        break
+    out = (r.get("output") or "").strip()
+    if out:
+        print(out)
+# Optional: persist to ~/.agent.json
+# ai("/set save")
+```
+
+**Caveats:** **`ai("/set …")`** works only in **slash** **`/call_python`** scripts, not in the **`call_python` tool**. Wrong subcommands print usage in **`output`** (e.g. use **`/set thinking off`**, not **`/set thinking disable`**). Changing model or primary LLM mid-script affects **later** **`ai(...)`** turns, not ones already in flight.
+
+### Wrong pattern (causes `NameError`)
+
+```python
+# Inside native tool call_python — BAD:
+ai("/set thinking on")   # ai is not defined
+```
+
+### Right pattern for “turn on thinking” during a chat turn
+
+Use native tool **`session_command`** with **`command="/set thinking on"`** (not `call_python`).
+
+### Right pattern for automation (user runs the script)
+
+```python
+# File setup_thinking.py — user runs: /call_python setup_thinking.py
+r = ai("/set thinking on")
+print(r.get("output") or r)
 ```
 
 ## `ai()` does not create files on disk by itself

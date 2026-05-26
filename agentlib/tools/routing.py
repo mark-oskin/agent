@@ -61,6 +61,11 @@ CORE_TOOL_ENTRIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ("replace", "search replace", "sed"),
     ),
     ("call_python", "Run Python code in-process", ("python", "py", "eval", "code eval")),
+    (
+        "session_command",
+        "Run allowlisted /set session commands",
+        ("session set", "set thinking", "configure session", "settings"),
+    ),
 )
 
 
@@ -113,7 +118,16 @@ CORE_TOOL_PROMPT_DOCS: dict[str, str] = {
         "use print for human-readable trace. "
         "Never put shell/batch/cmd text, pseudo-code, or natural-language document drafts in code; "
         "those belong in write_file content or in action answer. "
-        "Optional: parameters.globals (object, extra globals)."
+        "Optional: parameters.globals (object, extra globals). "
+        "Does not define ai() or session — use session_command for /set toggles and /show models."
+    ),
+    "session_command": (
+        "session_command — parameters.command (string, one REPL slash command). "
+        "Runs it immediately and returns the command output (same as the user typing in the REPL). "
+        "Examples: /set thinking show, /show models, /set tools list, /set agent show, /help, /usage. "
+        "Not allowed: /quit, /while, /skill, /send, /fork, /call_python, /run_command, /set lock. "
+        "Answer status questions from the tool result text, not from guesswork. "
+        "Do not use call_python to run slash commands."
     ),
 }
 

@@ -29,7 +29,8 @@ description: Built-in tool ids always available to the model; disable per sessio
 | `download_file` | Download a URL to a path (`url`, `path`). |
 | `tail_file` | Read the end of a file (`path`, optional `lines`). |
 | `replace_text` | Regex replace in a file (`path`, `pattern`, `replacement`, optional `replace_all`). |
-| `call_python` | Run Python in-process (`code`, optional `globals`); output includes prints and a JSON summary of assigned locals. |
+| `call_python` | Run Python in-process (`code`, optional `globals`); output includes prints and a JSON summary of assigned locals. Does **not** define `ai` / `session` — use `session_command` for slash lines. |
+| `session_command` | Run one REPL slash command (`command`); returns captured command output. See **[session-command.md](session-command.md)**. |
 
 ---
 
@@ -37,4 +38,4 @@ description: Built-in tool ids always available to the model; disable per sessio
 
 The strings the model sees under “Parameters per tool” are maintained in `CORE_TOOL_PROMPT_DOCS` in `agentlib/tools/routing.py`. If behavior differs from a summary here, treat that dict as source of truth.
 
-**See also:** [Plugin toolsets](plugin-toolsets.md), [REPL session & context](repl-session.md), [Settings (`/set`)](settings-repl.md), [README § Tools](../README.md#tools).
+**See also:** [session_command](session-command.md), [Plugin toolsets](plugin-toolsets.md), [REPL session & context](repl-session.md), [Settings (`/set`)](settings-repl.md), [README § Tools](../README.md#tools).

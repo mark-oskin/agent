@@ -62,4 +62,7 @@ class ConversationTurnDeps:
     call_mcp_tool: Callable[[str, dict], str]
     default_browser_engine: Callable[[], str]
     show_draft_enabled: Callable[[], bool] = lambda: False
+    execute_session_command: Callable[[str], str] = lambda _line: (
+        "session_command error: not available (no AgentSession bound)"
+    )
     session_cwd: Optional[str] = None

@@ -51,6 +51,13 @@ Key loaders / matchers live alongside the session / app (search `_load_skills_fr
 
 The model can only call tools in the **effective tool allowlist** for that turn (core tools minus user-disabled tools plus routed plugin tools).
 
+### `session_command`
+
+- **Tool id:** `session_command` (Phase 1 native tool; schema in `agentlib/llm/tool_schemas.py`).
+- **Validation / blocklist:** `agentlib/tools/session_control.py` (`validate_session_command`, `session_command_blocked_reason`).
+- **Execution:** `AgentSession._execute_slash_command_line_for_tool` wraps `execute_line` in `sink_capture_scope` so REPL `sink_print_compat` text is merged into the tool transcript (`merge_command_transcript_output`).
+- **Docs:** [docs/session-command.md](docs/session-command.md). User-facing automation notes: **`agent_knowledge.txt`**.
+
 ### Plugin toolsets
 
 Plugin toolsets live in `tools/*.py` by default (or prefs `agent.tools_dir` / legacy top-level `tools_dir`; see [Configuration & environment](environment.md)).

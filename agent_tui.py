@@ -1449,6 +1449,15 @@ class AgentTuiApp(App[None]):
     def _turn_seq_is_current(self, lane: int, turn_seq: int) -> bool:
         return self._turn_seq_current(lane) == int(turn_seq)
 
+    def _commit_chat_live_answer(self, lane: int) -> None:
+        """Keep the visible streamed reply in the log; end live-edit mode for a new generation."""
+        if not self._chat_stream_open.get(lane):
+            return
+        chat = self._chat_logs[lane]
+        if self._chat_live_buf.get(lane, "").strip():
+            chat.write(Text("\n"), scroll_end=True)
+        self._reset_chat_live_answer(lane)
+
     def _discard_chat_live_answer(self, lane: int) -> None:
         """Drop the in-progress assistant block from the log and clear stream tracking."""
         if self._chat_stream_open.get(lane):
@@ -1511,9 +1520,18 @@ class AgentTuiApp(App[None]):
         )
 
     def _chat_set_live_answer_snapshot(self, lane: int, text: str) -> None:
-        if text == self._chat_live_buf.get(lane, ""):
+        prev = self._chat_live_buf.get(lane, "")
+        if text == prev:
             return
         self._hide_thinking_panel(lane)
+        if self._chat_stream_open.get(lane) and prev and not text.startswith(prev):
+            from agentlib.llm.streaming import merge_visible_answer_text
+
+            merged = merge_visible_answer_text(prev, text)
+            if merged.startswith(prev) or merged == prev:
+                text = merged
+            else:
+                self._commit_chat_live_answer(lane)
         self._chat_live_buf[lane] = text
         self._chat_rewrite_live_draft(lane)
 
@@ -1605,8 +1623,9 @@ class AgentTuiApp(App[None]):
 
     def _prepare_turn_ui(self, lane: int, line: str) -> int:
         if self._chat_stream_open.get(lane):
-            self._chat_truncate_live_block(lane)
-        self._reset_chat_live_answer(lane)
+            self._commit_chat_live_answer(lane)
+        else:
+            self._reset_chat_live_answer(lane)
         seq = self._turn_seq_current(lane) + 1
         self._lane_turn_seq[lane] = seq
         chat = self._chat_logs[lane]
@@ -1695,7 +1714,12 @@ class AgentTuiApp(App[None]):
 
         if t == "answer_reset":
             self._hide_thinking_panel(lane)
-            self._discard_chat_live_answer(lane)
+            self._commit_chat_live_answer(lane)
+            return
+
+        if t == "answer_commit":
+            self._hide_thinking_panel(lane)
+            self._commit_chat_live_answer(lane)
             return
 
         if t == "answer":

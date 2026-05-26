@@ -268,7 +268,6 @@ class _VisibleStreamState:
     answer_emitted_len: int = 0
     answer_emitted_snapshot: str = ""
     tool_mode: Optional[bool] = None
-    tool_progress_emitted: bool = False
     streamed_content: bool = False
     gen_rate: GenRateTracker = field(default_factory=GenRateTracker)
     last_eval_count: int = 0
@@ -280,7 +279,6 @@ class _VisibleStreamState:
         self.answer_emitted_len = 0
         self.answer_emitted_snapshot = ""
         self.tool_mode = None
-        self.tool_progress_emitted = False
         if stream_user_visible:
             sink_emit({"type": "answer_reset"})
 
@@ -367,7 +365,11 @@ def _emit_visible_answer_text(
             state.answer_emitted_snapshot
             and not answer.startswith(state.answer_emitted_snapshot)
         ):
-            state.reset_answer_stream(stream_user_visible=stream_user_visible)
+            merged = merge_visible_answer_text(state.answer_emitted_snapshot, answer)
+            if merged.startswith(state.answer_emitted_snapshot):
+                answer = merged
+            else:
+                state.reset_answer_stream(stream_user_visible=stream_user_visible)
     if len(answer) <= state.answer_emitted_len:
         return
     delta = answer[state.answer_emitted_len :]
@@ -425,18 +427,6 @@ def _apply_content_chunk(
     if state.tool_mode is None and _content_indicates_tool_call(acc_content, tool_calls):
         state.tool_mode = True
     if state.tool_mode:
-        if not state.tool_progress_emitted:
-            from agentlib.llm.tool_schemas import preparing_tool_progress_line
-
-            sink_emit(
-                {
-                    "type": "progress",
-                    "text": preparing_tool_progress_line(
-                        tool_calls=tool_calls, content=acc_content
-                    ),
-                }
-            )
-            state.tool_progress_emitted = True
         return
     state.tool_mode = False
     _emit_visible_answer_delta(acc_content, state, stream_user_visible=stream_user_visible)
@@ -512,18 +502,6 @@ def merge_stream_message_chunks(
             tool_calls = merge_partial_tool_calls(tool_calls, msg["tool_calls"])
             if stream_user_visible and vis.tool_mode is not False:
                 vis.tool_mode = True
-                if not vis.tool_progress_emitted:
-                    from agentlib.llm.tool_schemas import preparing_tool_progress_line
-
-                    sink_emit(
-                        {
-                            "type": "progress",
-                            "text": preparing_tool_progress_line(
-                                tool_calls=tool_calls, content=acc.get("content") or ""
-                            ),
-                        }
-                    )
-                    vis.tool_progress_emitted = True
         if data.get("done"):
             saw_done = True
             u = ollama_usage_from_chat_response_fn(data)
@@ -541,8 +519,6 @@ def merge_stream_message_chunks(
         )
     if tool_calls is not None:
         acc["tool_calls"] = tool_calls
-    if stream_user_visible and vis.answer_emitted_len > 0:
-        sink_emit({"type": "output", "text": "", "end": "\n", "flush": True})
     if chars_per_token_estimator is not None:
         CharsPerTokenEstimator.observe_from_assistant_message(
             chars_per_token_estimator, acc, usage
@@ -614,6 +590,4 @@ def merge_hosted_stream_chunks(
             break
     if tool_calls is not None:
         acc["tool_calls"] = tool_calls
-    if stream_user_visible and vis.answer_emitted_len > 0:
-        sink_emit({"type": "output", "text": "", "end": "\n", "flush": True})
     return acc, None, vis.streamed_content

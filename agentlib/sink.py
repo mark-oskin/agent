@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, List, Optional
 
 EmitCallable = Callable[[dict], None]
 
@@ -62,6 +62,30 @@ def emit_sink_scope(emit: Optional[EmitCallable]) -> Iterator[None]:
         _emit_cv.reset(token)
 
 
+@contextmanager
+def sink_capture_scope(*, tee: bool = False) -> Iterator[List[str]]:
+    """
+    Collect REPL/tool text emitted via ``sink_emit`` / ``sink_print_compat``.
+
+    When ``tee`` is true and a parent emit sink is active, events are forwarded after capture
+  (TUI/CLI still update live). When ``tee`` is false, captured text is not printed unless a
+    parent sink handles it.
+    """
+    buf: List[str] = []
+    parent = _emit_cv.get()
+
+    def _capture_emit(ev: dict) -> None:
+        sink_delegate_capture_append(ev, buf)
+        if tee and parent is not None:
+            parent(ev)
+
+    token = _emit_cv.set(_capture_emit)
+    try:
+        yield buf
+    finally:
+        _emit_cv.reset(token)
+
+
 def sink_print_compat(*args, sep: str = " ", end: str = "\n", flush: bool = True, file=None) -> None:
     """Behaves like ``print()`` but routes through ``sink_emit`` when an emit sink is active."""
     typ = "stderr" if file is sys.stderr else "output"
@@ -101,6 +125,9 @@ def sink_emit(ev: dict) -> None:
         if typ == "final_answer":
             fn({"type": "final_answer", "text": text.strip()})
             return
+        if typ in ("answer_reset", "answer_commit"):
+            fn({"type": typ})
+            return
         payload = {"type": typ, "text": text}
         if end != "\n":
             payload["end"] = end
@@ -123,6 +150,13 @@ def sink_emit(ev: dict) -> None:
 
     if typ == "answer_reset":
         _cli_answer_stream_buf.set("")
+        _cli_draft_header_printed.set(False)
+        return
+    if typ == "answer_commit":
+        if _cli_answer_stream_buf.get().strip():
+            print(file=fil, flush=flush)
+        _cli_answer_stream_buf.set("")
+        _cli_draft_header_printed.set(False)
         return
 
     if typ == "answer" and ev.get("partial"):
@@ -172,10 +206,10 @@ def sink_delegate_capture_append(ev: dict, buf: list[str]) -> None:
     """
     Append sink event text so delegated ``execute_line`` can return it in ``output`` (e.g. ``agent_send`` wait=true).
 
-    Skips ``thinking`` / ``answer`` / ``final_answer`` / ``answer_reset`` (assistant turns expose ``answer`` on the result dict).
+    Skips ``thinking`` / ``answer`` / ``final_answer`` / ``answer_reset`` / ``answer_commit`` (assistant turns expose ``answer`` on the result dict).
     """
     t = ev.get("type") or "output"
-    if t in ("thinking", "answer", "final_answer", "answer_reset"):
+    if t in ("thinking", "answer", "final_answer", "answer_reset", "answer_commit"):
         return
     text = ev.get("text")
     if text is None:
