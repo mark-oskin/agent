@@ -1,7 +1,8 @@
 #!/usr/bin/env -S uv run python3
 """
-Terminal UI for multiple embedded agents: pick an agent on the right; each lane has a
-main transcript plus an optional large thinking panel (shown only while reasoning).
+Terminal UI for multiple embedded agents: **Ctrl+S** toggles the agent list (hidden by
+default). Each lane has a main transcript plus an optional thinking panel (shown only
+while reasoning). Input sits at the bottom; output fills the rest with simple divider lines.
 Tool and status lines go to the transcript.
 
 Requires: ``uv sync --extra tui`` then::
@@ -63,7 +64,7 @@ The **first startup agent** (the initial ``Agent 1`` label unless you passed ``-
 
 While a turn is running, **Ctrl+C** opens a short prompt (**not** the old toast): press **Ctrl+C** again to send an
 interrupt to the worker (best-effort cancel), or press **any other key** to close the prompt and keep waiting.
-**Ctrl+Q** still quits the app when no modal is open (see Textual's quit hint when idle).
+**Ctrl+Q** quits the app when no modal is open.
 """
 
 from __future__ import annotations
@@ -126,7 +127,7 @@ try:
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
     from textual.screen import Screen
-    from textual.widgets import Footer, Header, OptionList, RichLog, Static, TextArea
+    from textual.widgets import Header, OptionList, RichLog, Static, TextArea
     from textual.widgets._header import HeaderIcon
     from textual.widgets.option_list import Option
 except ImportError:
@@ -448,6 +449,7 @@ class AgentTuiApp(App[None]):
         # Up/Down are used by the multiline prompt; use Ctrl+arrows for per-lane history.
         Binding("ctrl+up", "prompt_hist_prev", "", show=False, priority=True),
         Binding("ctrl+down", "prompt_hist_next", "", show=False, priority=True),
+        Binding("ctrl+s", "toggle_sidebar", "Agents", show=True),
     ]
 
     CSS = """
@@ -456,6 +458,16 @@ class AgentTuiApp(App[None]):
         width: auto;
         min-width: 11;
         padding: 0 1;
+    }
+    #app_header HeaderIcon.lane-busy {
+        color: yellow;
+        text-style: bold;
+    }
+    #app_header HeaderIcon.lane-idle {
+        color: $text-muted;
+    }
+    Header {
+        border: none;
     }
     Screen {
         layout: vertical;
@@ -481,13 +493,14 @@ class AgentTuiApp(App[None]):
         height: 0;
         min-height: 0;
         layout: vertical;
-        border: tall $accent;
-        background: $surface;
+        border: none;
+        background: $background;
     }
     .lane-pane.thinking_open .thinking_panel {
         display: block;
         height: 67%;
         min-height: 10;
+        border-bottom: solid $border;
     }
     .thinking_title {
         height: 1;
@@ -497,6 +510,8 @@ class AgentTuiApp(App[None]):
     .thinking_log {
         height: 1fr;
         min-height: 6;
+        border: none;
+        background: $background;
     }
     .chat_lane {
         height: 1fr;
@@ -509,16 +524,22 @@ class AgentTuiApp(App[None]):
     }
     .chat_log {
         height: 1fr;
-        border: tall $surface;
+        border: none;
         background: $background;
     }
     #sidebar {
-        width: 28;
+        display: none;
+        width: 0;
         height: 100%;
-        border-left: tall $accent;
+        border: none;
         layout: vertical;
         padding: 0 1;
-        background: $panel;
+        background: $background;
+    }
+    #sidebar.sidebar-visible {
+        display: block;
+        width: 28;
+        border-left: solid $border;
     }
     #sidebar_title {
         height: auto;
@@ -528,6 +549,8 @@ class AgentTuiApp(App[None]):
     #agent_list {
         height: 1fr;
         overflow-x: hidden;
+        border: none;
+        background: $background;
     }
     #agent_list > .option-list--option {
         text-overflow: ellipsis;
@@ -537,6 +560,9 @@ class AgentTuiApp(App[None]):
         height: 5;
         min-height: 5;
         max-height: 5;
+        border: none;
+        border-top: solid $border;
+        background: $background;
     }
     """
 
@@ -633,7 +659,6 @@ class AgentTuiApp(App[None]):
             soft_wrap=True,
             tab_behavior="focus",
         )
-        yield Footer()
 
     def on_mount(self) -> None:
         from agentlib import build_embedded_session
@@ -645,7 +670,6 @@ class AgentTuiApp(App[None]):
         header_icon = self.query_one("#app_header", Header).query_one(HeaderIcon)
         header_icon.disabled = True
         self.query_one("#app_header", Header).ALLOW_SELECT = False
-        self.query_one(Footer).ALLOW_SELECT = False
         for node in self.query(OptionList):
             node.ALLOW_SELECT = False
         ol = self.query_one("#agent_list", OptionList)
@@ -700,7 +724,7 @@ class AgentTuiApp(App[None]):
                     if model_part.strip()
                     else " — [dim]default model[/dim]"
                 )
-                + "\n[dim]Ctrl+Q quit · /help · pick agent on the right[/dim]"
+                + "\n[dim]Ctrl+Q quit · Ctrl+S agents · /help[/dim]"
             )
             chat.write(Text.from_markup(hint))
 
@@ -708,6 +732,7 @@ class AgentTuiApp(App[None]):
         self._sync_prompt_enabled()
         for i in range(self._n):
             self._refresh_sidebar_lane(i)
+        self._refresh_header_gen_rate()
 
     def _lane_matches_startup_disk_sync(self, lane: int) -> bool:
         if lane < 0 or lane >= len(self._lane_labels):
@@ -809,6 +834,13 @@ class AgentTuiApp(App[None]):
 
     def action_quit(self) -> None:
         self.exit()
+
+    def action_toggle_sidebar(self) -> None:
+        sidebar = self.query_one("#sidebar")
+        if "sidebar-visible" in sidebar.classes:
+            sidebar.remove_class("sidebar-visible")
+        else:
+            sidebar.add_class("sidebar-visible")
 
     def action_prompt_hist_prev(self) -> None:
         pr = self.query_one("#prompt", TextArea)
@@ -1013,7 +1045,7 @@ class AgentTuiApp(App[None]):
         else:
             hint = (
                 f"[bold]{escape(nm)}[/bold] — [dim]background fork from lane {parent_lane + 1}[/dim]\n"
-                f"[dim]Select in sidebar when ready · /fork · /fork_background …[/dim]"
+                f"[dim]Ctrl+S agents · /fork · /fork_background …[/dim]"
             )
             parent_note = f"[dim]Fork (background) → [bold]{escape(nm)}[/bold][/dim]\n"
         chat.write(Text.from_markup(hint))
@@ -1767,8 +1799,22 @@ class AgentTuiApp(App[None]):
         tr.add_tokens(estimate_tokens_from_text(delta_text))
         self._maybe_paint_header_gen_rate(lane)
 
+    def _header_status_icon(self, lane: int, *, measuring: bool = False) -> str:
+        """Status dot + optional tok/s for the header (matches sidebar icons)."""
+        busy = lane in self._busy_lanes
+        dot = self._SIDEBAR_BUSY_ICON if busy else self._SIDEBAR_IDLE_ICON
+        if not busy:
+            return dot
+        if lane in self._lane_gen_tok_s:
+            rate = self._lane_gen_tok_s[lane]
+            rate_s = f"{rate:.0f}/s" if rate >= 100 else f"{rate:.1f}/s"
+            return f"{dot} {rate_s}"
+        if measuring:
+            return f"{dot} …/s"
+        return dot
+
     def _refresh_header_gen_rate(self, lane: Optional[int] = None, *, measuring: bool = False) -> None:
-        """Show tok/s in the header icon slot (top-left); title stays ``Agent TUI``."""
+        """Show active-lane status (●/○) and tok/s in the header icon slot."""
         ln = self._active_lane if lane is None else lane
         if ln == self._active_lane:
             self.title = "Agent TUI"
@@ -1777,18 +1823,17 @@ class AgentTuiApp(App[None]):
             return
         try:
             header = self.query_one("#app_header", Header)
+            header_icon = header.query_one(HeaderIcon)
         except Exception:
             return
-        if ln in self._lane_gen_tok_s:
-            rate = self._lane_gen_tok_s[ln]
-            if rate >= 100:
-                header.icon = f"{rate:.0f}/s"
-            else:
-                header.icon = f"{rate:.1f}/s"
-        elif measuring and ln in self._busy_lanes:
-            header.icon = "…/s"
+        busy = ln in self._busy_lanes
+        if busy:
+            header_icon.add_class("lane-busy")
+            header_icon.remove_class("lane-idle")
         else:
-            header.icon = ""
+            header_icon.add_class("lane-idle")
+            header_icon.remove_class("lane-busy")
+        header.icon = self._header_status_icon(ln, measuring=measuring)
 
     def _prepare_turn_ui(self, lane: int, line: str) -> int:
         if self._chat_stream_open.get(lane):
@@ -1814,7 +1859,10 @@ class AgentTuiApp(App[None]):
                 lane_node.add_class("hidden")
             else:
                 lane_node.remove_class("hidden")
-        self._refresh_header_gen_rate()
+        self._refresh_header_gen_rate(
+            measuring=self._active_lane in self._busy_lanes
+            and self._active_lane not in self._lane_gen_tok_s
+        )
 
     def _feedback_chat(self, lane: int, markup: str) -> None:
         """Transient slash / REPL command text in the chat log (same band as ``/show`` via sink)."""
