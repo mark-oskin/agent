@@ -34,10 +34,27 @@ def test_complete_context_subcommands(monkeypatch):
 
 
 def test_apply_completion_single_match_adds_space():
-    line, cur = apply_repl_completion("/he", 3, ["/help"])
-    assert line == "/help "
-    assert cur == len("/help ")
+    result = apply_repl_completion("/he", 3, ["/help"])
+    assert result.line == "/help "
+    assert result.cursor == len("/help ")
+    assert not result.list_candidates
 
+
+def test_apply_completion_lists_when_ambiguous():
+    result = apply_repl_completion("/set model ", 11, ["alpha:1", "beta:2"])
+    assert result.line == "/set model "
+    assert result.cursor == 11
+    assert result.list_candidates == ("alpha:1", "beta:2")
+
+
+def test_apply_completion_extends_common_prefix():
+    result = apply_repl_completion(
+        "/set model gemma",
+        16,
+        ["gemma4:26b", "gemma4:31b"],
+    )
+    assert result.line == "/set model gemma4:"
+    assert not result.list_candidates
 
 def test_fork_background_matches_before_fork(monkeypatch):
     _app, session = build_test_session(monkeypatch, verbose=0)
@@ -118,3 +135,79 @@ def test_tui_tab_complete_prompt():
             assert pr.cursor_location == (0, 6)
 
     asyncio.run(run())
+
+
+def test_tui_tab_complete_lists_ambiguous():
+    import asyncio
+
+    async def run():
+        from agent_tui import AgentTuiApp
+        from textual.actions import SkipAction
+        from textual.widgets import TextArea
+
+        async with AgentTuiApp(verbose=0, agent_specs=["A"]).run_test(size=(80, 24)) as pilot:
+            app = pilot.app
+            pr = app.query_one("#prompt", TextArea)
+            lane = app._active_lane
+            app._sessions[lane].repl_completion_ollama_models = (
+                "alpha:1",
+                "beta:2",
+            )
+            pr.text = "/set model "
+            pr.move_cursor((0, 11))
+            try:
+                app.repl_tab_complete_prompt(pr)
+            except SkipAction:
+                pass
+            assert pr.text == "/set model "
+            log = app._chat_logs[lane]
+            rendered = "\n".join(log._plain_lines)
+            assert "alpha:1" in rendered
+            assert "beta:2" in rendered
+
+    asyncio.run(run())
+
+
+def test_tui_ctrl_c_clears_prompt():
+    import asyncio
+
+    async def run():
+        from agent_tui import AgentTuiApp
+        from textual.widgets import TextArea
+
+        async with AgentTuiApp(verbose=0, agent_specs=["A"]).run_test(size=(80, 24)) as pilot:
+            app = pilot.app
+            pr = app.query_one("#prompt", TextArea)
+            pr.focus()
+            pr.text = "/set model foo"
+            app._prompt_hist_idx[app._active_lane] = 0
+            app.action_interrupt_prompt()
+            assert pr.text == ""
+            assert pr.cursor_location == (0, 0)
+            assert app._prompt_hist_idx[app._active_lane] is None
+
+    asyncio.run(run())
+
+
+def test_complete_set_model_ollama_names(monkeypatch):
+    _app, session = build_test_session(monkeypatch, verbose=0)
+    session.repl_completion_ollama_models = ("llama3.2:latest", "qwen2.5-coder:latest")
+    names = complete_repl_candidates(session, "/set model ll", 13)
+    assert names == ["llama3.2:latest"]
+
+
+def test_complete_show_model_ollama_names(monkeypatch):
+    _app, session = build_test_session(monkeypatch, verbose=0)
+    session.repl_completion_ollama_models = ("llama3.2:latest", "qwen2.5-coder:latest")
+    names = complete_repl_candidates(session, "/show model qwen", 16)
+    assert names == ["qwen2.5-coder:latest"]
+
+
+def test_probe_ollama_model_names_empty_on_failure(monkeypatch):
+    from agentlib.repl.ollama_models import probe_ollama_model_names
+
+    def boom(*_a, **_k):
+        raise OSError("nope")
+
+    assert probe_ollama_model_names("http://127.0.0.1:1", http_get=boom, timeout=0.1) == ()
+

@@ -171,6 +171,31 @@ def _complete_prefix(options: tuple[str, ...]) -> CompleteFn:
     return _fn
 
 
+def _complete_ollama_model_names(session: "AgentSession", partial: str) -> list[str]:
+    models = getattr(session, "repl_completion_ollama_models", ()) or ()
+    if not models:
+        return []
+    p = partial.lower()
+    return [m for m in models if m.lower().startswith(p)]
+
+
+def _complete_show(
+    session: "AgentSession",
+    tokens: list[str],
+    partial: str,
+    ctx: ReplCompletionContext,
+) -> list[str]:
+    if len(tokens) == 1:
+        return _complete_prefix(("model", "models", "reviewer", "help"))(
+            session, tokens, partial, ctx
+        )
+    if len(tokens) == 2 and tokens[1].lower() == "model":
+        return _complete_ollama_model_names(session, partial)
+    if len(tokens) == 3 and tokens[1].lower() == "model" and not partial:
+        return _complete_prefix(("info",))(session, tokens, partial, ctx)
+    return []
+
+
 def _complete_agent_target(
     session: "AgentSession",
     tokens: list[str],
@@ -237,6 +262,8 @@ def _complete_set(
             return _complete_prefix(("show", "clear", "set", "unset", "merge", "replace", "help"))(
                 session, tokens, partial, _ctx
             )
+    if len(tokens) == 2 and tokens[1].lower() == "model":
+        return _complete_ollama_model_names(session, partial)
     return []
 
 
@@ -338,7 +365,7 @@ def _build_core_specs() -> tuple[ReplCommandSpec, ...]:
             help_line="  /show model · /show models · /show reviewer  (see /show help)",
             help_order=60,
             handler=lambda s, ln: s._cmd_show(ln),
-            complete=_complete_prefix(("model", "models", "reviewer", "help")),
+            complete=_complete_show,
         ),
         S(
             "/while",

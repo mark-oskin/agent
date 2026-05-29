@@ -52,7 +52,7 @@ Run a shell command locally like the agent ``run_command`` tool: ``/run_command 
 
 Clipboard: ``/clipboard copy|copy all|paste`` (`paste` loads the clipboard into your prompt so you can edit before Enter). Session JSON: ``/context load|save|start_log FILE`` (``/save_context`` is a one-shot snapshot; ``start_log`` enables auto-save after each turn). Extensions: ``/load FILE.py`` (``register_repl``), ``/unload``, ``/extensions``.
 
-**Mouse:** two-finger scroll in the chat or thinking log to move through output; drag to select text (within that pane only); releasing the button copies to the clipboard (macOS Terminal usually does not pass **Cmd+C** through). **Ctrl+C** or **Ctrl+Shift+C** also copies when idle; **Cmd+C** works in terminals that forward it (iTerm, Ghostty, WezTerm). The prompt uses normal editor copy/paste (**Ctrl+V** / **Cmd+V** to paste).
+**Mouse:** two-finger scroll in the chat or thinking log to move through output; drag to select text (within that pane only); releasing the button copies to the clipboard (macOS Terminal usually does not pass **Cmd+C** through). **Ctrl+C** clears the prompt when it has text; when empty and idle, **Ctrl+C** or **Ctrl+Shift+C** copy a selection; **Cmd+C** works in terminals that forward it (iTerm, Ghostty, WezTerm). The prompt uses normal editor copy/paste (**Ctrl+V** / **Cmd+V** to paste).
 
 Prompt history is **per lane**: **↑** / **↓** when the cursor is on the **first / last** line recall prior messages (like the CLI);
 otherwise they move inside the editor. **Ctrl+↑** / **Ctrl+↓** always recall (even mid‑multiline). **Enter** sends the message (same idea as the single-line input).
@@ -787,7 +787,7 @@ class AgentTuiApp(App[None]):
         super().exit(result, return_code=return_code, message=message)
 
     def action_interrupt_prompt(self) -> None:
-        """Ctrl+C: cancel busy turn, or copy selection when idle."""
+        """Ctrl+C: cancel busy turn, clear prompt input, or copy selection when idle."""
         # App-level ctrl+c binding runs before the modal's on_key; do not no-op here or the
         # second Ctrl+C never reaches dismiss(True).
         if isinstance(self.screen, _BusyInterruptScreen):
@@ -799,6 +799,11 @@ class AgentTuiApp(App[None]):
                 _BusyInterruptScreen(lane),
                 callback=lambda r, ln=lane: self._on_busy_interrupt_result(ln, r),
             )
+            return
+        pr = self.query_one("#prompt", TextArea)
+        if self.screen.focused is pr and pr.text:
+            self._prompt_hist_idx[lane] = None
+            _set_prompt_text(pr, "")
             return
         self.action_copy_mouse_selection()
 
@@ -862,6 +867,7 @@ class AgentTuiApp(App[None]):
         from agentlib.repl.complete import (
             apply_repl_completion,
             complete_repl_candidates,
+            format_completion_choices,
             offset_to_location,
             text_area_cursor_offset,
         )
@@ -871,11 +877,15 @@ class AgentTuiApp(App[None]):
         candidates = complete_repl_candidates(
             self._sessions[lane], pr.text, offset, ctx=ctx
         )
-        new_text, new_cursor = apply_repl_completion(pr.text, offset, candidates)
-        if new_text == pr.text and new_cursor == offset:
+        result = apply_repl_completion(pr.text, offset, candidates)
+        if result.list_candidates:
+            body = escape(format_completion_choices(result.list_candidates))
+            self._feedback_chat(lane, f"[dim]{body}[/dim]")
             raise SkipAction()
-        pr.text = new_text
-        pr.move_cursor(offset_to_location(new_text, new_cursor))
+        if result.line == pr.text and result.cursor == offset:
+            raise SkipAction()
+        pr.text = result.line
+        pr.move_cursor(offset_to_location(result.line, result.cursor))
 
     def action_repl_tab_complete(self) -> None:
         """App-level Tab binding (runs before focus navigation when prompt is focused)."""

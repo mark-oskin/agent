@@ -166,6 +166,17 @@ class AgentApp:
     def ollama_model(self) -> str:
         return self.settings_get_str(("ollama", "model"), "qwen3.6:latest")
 
+    def repl_completion_ollama_models(self) -> tuple[str, ...]:
+        """Local Ollama model tags probed once at startup for REPL tab completion."""
+        cached = getattr(self, "_repl_ollama_models_cache", None)
+        if cached is not None:
+            return cached
+        from agentlib.repl.ollama_models import probe_ollama_model_names
+
+        names = probe_ollama_model_names(self.ollama_base_url(), http_get=requests.get)
+        self._repl_ollama_models_cache = names
+        return names
+
     def ollama_second_opinion_model(self) -> str:
         return self.settings_get_str(("ollama", "second_opinion_model"), "llama3.2:latest").strip()
 
@@ -1180,6 +1191,7 @@ class AgentApp:
             python_host_command=None,
             python_enqueue_line=None,
             host_app=self,
+            repl_completion_ollama_models=self.repl_completion_ollama_models(),
         )
         session.seed_mcp_tools_if_connected()
 

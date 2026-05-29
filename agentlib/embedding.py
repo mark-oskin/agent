@@ -298,6 +298,7 @@ def build_embedded_session(
         python_host_command=python_host_command,
         python_enqueue_line=python_enqueue_line,
         host_app=app,
+        repl_completion_ollama_models=app.repl_completion_ollama_models(),
     )
     session.seed_mcp_tools_if_connected()
     return app, session

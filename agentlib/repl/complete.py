@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, List, Optional, TYPE_CHECKING
 
 from agentlib.repl.command_registry import (
@@ -11,6 +12,15 @@ from agentlib.repl.command_registry import (
 
 if TYPE_CHECKING:
     from agentlib.session import AgentSession
+
+
+@dataclass(frozen=True)
+class ReplCompletionApplyResult:
+    """Outcome of applying tab completion at a cursor position."""
+
+    line: str
+    cursor: int
+    list_candidates: tuple[str, ...] = ()
 
 
 def repl_token_context(line: str, cursor: int) -> tuple[list[str], str, int, int]:
@@ -52,24 +62,19 @@ def apply_repl_completion(
     line: str,
     cursor: int,
     candidates: List[str],
-) -> tuple[str, int]:
+) -> ReplCompletionApplyResult:
     """
-    Apply tab completion to ``line`` at ``cursor``.
-
-    Returns ``(new_line, new_cursor)``. If ``candidates`` is empty, returns unchanged.
+    Apply tab completion like readline: extend the common prefix, finish a unique
+    match, or return ``list_candidates`` when multiple choices remain.
     """
     if not candidates:
-        return line, cursor
+        return ReplCompletionApplyResult(line, cursor)
     _tokens, partial, word_start, _token_index = repl_token_context(line, cursor)
+
     if len(candidates) == 1:
         replacement = candidates[0]
-    else:
-        replacement = _common_prefix(candidates)
-        if len(replacement) <= len(partial):
-            return line, cursor
-    new_line = line[:word_start] + replacement + line[cursor:]
-    new_cursor = word_start + len(replacement)
-    if len(candidates) == 1:
+        new_line = line[:word_start] + replacement + line[cursor:]
+        new_cursor = word_start + len(replacement)
         if new_cursor >= len(new_line) or new_line[new_cursor] in ("", " "):
             if new_cursor >= len(new_line):
                 new_line = new_line + " "
@@ -77,7 +82,20 @@ def apply_repl_completion(
             elif new_line[new_cursor] != " ":
                 new_line = new_line[:new_cursor] + " " + new_line[new_cursor:]
                 new_cursor += 1
-    return new_line, new_cursor
+        return ReplCompletionApplyResult(new_line, new_cursor)
+
+    common = _common_prefix(candidates)
+    if len(common) > len(partial):
+        new_line = line[:word_start] + common + line[cursor:]
+        new_cursor = word_start + len(common)
+        return ReplCompletionApplyResult(new_line, new_cursor)
+
+    return ReplCompletionApplyResult(line, cursor, tuple(candidates))
+
+
+def format_completion_choices(candidates: List[str] | tuple[str, ...]) -> str:
+    """Plain-text listing of completion choices (one per line)."""
+    return "\n".join(candidates)
 
 
 def _common_prefix(items: List[str]) -> str:
@@ -137,7 +155,6 @@ class ReadlineReplCompleter:
             self._matches = complete_repl_candidates(
                 session, line, end, ctx=self._ctx
             )
-            # readline passes only the partial word; filter to those extending ``text``.
             if text:
                 self._matches = [m for m in self._matches if m.startswith(text)]
         if state < len(self._matches):

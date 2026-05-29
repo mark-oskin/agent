@@ -187,6 +187,7 @@ class AgentSession:
         python_host_command: Optional[Callable[[dict], dict]] = None,
         python_enqueue_line: Optional[Callable[[str, str], dict]] = None,
         host_app: Optional[object] = None,
+        repl_completion_ollama_models: tuple[str, ...] = (),
     ):
         self.settings = settings
         self.verbose = int(verbose)
@@ -303,6 +304,7 @@ class AgentSession:
         self.python_host_command = python_host_command
         self.python_enqueue_line = python_enqueue_line
         self._host_app = host_app
+        self.repl_completion_ollama_models = repl_completion_ollama_models
 
     def _chars_per_token_estimator(self):
         app = getattr(self, "_host_app", None)
