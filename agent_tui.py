@@ -56,7 +56,7 @@ Clipboard: ``/clipboard copy|copy all|paste`` (`paste` loads the clipboard into 
 
 Prompt history is **per lane**: **↑** / **↓** when the cursor is on the **first / last** line recall prior messages (like the CLI);
 otherwise they move inside the editor. **Ctrl+↑** / **Ctrl+↓** always recall (even mid‑multiline). **Enter** sends the message (same idea as the single-line input).
-For an extra line inside the box use **Shift+Enter** or **Ctrl+J**, or paste multiline text; content scrolls vertically
+**Tab** completes slash commands and common subcommands. For an extra line inside the box use **Shift+Enter** or **Ctrl+J**, or paste multiline text; content scrolls vertically
 when it does not fit.
 
 The **first startup agent** (the initial ``Agent 1`` label unless you passed ``--agent``) loads and appends to the same
@@ -325,6 +325,14 @@ class PromptTextArea(TextArea):
             event.prevent_default()
             self.insert("\n")
             return
+        if key == "tab":
+            event.stop()
+            event.prevent_default()
+            try:
+                self.app.repl_tab_complete_prompt(self)
+            except (AttributeError, SkipAction):
+                pass
+            return
         # Readline-style history when cursor is on the first/last document line.
         if key == "up" and self.cursor_at_first_line:
             try:
@@ -450,6 +458,7 @@ class AgentTuiApp(App[None]):
         Binding("ctrl+up", "prompt_hist_prev", "", show=False, priority=True),
         Binding("ctrl+down", "prompt_hist_next", "", show=False, priority=True),
         Binding("ctrl+s", "toggle_sidebar", "Agents", show=True),
+        Binding("tab", "repl_tab_complete", "", show=False, priority=True),
     ]
 
     CSS = """
@@ -657,7 +666,7 @@ class AgentTuiApp(App[None]):
             ),
             show_line_numbers=False,
             soft_wrap=True,
-            tab_behavior="focus",
+            tab_behavior="indent",
         )
 
     def on_mount(self) -> None:
@@ -841,6 +850,36 @@ class AgentTuiApp(App[None]):
             sidebar.remove_class("sidebar-visible")
         else:
             sidebar.add_class("sidebar-visible")
+
+    def repl_tab_complete_prompt(self, pr: TextArea) -> None:
+        """Tab-complete slash commands in the prompt (same engine as CLI readline)."""
+        if self.screen.focused is not pr or pr.disabled:
+            raise SkipAction()
+        lane = self._active_lane
+        if lane < 0 or lane >= len(self._sessions):
+            raise SkipAction()
+        from agentlib.repl.command_registry import ReplCompletionContext
+        from agentlib.repl.complete import (
+            apply_repl_completion,
+            complete_repl_candidates,
+            offset_to_location,
+            text_area_cursor_offset,
+        )
+
+        offset = text_area_cursor_offset(pr)
+        ctx = ReplCompletionContext(agent_labels=tuple(self._lane_labels))
+        candidates = complete_repl_candidates(
+            self._sessions[lane], pr.text, offset, ctx=ctx
+        )
+        new_text, new_cursor = apply_repl_completion(pr.text, offset, candidates)
+        if new_text == pr.text and new_cursor == offset:
+            raise SkipAction()
+        pr.text = new_text
+        pr.move_cursor(offset_to_location(new_text, new_cursor))
+
+    def action_repl_tab_complete(self) -> None:
+        """App-level Tab binding (runs before focus navigation when prompt is focused)."""
+        self.repl_tab_complete_prompt(self.query_one("#prompt", TextArea))
 
     def action_prompt_hist_prev(self) -> None:
         pr = self.query_one("#prompt", TextArea)

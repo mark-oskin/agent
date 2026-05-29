@@ -900,8 +900,12 @@ class AgentApp:
         except Exception:
             pass
 
-    def interactive_repl_install_readline(self) -> None:
+    def interactive_repl_install_readline(self, session=None) -> None:
         if self._repl_readline_installed:
+            if session is not None:
+                from agentlib.repl.complete import install_readline_completer
+
+                install_readline_completer(lambda: session)
             return
         path = self.repl_history_path()
         try:
@@ -912,6 +916,10 @@ class AgentApp:
             except FileNotFoundError:
                 pass
             self._repl_readline_installed = True
+            if session is not None:
+                from agentlib.repl.complete import install_readline_completer
+
+                install_readline_completer(lambda: session)
         except Exception:
             self._repl_readline_installed = False
 
@@ -1177,7 +1185,7 @@ class AgentApp:
 
         run_interactive_repl_loop(
             session,
-            install_readline=self.interactive_repl_install_readline,
+            install_readline=lambda: self.interactive_repl_install_readline(session),
             repl_read_line=lambda p, i: self.repl_read_line_in_block(p, i),
             flush_repl_history=self.flush_repl_readline_history,
             agent_progress=self.agent_progress,

@@ -10,7 +10,7 @@ Optionally define ``describe_repl_load_options() -> str`` so ``/load FILE.py --h
 from __future__ import annotations
 
 import shlex
-from typing import Any, Callable, FrozenSet, List, TYPE_CHECKING
+from typing import Any, Callable, FrozenSet, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agentlib.session import AgentSession
@@ -58,12 +58,18 @@ class ReplExtensionRegistry:
         if t:
             self._help_chunks.append(t)
 
-    def register_command(self, name: str, handler: Callable[..., Any]) -> None:
+    def register_command(
+        self,
+        name: str,
+        handler: Callable[..., Any],
+        *,
+        complete: Optional[Callable[..., Any]] = None,
+    ) -> None:
         """Register ``/foo`` (``name`` may be ``foo`` or ``/foo``). Handler receives ``(session, rest)``."""
         key = (name or "").strip().lower()
         if not key.startswith("/"):
             key = "/" + key.lstrip("/")
-        self.session._repl_register_extension_command(key, handler)
+        self.session._repl_register_extension_command(key, handler, complete=complete)
         self._keys.append(key)
 
     def call_python_line(self, subcommand: str, rest: str = "") -> str:

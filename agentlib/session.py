@@ -291,6 +291,7 @@ class AgentSession:
         self._call_python_pending: Optional[str] = None
         # REPL extensions from ``/load`` (see ``agentlib.repl_extensions``).
         self._repl_extension_commands: dict[str, Callable[..., SessionLineResult]] = {}
+        self._repl_extension_completers: dict[str, Callable[..., list[str]]] = {}
         self._repl_extensions_loaded: list[_LoadedReplExtension] = []
         self._repl_post_load_depth = 0
         # ``/load … --single_lane`` for ``extensions/code.py``: run the /code pipeline on this session only.
@@ -1604,8 +1605,17 @@ class AgentSession:
             agent_system_message=skill_system,
         )
 
-    def _repl_register_extension_command(self, key: str, handler: Callable[..., SessionLineResult]) -> None:
-        self._repl_extension_commands[key.lower()] = handler
+    def _repl_register_extension_command(
+        self,
+        key: str,
+        handler: Callable[..., SessionLineResult],
+        *,
+        complete: Optional[Callable[..., list[str]]] = None,
+    ) -> None:
+        k = key.lower()
+        self._repl_extension_commands[k] = handler
+        if complete is not None:
+            self._repl_extension_completers[k] = complete
 
     def _repl_extension_help_text(self) -> str:
         """Extra ``/help`` lines from loaded REPL extensions (see :meth:`ReplExtensionRegistry.register_help`)."""
@@ -1635,6 +1645,7 @@ class AgentSession:
     def _repl_unwind_extension_commands(self, keys: tuple[str, ...]) -> None:
         for k in keys:
             self._repl_extension_commands.pop(k, None)
+            self._repl_extension_completers.pop(k, None)
 
     def _repl_unload_all_extensions(self) -> None:
         seen: set[str] = set()
@@ -1644,6 +1655,7 @@ class AgentSession:
                 seen.add(rec.module_name)
         self._repl_extensions_loaded.clear()
         self._repl_extension_commands.clear()
+        self._repl_extension_completers.clear()
         self.repl_code_extension_single_lane = False
 
     def _repl_drop_loaded_extension_path(self, resolved_path: Path) -> int:
@@ -1893,152 +1905,11 @@ class AgentSession:
         return SessionLineResult()
 
     def _execute_command_line(self, s: str) -> SessionLineResult:
-        low = s.lower()
-        cmd = (low.split(None, 1)[0] if low.strip() else "")
-        if low in ("/quit", "/exit", "/q"):
-            return SessionLineResult(quit=True)
-        if low == "/clear":
-            self.messages.clear()
-            self.last_reuse_skill_id = None
-            self.repl_last_user_query = None
-            self.repl_last_assistant_answer = None
-            return self._emit_repl_command_text(
-                "Context cleared (including stored skill for /skill reuse)."
-            )
-        if cmd == "/compact":
-            return self._cmd_compact(s)
-        if low in ("/usage", "/tokens"):
-            text = self._format_last_ollama_usage_for_repl()
-            return self._emit_repl_command_text(
-                text.strip() if text.strip() else "No data available."
-            )
-        if s.startswith("/show"):
-            return self._cmd_show(s)
-        if s.startswith("/while"):
-            return self._cmd_while(s)
-        if low.startswith("/skill"):
-            return self._cmd_skill(s)
-        if low.startswith("/use-skills") or low.startswith("/use-skill") or low.startswith("/reuse-skill"):
-            return self._cmd_skill_backcompat(s)
-        if cmd in ("/set", "/settings"):
-            return self._cmd_settings(s)
-        if low.startswith("/source"):
-            return self._cmd_source(s)
-        if low.startswith("/context"):
-            return self._cmd_context(s)
-        if low.startswith("/load_context"):
-            return self._cmd_load_context(s)
-        if low.startswith("/save_context"):
-            return self._cmd_save_context(s)
-        if cmd == "/unload":
-            return self._cmd_repl_unload(s)
-        if cmd == "/load":
-            return self._cmd_repl_load(s)
-        if cmd == "/extensions":
-            return self._cmd_repl_extensions(s)
-        if cmd in ("/cd", "/chdir"):
-            return self._cmd_cd(s)
-        if cmd == "/mcp" or low.startswith("/mcp "):
-            return self._cmd_mcp(s)
-        if low.startswith("/run_command"):
-            return self._cmd_run_command(s)
-        if low.startswith("/call_python"):
-            return self._cmd_call_python(s)
-        if low == "/list":
-            return self._sink_host_ctl_result(self.host_ctl("list_agents"))
-        if low.startswith("/switch"):
-            try:
-                parts = shlex.split(s)
-            except ValueError as e:
-                sink_print_compat(f"/switch: {e}")
-                return SessionLineResult()
-            if len(parts) < 2:
-                sink_print_compat("Usage: /switch AGENT_LABEL")
-                return SessionLineResult()
-            return self._sink_host_ctl_result(self.host_ctl("switch", parts[1]))
-        if low.startswith("/last_answer"):
-            try:
-                parts = shlex.split(s)
-            except ValueError as e:
-                sink_print_compat(f"/last_answer: {e}")
-                return SessionLineResult()
-            arg = parts[1] if len(parts) > 1 else None
-            return self._sink_host_ctl_result(self.host_ctl("last_answer", arg))
-        if low.startswith("/last_question"):
-            try:
-                parts = shlex.split(s)
-            except ValueError as e:
-                sink_print_compat(f"/last_question: {e}")
-                return SessionLineResult()
-            arg = parts[1] if len(parts) > 1 else None
-            return self._sink_host_ctl_result(self.host_ctl("last_question", arg))
-        if low == "/last" or low.startswith("/last "):
-            return self._cmd_last(s)
-        if low.startswith("/clipboard"):
-            return self._cmd_clipboard(s)
-        if low.startswith("/fork_background"):
-            return self._cmd_fork_background(s)
-        if low.startswith("/fork"):
-            return self._cmd_fork(s)
-        if s.startswith("/turn"):
-            return self._cmd_turn_to_agent(s)
-        if s.startswith("/send"):
-            return self._cmd_send_to_agent(s)
-        if low in ("/help", "/?"):
-            ma = ""
-            if self.python_fork_agent is not None or self.python_fork_background_agent is not None:
-                ma = (
-                    '  /fork NAME ["cmds"]…  ·  /fork_background NAME ["cmds"]…\n'
-                )
-            tui_kill = ""
-            if (
-                self.python_fork_agent is not None
-                or self.python_fork_background_agent is not None
-                or self.python_host_command is not None
-                or self.python_enqueue_line is not None
-            ):
-                tui_kill = "  /kill NAME\n"
-            host_extras = ""
-            if self.python_host_command is not None:
-                host_extras = "  /list\n  /switch NAME\n"
-            snap_extras = (
-                "  /last answer|question [NAME]   (aliases: /last_answer, /last_question)\n"
-                "  /clipboard copy|copy all|paste\n"
-            )
-            delegate_extras = ""
-            if self.python_enqueue_line is not None or self.python_delegate_line is not None:
-                delegate_extras = (
-                    "  /send NAME CMD…  ·  /turn NAME CMD…  (async vs blocking; NAME may be self)\n"
-                    '  /send NAME "cmd1,cmd2,…"  ·  /turn NAME "cmd1,cmd2,…"\n'
-                )
-            else:
-                delegate_extras = (
-                    "  /send self CMD…  ·  /turn self CMD…  (self only without multi-agent host)\n"
-                )
-            ext_help = self._repl_extension_help_text()
-            sink_print_compat(
-                "  /quit · /exit\n"
-                "  /clear\n"
-                "  /compact [N% | WORDS]   (default 10%; LLM compresses history, replaces messages)\n"
-                "  /help · /?\n"
-                "  /usage · /tokens\n"
-                "  /cd DIR\n"
-                "  /source FILE\n"
-                "  /import FILE\n"
-                "  /context load|save|start_log FILE   (aliases: /load_context, /save_context)\n"
-                "  /load FILE.py  ·  /unload  ·  /extensions   (REPL extension modules)\n"
-                "  /mcp …          (Model Context Protocol servers — try /mcp help)\n"
-                "  /call_python …\n"
-                "  /run_command …\n"
-                "  ! CMD\n"
-                + ma
-                + tui_kill
-                + host_extras
-                + snap_extras
-                + delegate_extras
-                + ext_help
-            )
-            return SessionLineResult()
+        from agentlib.repl.command_registry import dispatch_repl_command
+
+        res = dispatch_repl_command(self, s)
+        if res is not None:
+            return res
         ext_res = self._try_dispatch_repl_extension(s)
         if ext_res is not None:
             return ext_res
