@@ -2226,6 +2226,9 @@ class AgentSession:
                 continue
             executed += 1
             res = self.execute_line(line)
+            out = (res or {}).get("output") or ""
+            if out:
+                sink_print_compat(out)
             if bool((res or {}).get("quit", False)):
                 return SessionLineResult(quit=True)
         sink_print_compat(f"Sourced {executed} line(s) from {path!r}.")

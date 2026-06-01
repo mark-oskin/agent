@@ -156,6 +156,11 @@ def test_enrich_respects_ollama_search_enrich_off(monkeypatch):
 
 def test_main_interactive_mode_exits_on_eof(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["agent.py"])
+    # REPL uses input() only when stdin looks like a TTY; pytest stdin is a pipe.
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        "agentlib.app.AgentApp.repl_completion_ollama_models", lambda self: ()
+    )
 
     def _eof(_=""):
         raise EOFError()
@@ -192,8 +197,8 @@ def test_interactive_repl_settings_load_save(tmp_path, monkeypatch):
         run_session_lines(session, lines)
     out = buf.getvalue()
     assert _app.settings.get_str(("ollama", "model"), "") == "repl-test-model"
-    assert "second_opinion enabled" in out
-    assert "second_opinion disabled" in out
+    assert "Tool enabled: second_opinion" in out
+    assert "Tool disabled: second_opinion" in out
     assert "Loaded 1 message" in out
     assert "Wrote context snapshot" in out
     assert "auto-save" not in out
@@ -844,7 +849,7 @@ def test_interactive_help_is_top_level(monkeypatch):
         run_session_lines(session, lines)
     out = buf.getvalue()
     assert "/quit" in out
-    assert "/show help" not in out
+    assert "/show model" in out
 
 
 def test_parse_while_repl_tokens_and_judge_bit():

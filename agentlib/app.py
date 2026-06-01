@@ -942,6 +942,8 @@ class AgentApp:
             raw = sys.stdin.buffer.readline(maxb + 1)
         except (OSError, ValueError):
             return ""
+        if not raw:
+            raise EOFError
         if len(raw) > maxb:
             print(f"\n[Input truncated to {maxb} bytes]", file=sys.stderr)
             raw = raw[:maxb]
