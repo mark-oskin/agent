@@ -26,6 +26,18 @@ def test_gen_rate_tracker_interval_sampling():
     assert 12 <= rate <= 28
 
 
+def test_gen_rate_tracker_clear_period_keeps_last_rate():
+    tr = GenRateTracker()
+    tr.add_tokens(10)
+    time.sleep(1.1)
+    rate = tr.sample_interval(min_elapsed=0.5)
+    assert rate is not None
+    tr.add_tokens(9999)
+    tr.clear_period()
+    assert tr.rate == rate
+    assert tr._tokens_in_period == 0
+
+
 def test_gen_rate_tracker_ignores_tiny_interval():
     tr = GenRateTracker()
     tr.add_tokens(10)

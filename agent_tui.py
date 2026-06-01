@@ -606,6 +606,7 @@ class AgentTuiApp(App[None]):
         self._lane_turn_seq: Dict[int, int] = {}
         self._lane_gen_tok_s: Dict[int, float] = {}
         self._lane_rate_tracker: Dict[int, GenRateTracker] = {}
+        self._lane_stream_gen_rate: Set[int] = set()
         self._lane_gen_rate_paint_at: Dict[int, float] = {}
         self._header_gen_rate_interval_s = 1.0
         self._thinking_buf: Dict[int, str] = {}
@@ -1838,6 +1839,8 @@ class AgentTuiApp(App[None]):
         """Accumulate streamed answer tokens (rate sampled on header refresh cadence)."""
         if not delta_text or lane not in self._busy_lanes:
             return
+        if lane in self._lane_stream_gen_rate:
+            return
         buf = self._chat_live_buf.get(lane, "")
         if buf.endswith(delta_text):
             return
@@ -1847,6 +1850,18 @@ class AgentTuiApp(App[None]):
             self._lane_rate_tracker[lane] = tr
         tr.add_tokens(estimate_tokens_from_text(delta_text))
         self._maybe_paint_header_gen_rate(lane)
+
+    def _apply_stream_gen_rate(self, lane: int, rate: float) -> None:
+        """Use Ollama eval_count-based rate from the streaming layer (preferred over text estimate)."""
+        if rate < 0:
+            return
+        self._lane_stream_gen_rate.add(lane)
+        tr = self._lane_rate_tracker.get(lane)
+        if tr is not None:
+            tr.clear_period()
+        self._lane_gen_tok_s[lane] = float(rate)
+        if lane == self._active_lane:
+            self._refresh_header_gen_rate(lane)
 
     def _header_status_icon(self, lane: int, *, measuring: bool = False) -> str:
         """Status dot + optional tok/s for the header (matches sidebar icons)."""
@@ -1894,6 +1909,8 @@ class AgentTuiApp(App[None]):
         chat = self._chat_logs[lane]
         chat.write(Text.from_markup(f"[bold green]You[/bold green]\n{escape(line)}\n"))
         self._reset_lane_gen_rate_tracker(lane)
+        self._lane_stream_gen_rate.discard(lane)
+        self._lane_gen_tok_s.pop(lane, None)
         self._thinking_buf[lane] = ""
         self._thinking_follow[lane] = False
         self._hide_thinking_panel(lane)
@@ -1947,6 +1964,12 @@ class AgentTuiApp(App[None]):
 
         chat = self._chat_logs[lane]
 
+        if t == "gen_rate":
+            rate = ev.get("tok_per_sec")
+            if isinstance(rate, (int, float)):
+                self._apply_stream_gen_rate(lane, float(rate))
+            return
+
         if t == "thinking":
             if "[Thinking]" in text:
                 self._thinking_follow[lane] = True
@@ -1996,7 +2019,10 @@ class AgentTuiApp(App[None]):
                     if text.startswith(prev):
                         self._track_gen_rate_delta(lane, text[len(prev) :])
                     elif text != prev:
-                        self._track_gen_rate_delta(lane, text)
+                        # JSON re-parse / merge replaced the buffer; don't count the whole snapshot once.
+                        tr = self._lane_rate_tracker.get(lane)
+                        if tr is not None:
+                            tr.clear_period()
                     self._chat_set_live_answer_snapshot(lane, text)
                 else:
                     self._track_gen_rate_delta(lane, text)

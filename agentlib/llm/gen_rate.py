@@ -43,6 +43,11 @@ class GenRateTracker:
         self._tokens_in_period += n
         return self._last_rate
 
+    def clear_period(self) -> None:
+        """Drop in-flight period tokens without clearing the last sampled rate."""
+        self._period_start = None
+        self._tokens_in_period = 0
+
     def sample_interval(self, *, min_elapsed: float = 0.25) -> Optional[float]:
         """Close the current period and return tok/s (tokens / wall time)."""
         now = time.monotonic()
