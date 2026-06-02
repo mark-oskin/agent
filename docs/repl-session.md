@@ -56,6 +56,7 @@ Paths are passed through `os.path.expanduser`.
 
 - **Usage:** `/source <file>`  
 - Reads the file as **UTF-8**, skips blank lines, and runs each remaining line through **`execute_line`** as if you had typed it (similar to shell `source`).
+- **Printed output** from each line (slash-command text and **`SessionLineResult.output`**) is shown as it runs — same as typing the lines interactively.
 - If a sourced line triggers **`/quit`**, sourcing stops and the session exits.
 - On completion, prints how many lines were executed.
 

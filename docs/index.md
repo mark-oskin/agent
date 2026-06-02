@@ -9,6 +9,7 @@ These pages complement [README.md](../README.md) with deeper, website-style guid
 
 | Topic | Description |
 |--------|-------------|
+| [Recommended local models](recommended-local-models.md) | Ollama tags we recommend as starting points (`qwen3.6`, `gemma4`, …) |
 | [Core tools](core-tools.md) | Every built-in tool id, role, and parameter summary |
 | [Plugin toolsets](plugin-toolsets.md) | Bundled optional toolsets (`dev`, `desktop`, `browser`, …) and how to enable them |
 | [REPL extensions](repl-extensions.md) | `/load`, `/unload`, `/extensions`, `/tokens`, extension API sketch |

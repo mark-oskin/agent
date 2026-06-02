@@ -28,6 +28,8 @@ uv run pytest
 - Prefer adding or updating tests for behavior changes.
 - Keep the REPL UX simple and discoverable (`/help`, `/settings …`).
 - Documentation is part of the change:
-  - Update `README.md` for user-facing behavior.
-  - Update `DEVELOPERS.md` for embedded API / extension / architecture changes.
+  - Update **`README.md`** for user-facing behavior.
+  - Update **`docs/*.md`** when REPL or tool behavior changes (see **`docs/index.md`**).
+  - Update **`DEVELOPERS.md`** for architecture, embedding, and extension internals.
+  - **Website** (nested **`website/`** repo): run **`python3 _sync_docs_from_repo.py`** after editing synced **`docs/`** pages, then **`npm run build`** and **`python3 deploy_ftp.py`** to publish (see **`website/README.md`**).
 

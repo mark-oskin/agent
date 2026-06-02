@@ -15,11 +15,10 @@ It can run as:
 - **Skills** (JSON in `skills/`) specialize behavior with extra prompt text, optional **multi-step workflows**, and a tighter **tool allowlist** when a skill matches.
 - A **context window** helper can summarize older turns when the transcript grows; settings live in `~/.agent.json` and the REPL.
 - **`agent_knowledge.txt`** (repo root) is optional reading for **LLMs** writing Python that **drives this agent** from `/call_python` (`ai()`, `session`, batching and bridge patterns like `foreach_line.py` / `telegram_channel_ai.py`).
-<!-- Embedding / Python API temporarily removed; CLI/REPL only. -->
 
 ## Documentation
 
-Longer user guides (core tools, plugin toolsets, `/load` extensions, cwd/context/`/source`, `/while`, `/set` topics, extension prefs, **`/help`**, environment/prefs, queue, code pipeline) live under **[docs/](docs/index.md)**.
+Longer user guides (core tools, plugin toolsets, `/load` extensions, cwd/context/`/source`, `/while`, `/set` topics, extension prefs, **`/help`**, environment/prefs, queue, code pipeline) live under **[docs/](docs/index.md)**. The marketing site also lists **[recommended local Ollama models](https://openchainsaw.com/docs/recommended-local-models/)**.
 
 ## Install
 
