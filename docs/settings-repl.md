@@ -26,6 +26,7 @@ description: Topic map for persisted and session preferences; /set help is the l
 | **`/set primary request_options`** | Per-primary sampling / generation map: **`show`**, **`clear`**, **`set`**, **`unset`**, **`merge`**, **`replace`** (JSON objects). |
 | **`/set second_opinion llm`** | Reviewer path: **`ollama [model]`** or **`hosted <base_url> <model> [api_key]`**. |
 | **`/set enable`** / **`/set disable`** | Session **features** only: **`second_opinion`**, **`stream_thinking`**, **`stream_assistant`**, **`show_draft`**, **`verbose`**. Tool ids still work here but prefer **`/set tools …`**. |
+| **`/set tool_call_mode`** | **`show`**, **`native`** (default — Ollama **`tools`** API), or **`json`** (legacy JSON-in-content tool calls). |
 | **`/set tools`** | **`list`**, **`<tool or toolset> enable|disable`**, **`reload`**, **`describe` `<tool-id>`** (or toolset name). |
 | **`/mcp`** | Model Context Protocol — **`help`**, **`list`**, **`status`**, **`add`** (optional **`--framing ndjson`** for Python SDK stdio), **`remove`**, **`enable`** / **`disable`**, **`reload`**. See [Configuration & environment](environment.md#mcp-model-context-protocol). |
 | **`/set system_prompt`** | **`show`**, **`reset`**, **`pin`** (snapshot effective prompt), **`file`**, **`save`**, or inline text. |
@@ -42,6 +43,7 @@ description: Topic map for persisted and session preferences; /set help is the l
 
 - After changing groups (`ollama`, `openai`, `agent`), tools, templates, or context — run **`/set save`** if you want the JSON file updated.
 - **`/set tools describe <id>`** prints tool contract text when the registry has it (core + plugins).
+- **`show_draft`** (off by default): when enabled, streaming answers show a **Draft** label before the final committed reply in CLI/TUI.
 - Unknown **`/set …`** lines end with “Try **`/help`**” from the dispatcher.
 
 ---

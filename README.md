@@ -9,7 +9,7 @@ It can run as:
 
 ## What it does
 
-- Sends your request (plus conversation history) to the model in a **structured JSON** protocol (`tool_call` / `answer`).
+- Sends your request (plus conversation history) to the model using **native Ollama tool calling** by default (`agent.tool_call_mode: native`), with a **`json`** fallback that parses structured **`tool_call` / `answer`** objects from assistant text when needed.
 - **Core tools** cover web (DuckDuckGo search, fetch HTML), the filesystem, `git`, shell commands, and in-process Python.
 - **Plugin toolsets** add optional tools from a `tools/` directory, gated by your settings and per-request routing.
 - **Skills** (JSON in `skills/`) specialize behavior with extra prompt text, optional **multi-step workflows**, and a tighter **tool allowlist** when a skill matches.
@@ -87,7 +87,7 @@ Run `./agent.py --help` for the full text.
 
 ## Multi-agent Textual UI (`agent_tui.py`)
 
-Side-by-side agents in the terminal: pick a lane in the sidebar, type in the shared prompt, stream thinking and tool output separately from the transcript.
+Multiple agent **lanes** in one terminal: borderless layout, input at the bottom, expandable **thinking** panel, and a **Ctrl+S** sidebar (hidden by default) to switch lanes. The header shows **idle/busy** status and live **tok/s** while generating.
 
 **Requires** the Textual stack (not installed by default):
 
@@ -98,6 +98,8 @@ uv run --extra tui python agent_tui.py --agent Planner:llama3.2:latest --agent C
 ```
 
 Repeat **`--agent LABEL` or `--agent LABEL:MODEL`** for more lanes. Omit **`:MODEL`** to use your default primary model from prefs.
+
+**Keyboard (prompt):** **Enter** send · **Shift+Enter** / **Ctrl+J** newline · **Tab** complete slash commands (lists ambiguous choices in the transcript) · **↑/↓** history on first/last line · **Ctrl+↑/↓** always recall · **Ctrl+C** clear typed input (or copy selection when empty; during a turn, **Ctrl+C** twice cancels) · **Ctrl+Q** quit · **Ctrl+S** toggle agent sidebar.
 
 | Command | Purpose |
 |---------|---------|
@@ -143,13 +145,24 @@ In the TUI, normal slash-command help and confirmations appear in the **main tra
 | `/settings …` | Model routing, tools, toolsets, thinking, system prompt, templates, context manager, `save`, etc. |
 | `/clipboard copy` · `/clipboard copy all` · `/clipboard paste` | Clipboard: last answer, full session JSON, or load clipboard **into your next input** without auto-running (**paste** echoes in the stdin REPL; **`agent_tui`** puts text in the prompt box) |
 
+**Tab completion:** In the CLI REPL and TUI prompt, **Tab** completes slash commands and common subcommands from one registry. **`/set model`** and **`/show model`** complete against local Ollama model names probed at startup. When several choices match and the prefix cannot extend, the CLI (readline) or TUI (transcript) lists the options.
+
 **Multi-agent hooks** (**`/send`** and related) need a UI that wires enqueue/delegate (e.g. **`agent_tui.py`**); in a plain stdin REPL they print a setup hint instead of forwarding.
 
 At `verbose=0`, startup is minimal (`Interactive mode. Type /help for commands.`). Use `/settings verbose 1` or `2` for a richer startup banner and tool logging.
 
 ## Embedding / Python API
 
-Temporarily unavailable. Use the CLI/REPL for now.
+Drive the same **`AgentSession`** as the CLI from Python:
+
+```python
+from agentlib import build_embedded_session
+
+app, session = build_embedded_session(verbose=0)
+result = session.execute_line("What is 2+2?")
+```
+
+Pass **`emit=...`** to **`execute_line`** for streaming events (thinking, tool progress, partial answers). See **`agent_embedded.py`** for a runnable demo and the website **[Embedding tutorial](https://openchainsaw.com/docs/embedding-tutorial/)** for a full walkthrough. **`agent_tui.py`** builds one shared **`AgentApp`** and one session per lane the same way.
 
 ## Core behavior
 
@@ -157,6 +170,7 @@ Temporarily unavailable. Use the CLI/REPL for now.
 
 - **Primary** defaults to local **Ollama**. You can switch to a **hosted** OpenAI-compatible base URL from the REPL: `/settings primary llm hosted …` or `… ollama`.
 - A **second-opinion** path can use another Ollama model or a separate hosted profile (`/settings second_opinion llm …`). Enable the feature with `/settings enable second_opinion` (and CLI flags as needed; see preferences).
+- **Tool transport:** default **`agent.tool_call_mode`** is **`native`** (Ollama **`tools`** on `/api/chat`). Use **`/set tool_call_mode json`** to revert to JSON-in-content tool calls; **`/set tool_call_mode show`** prints the current mode.
 
 ### Context window
 
@@ -262,12 +276,17 @@ For models that support it, the agent can send a **`think`** field and optionall
 
 Some model families (e.g. `gpt-oss:*`) expect a **level**; if you enable thinking without a level, the agent may default the level to `"medium"`.
 
+### Streaming answers (`show_draft`)
+
+By default, live assistant text streams without a **Draft** label. Enable **`/set enable show_draft`** (then **`/set save`** to persist) to prefix in-progress answers with **Draft** in the CLI/TUI before the final block.
+
 ## Safety and robustness
 
 - **Disabled tools** are not executed; the model gets a clear refusal string.
 - **Tool failures** (exceptions, bad subprocess exit, etc.) are turned into a **result string** for the model instead of crashing the process.
-- **Ctrl-C** during a long model or tool run cancels the **current** operation; the REPL **stays** running.
-- In the REPL, **line editing** can use `readline` with history in `~/.agent_repl_history` (see verbose banner for details).
+- **Ctrl-C** during a long model or tool run cancels the **current** operation; the REPL **stays** running (prints `[Cancelled]`).
+- In the **TUI prompt**, **Ctrl+C** clears the current line when it has text; when empty and idle, it copies a selection.
+- In the REPL, **line editing** uses **readline** with history in `~/.agent_repl_history` and **Tab** completion for slash commands.
 
 ## Tests
 

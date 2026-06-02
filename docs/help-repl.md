@@ -31,6 +31,20 @@ During a chat turn, the model can invoke most of these slash lines via the nativ
 
 ---
 
+## Tab completion
+
+**Tab** in the interactive REPL (GNU readline / libedit) and in the **TUI prompt** share one completion engine (`agentlib/repl/command_registry.py` + `agentlib/repl/complete.py`):
+
+- Top-level slash commands and many subcommands (e.g. **`/context load`**, **`/set tools`**).
+- **`/set model`** and **`/show model`** complete **local Ollama model tags** probed once at startup (`GET /api/tags`, short timeout).
+- **Single match** → completes and adds a trailing space.
+- **Multiple matches with a shared prefix** → extends the prefix.
+- **Ambiguous with no extension** → CLI lists choices (readline); TUI prints them in the **transcript** above the prompt.
+
+Extensions loaded with **`/load`** can register extra completion via the command registry.
+
+---
+
 ## Related commands not duplicated on `/help`
 
 The printed list is intentionally short. These are still valid (see [REPL session & context](repl-session.md), [Settings](settings-repl.md), README):

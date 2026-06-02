@@ -93,23 +93,33 @@ The interactive loop is **`agentlib.repl.loop.run_interactive_repl_loop`**, whic
 
 When adding or modifying commands:
 
+- Register the command in **`agentlib/repl/command_registry.py`** (`ReplCommandSpec`) so **`/help`**, dispatch, and **Tab completion** stay in sync.
 - Ensure they remain discoverable via `/help`
-- Add or update tests (e.g. `tests/test_to_100.py`, `tests/test_repl_extensions.py`, topic-specific files under `tests/`)
+- Add or update tests (e.g. `tests/test_to_100.py`, `tests/test_repl_extensions.py`, `tests/test_repl_complete.py`, topic-specific files under `tests/`)
 - For user-visible slash behavior, add or extend **`docs/`** (e.g. [while-repl.md](docs/while-repl.md), [extension-settings.md](docs/extension-settings.md), [settings-repl.md](docs/settings-repl.md), [help-repl.md](docs/help-repl.md), [environment.md](docs/environment.md))
 
 ### Multi-agent TUI (`agent_tui.py`)
 
-- **Shortcuts** (`/send`, `/fork`, `/fork_background`, `/kill`) bypass the normal REPL runner and schedule host actions; transient feedback goes to **`_chat_logs`** (same transcript band as streamed slash output), not **`_activity_logs`** (thinking/tool telemetry).
+- **Layout:** borderless lanes, bottom prompt, divider lines, **Ctrl+S** toggles the agent sidebar (hidden by default), header **idle/busy** dot + **tok/s** while generating (no footer).
+- **Shortcuts** (`/send`, `/fork`, `/fork_background`, `/kill`) bypass the normal REPL runner and schedule host actions; transient feedback goes to **`_chat_logs`** (same transcript band as streamed slash output), not the thinking panel.
+- **Tab completion** uses the same engine as the CLI (`repl_tab_complete_prompt` → `agentlib/repl/complete.py`); ambiguous matches list in the transcript.
+- **Ctrl+C** on a non-empty prompt clears input; during a busy turn, **Ctrl+C** opens an interrupt modal (second **Ctrl+C** confirms cancel).
 - **Parsing** shares **`agentlib/tui_parse`** with the CLI: **`parse_fork_command`**, **`parse_send_command`** (comma-split inside optional `"..."`, with **`'…'`** and **`\,`** escapes), **`format_fork_command_line`**, **`format_send_command_line`**.
 - **`/clipboard paste`** returns **`prefill_prompt`** on **`SessionLineResult`**; **`agent_tui`** injects into **`#prompt`**, **`repl/loop`** prints the snippet once for stdin users.
+
+### REPL tab completion
+
+- **`agentlib/repl/command_registry.py`** — command specs, dispatch, `/help` text, and per-command **`complete`** callbacks.
+- **`agentlib/repl/complete.py`** — shared candidate resolution and apply logic (CLI readline + TUI **`TextArea`**).
+- **`agentlib/repl/ollama_models.py`** — startup probe of **`GET /api/tags`** for **`/set model`** / **`/show model`** completion (`AgentApp.repl_completion_ollama_models()`).
 
 ### Context I/O
 
 Transcript load/save JSON helpers: **`agentlib/context/io.py`** (`load_context_messages`, `save_context_bundle`). Session methods delegate to these for `/context`, `/load_context`, `/save_context`, and post-turn auto-save when `session_save_path` is set.
 
-### Embedding API (`import agent`)
+### Embedding API (`agentlib.embedding`)
 
-Temporarily removed. `agent.py` is CLI/REPL-only for now.
+**`build_embedded_session()`** and **`fork_embedded_session()`** are exported from **`agentlib`**. Each lane in **`agent_tui.py`** and the shipped demo **`agent_embedded.py`** use this path. Pass **`emit=...`** to **`AgentSession.execute_line`** for streaming UI events. The thin **`agent.py`** CLI shim does not re-export embedding helpers — import **`agentlib`** directly.
 
 ## Packaging / install
 
