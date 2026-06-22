@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -20,34 +19,7 @@ def fork_embedded_session(parent_session: "AgentSession", *, app):
         primary_profile=parent_session.primary_profile,
         app=app,
     )
-    session.messages = copy.deepcopy(parent_session.messages)
-    session.enabled_tools = set(parent_session.enabled_tools)
-    session.enabled_toolsets = set(parent_session.enabled_toolsets)
-    session.mcp_tools_opt_out = bool(getattr(parent_session, "mcp_tools_opt_out", False))
-    session.settings_locked = bool(getattr(parent_session, "settings_locked", False))
-    session.second_opinion_on = bool(parent_session.second_opinion_on)
-    session.cloud_ai_enabled = bool(parent_session.cloud_ai_enabled)
-    session.session_save_path = None
-    session.session_system_prompt = parent_session.session_system_prompt
-    session.session_system_prompt_path = parent_session.session_system_prompt_path
-    session.session_prompt_template = parent_session.session_prompt_template
-    ctx = parent_session.context_cfg
-    session.context_cfg = copy.deepcopy(ctx) if isinstance(ctx, dict) else {}
-    session.template_default = parent_session.template_default
-    pt = parent_session.prompt_templates
-    session.prompt_templates = copy.deepcopy(pt) if isinstance(pt, dict) else {}
-    session.reviewer_hosted_profile = parent_session.reviewer_hosted_profile
-    session.reviewer_ollama_model = parent_session.reviewer_ollama_model
-    sm = parent_session.skills_map
-    session.skills_map = copy.deepcopy(sm) if isinstance(sm, dict) else sm
-    session.last_reuse_skill_id = parent_session.last_reuse_skill_id
-    session.python_fork_agent = getattr(parent_session, "python_fork_agent", None)
-    session.python_fork_background_agent = getattr(parent_session, "python_fork_background_agent", None)
-    session.python_delegate_line = getattr(parent_session, "python_delegate_line", None)
-    session.python_enqueue_line = getattr(parent_session, "python_enqueue_line", None)
-    session.python_host_command = getattr(parent_session, "python_host_command", None)
-    session.repl_last_user_query = None
-    session.repl_last_assistant_answer = None
+    session.inherit_fork_state_from(parent_session)
     return session
 
 

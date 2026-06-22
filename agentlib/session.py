@@ -410,6 +410,56 @@ class AgentSession:
             replace_text=self._session_replace_text,
         )
 
+    def inherit_fork_state_from(self, parent: "AgentSession") -> None:
+        """
+        Copy the parent's transcript and session-local REPL state into this session.
+
+        Used by :func:`agentlib.embedding.fork_embedded_session` for ``/fork`` /
+        ``/fork_background`` child lanes. The child's ``session_save_path`` is cleared so
+        forks do not overwrite the parent's context auto-save file (``/context start_log``).
+        """
+        self.messages = copy.deepcopy(parent.messages)
+        self.enabled_tools = set(parent.enabled_tools)
+        self.enabled_toolsets = set(parent.enabled_toolsets)
+        self.mcp_tools_opt_out = bool(getattr(parent, "mcp_tools_opt_out", False))
+        self.settings_locked = bool(getattr(parent, "settings_locked", False))
+        self.second_opinion_on = bool(parent.second_opinion_on)
+        self.cloud_ai_enabled = bool(parent.cloud_ai_enabled)
+        self.session_save_path = None
+        self.session_system_prompt = parent.session_system_prompt
+        self.session_system_prompt_path = parent.session_system_prompt_path
+        self.session_prompt_template = parent.session_prompt_template
+        self._system_prompt_explicit = bool(getattr(parent, "_system_prompt_explicit", False))
+        ctx = parent.context_cfg
+        self.context_cfg = copy.deepcopy(ctx) if isinstance(ctx, dict) else {}
+        self.template_default = parent.template_default
+        pt = parent.prompt_templates
+        self.prompt_templates = copy.deepcopy(pt) if isinstance(pt, dict) else {}
+        self._prompt_templates_explicit = bool(getattr(parent, "_prompt_templates_explicit", False))
+        self._prompt_template_default_explicit = bool(
+            getattr(parent, "_prompt_template_default_explicit", False)
+        )
+        self.reviewer_hosted_profile = parent.reviewer_hosted_profile
+        self.reviewer_ollama_model = parent.reviewer_ollama_model
+        sm = parent.skills_map
+        self.skills_map = copy.deepcopy(sm) if isinstance(sm, dict) else sm
+        self.last_reuse_skill_id = parent.last_reuse_skill_id
+        self.session_cwd = parent.session_cwd
+        self._rebind_session_fs_tools()
+        self.repl_last_user_query = parent.repl_last_user_query
+        self.repl_last_assistant_answer = parent.repl_last_assistant_answer
+        self.repl_code_extension_single_lane = bool(
+            getattr(parent, "repl_code_extension_single_lane", False)
+        )
+        self._repl_extensions_loaded = copy.deepcopy(parent._repl_extensions_loaded)
+        self._repl_extension_commands = dict(parent._repl_extension_commands)
+        self._repl_extension_completers = dict(parent._repl_extension_completers)
+        self.python_fork_agent = getattr(parent, "python_fork_agent", None)
+        self.python_fork_background_agent = getattr(parent, "python_fork_background_agent", None)
+        self.python_delegate_line = getattr(parent, "python_delegate_line", None)
+        self.python_enqueue_line = getattr(parent, "python_enqueue_line", None)
+        self.python_host_command = getattr(parent, "python_host_command", None)
+
     def _cmd_cd(self, s: str) -> SessionLineResult:
         """Change this session's working directory for ``run_command`` / ``!`` / tool runs."""
         try:

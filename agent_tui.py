@@ -1086,6 +1086,8 @@ class AgentTuiApp(App[None]):
         self._thinking_follow[new_idx] = False
         self._n += 1
 
+        self._sync_lane_visual_from(parent_lane, new_idx)
+
         if switch_to_new:
             hint = (
                 f"[bold]{escape(nm)}[/bold] — [dim]forked from lane {parent_lane + 1}[/dim]\n"
@@ -1107,7 +1109,7 @@ class AgentTuiApp(App[None]):
         self._sync_prompt_enabled()
 
         filtered = [c.strip() for c in cmds if c.strip()]
-        self._prompt_hist_lines[new_idx] = []
+        self._prompt_hist_lines[new_idx] = list(self._prompt_hist_lines.get(parent_lane, []))
         self._prompt_hist_idx.pop(new_idx, None)
         if filtered:
             self._execute_lines_chain(new_idx, filtered)

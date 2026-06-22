@@ -49,3 +49,24 @@ def test_fork_copies_settings_lock(monkeypatch, tmp_path):
     parent.settings_locked = True
     child = fork_embedded_session(parent, app=app)
     assert child.settings_locked
+
+
+def test_fork_copies_messages_session_cwd_and_last_turn(monkeypatch, tmp_path):
+    app, parent = build_test_session(monkeypatch, verbose=0, prefs_path=str(tmp_path / "agent.json"))
+    parent.messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    parent.session_cwd = str(tmp_path / "workspace")
+    parent.repl_last_user_query = "question"
+    parent.repl_last_assistant_answer = "answer"
+
+    child = fork_embedded_session(parent, app=app)
+
+    assert child.messages == parent.messages
+    assert child.messages is not parent.messages
+    assert child.session_cwd == parent.session_cwd
+    assert child.repl_last_user_query == "question"
+    assert child.repl_last_assistant_answer == "answer"
+    assert child.session_save_path is None
