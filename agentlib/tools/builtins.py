@@ -12,6 +12,7 @@ from typing import Any, Optional, Union
 
 import requests
 
+from agentlib.tools.python_validate import call_python_code_rejected_reason
 from agentlib.tools.turn_support import normalize_fetch_urls
 from agentlib.tools.websearch import readability_excerpt_from_html
 
@@ -309,8 +310,13 @@ def replace_text(path, pattern, replacement, replace_all=True):
 
 def call_python(code, globals=None):
     code = _scalar_to_str(code, "")
-    if not code.strip():
-        return "Exec error: empty code string."
+    reject = call_python_code_rejected_reason(code)
+    if reject:
+        return (
+            "Exec error: not valid Python source (call_python only runs Python, not shell scripts or prose). "
+            f"{reject}. For letters, essays, or files use write_file, "
+            'or answer with {"action":"answer","answer":"..."}.'
+        )
     try:
         compiled = compile(code, "<call_python>", "exec")
     except SyntaxError as e:

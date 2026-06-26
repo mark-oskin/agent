@@ -296,6 +296,77 @@ def test_parse_unusable_json_sets_recovery_note():
     assert note is not None and "plain-text" in note.lower()
 
 
+def test_parse_python_code_fragment_no_json_warning():
+    """Truncated Python (e.g. f-string ``{count}``) must not trigger JSON parse warnings."""
+    raw = (
+        '{count}")\n'
+        "    except FileNotFoundError:\n"
+        '        print(f"Error: file \'{filepath}\' not found.", file=sys.stderr)\n'
+        '        sys.exit(1)\n\n'
+        'if __name__ == "__main__":\n'
+        "    count_words(sys.argv[1])\n"
+        "```"
+    )
+    agent_json.consume_last_json_parse_note()
+    out = parse(raw)
+    assert out["action"] == "answer"
+    assert agent_json.consume_last_json_parse_note() is None
+
+
+def test_parse_call_python_malformed_json_from_debug_log():
+    """Recover call_python only when extracted code compiles."""
+    raw = (
+        '{"action":"call_python","parameters":{"code":"import re\\nimport sys\\n\\n'
+        'def count_words(filepath):\\n    \\"\\"\\"Reads a file.\\"\\"\\"\\n    try:\\n'
+        "        with open(filepath, 'r', encoding='utf-8') as f:\\le:\\n"
+        '            text = f.read()\\n    except FileNotFoundError:\\n'
+        '        print(f\\\\\\"Error\\\\\\", file=sys.stderr)\\n'
+        '\\n    count_words(sys.argv[1])\\n"}}\n}'
+    )
+    agent_json.consume_last_json_parse_note()
+    out = parse(raw)
+    # Incomplete recovered script must not run as call_python.
+    assert out["action"] != "tool_call" or out.get("tool") != "call_python"
+
+
+def test_parse_call_python_prose_in_code_becomes_answer():
+    """Valid JSON with prose inside code must not execute call_python."""
+    raw = (
+        '{"action": "tool_call", "tool": "call_python", "parameters": {"code": '
+        '"import sys\\ndef main():\\n    pass  # you need to escape the newline properly."}}'
+    )
+    agent_json.consume_last_json_parse_note()
+    out = parse(raw)
+    assert out["action"] == "answer"
+    assert "you need to escape" in out.get("answer", "")
+    note = agent_json.consume_last_json_parse_note()
+    assert note is not None and "call_python" in note.lower()
+
+
+def test_prefer_display_answer_uses_markdown_block():
+    from agentlib.tools.python_validate import prefer_display_answer
+
+    raw = (
+        "Here is a script.\n\n```python\nimport sys\nprint('ok')\n```\n"
+        '{"action":"tool_call","tool":"call_python","parameters":{"code":"import sys\\n"}}'
+    )
+    out = prefer_display_answer("import sys\\n", raw)
+    assert "Here is a script" in out
+    assert "import sys" in out
+    assert "print('ok')" in out
+    assert "\\n" not in out or out.count("\n") > 2
+
+
+def test_answer_looks_like_garbled_debug2_final():
+    from agentlib.tools.python_validate import answer_looks_like_garbled_tool_output
+    import json
+    from pathlib import Path
+
+    path = Path(PROJECT_DIR) / "debug2.log"
+    raw = json.loads(path.read_text(encoding="utf-8"))["messages"][3]["content"]
+    assert answer_looks_like_garbled_tool_output(raw)
+
+
 def test_parse_use_git_top_level_op_and_worktree():
     raw = json.dumps(
         {

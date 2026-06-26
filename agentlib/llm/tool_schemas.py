@@ -506,6 +506,23 @@ def truncated_json_recovery_user_content(*, tool_call_mode: str, primary_profile
     )
 
 
+def garbled_answer_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
+    if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
+        return (
+            "Your last reply was a broken JSON or code fragment (escaped \\n literals, truncated braces), "
+            "not a readable answer for the user. "
+            "Reply with plain text containing the full script or explanation. "
+            "If you need to run Python, use native tool_calls for call_python with syntactically valid code only—"
+            "no prose inside the code string."
+        )
+    return (
+        "Your last reply was a broken JSON or code fragment, not a readable answer. "
+        'Respond with {"action":"answer","answer":"..."} where answer is the complete script or explanation '
+        "as plain text (real newlines, not \\\\n escape sequences). "
+        "For call_python, parameters.code must be valid Python only—no explanations mixed in."
+    )
+
+
 def missing_answer_field_user_content(*, tool_call_mode: str, primary_profile=None) -> str:
     if _native_mode(tool_call_mode=tool_call_mode, primary_profile=primary_profile):
         return (

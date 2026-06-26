@@ -9,11 +9,17 @@ from agentlib.agent_json import consume_last_json_parse_note
 from agentlib.prompts import messages_for_agent_api_call
 from agentlib.sink import sink_emit
 from agentlib.tools import mcp_registry, turn_support
+from agentlib.tools.python_validate import (
+    CALL_PYTHON_SHOWN_AS_TEXT_NOTE,
+    answer_looks_like_garbled_tool_output,
+    prefer_display_answer,
+)
 from agentlib.tools.routing import preferred_web_search_tool
 
 from agentlib.llm.tool_schemas import (
     SECOND_OPINION_TOOL_ID,
     deliverable_full_document_user_content,
+    garbled_answer_user_content,
     invalid_agent_response_user_content,
     missing_answer_field_user_content,
     second_opinion_limit_user_content,
@@ -267,6 +273,12 @@ def run_agent_conversation_turn(
         raw_ollama_msg = consume_last_ollama_raw_message()
         response_data = deps.parse_agent_json(response_text)
         note = consume_last_json_parse_note()
+        if note == CALL_PYTHON_SHOWN_AS_TEXT_NOTE and response_data.get("action") == "answer":
+            ans = response_data.get("answer")
+            if isinstance(ans, str):
+                better = prefer_display_answer(ans, response_text or "")
+                if better.strip():
+                    response_data = {**response_data, "answer": better}
         if note:
             sink_emit({"type": "warning", "text": note})
         from agentlib import agent_json as _agent_json_mod
@@ -302,6 +314,17 @@ def run_agent_conversation_turn(
                 )
                 continue
             ans_out0 = response_data.get("answer")
+            if isinstance(ans_out0, str) and answer_looks_like_garbled_tool_output(ans_out0):
+                _transcript_append_assistant_user(
+                    messages,
+                    raw_ollama_msg,
+                    response_text,
+                    garbled_answer_user_content(
+                        tool_call_mode=tool_call_mode, primary_profile=primary_profile
+                    ),
+                    native_transport=native_transport,
+                )
+                continue
             # Refusal-gate: when a model answers with "I can't access..." despite having allowed tools,
             # force one more step that requires a tool call.
             if (
@@ -474,6 +497,23 @@ def run_agent_conversation_turn(
                 )
             )
             ans_out = response_data.get("answer")
+            if isinstance(ans_out, str) and answer_looks_like_garbled_tool_output(ans_out):
+                messages.append(
+                    assistant_transcript_message(
+                        raw_ollama_msg,
+                        fallback_content=response_text,
+                        use_provider_shape=native_transport,
+                    )
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": garbled_answer_user_content(
+                            tool_call_mode=tool_call_mode, primary_profile=primary_profile
+                        ),
+                    }
+                )
+                continue
             if ans_out is None or (isinstance(ans_out, str) and not ans_out.strip()):
                 extracted = deps.extract_json_object_from_text(response_text)
                 if extracted:

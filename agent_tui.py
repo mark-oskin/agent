@@ -1760,6 +1760,24 @@ class AgentTuiApp(App[None]):
 
     def _write_final_answer_block(self, lane: int, text: str) -> None:
         body = (text or "").strip()
+        live = self._chat_live_buf.get(lane, "").strip()
+        if live:
+            from agentlib.tools.python_validate import (
+                answer_looks_like_garbled_tool_output,
+                prefer_display_answer,
+            )
+
+            merged = prefer_display_answer(body, live) if body else live
+            if answer_looks_like_garbled_tool_output(merged) and not answer_looks_like_garbled_tool_output(live):
+                merged = live
+            elif (
+                body
+                and len(live) > len(body) + 40
+                and live.count("\n") >= body.count("\n")
+                and not answer_looks_like_garbled_tool_output(live)
+            ):
+                merged = live
+            body = merged.strip()
         if not body:
             return
         if not self._show_draft_enabled(lane) and self._streamed_answer_matches_final(lane, body):

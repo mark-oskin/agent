@@ -7,6 +7,12 @@ import re
 from dataclasses import dataclass
 from typing import AbstractSet, Callable, FrozenSet, Optional, Tuple
 
+from agentlib.tools.python_validate import (
+    CALL_PYTHON_SHOWN_AS_TEXT_NOTE,
+    answer_looks_like_garbled_tool_output,
+    call_python_code_rejected_reason,
+)
+
 _PARSE_RECOVERY_NOTE: Optional[str] = None
 _LAST_TOOL_TRANSPORT: Optional[Tuple[str, str]] = None  # (tool_id, "native"|"json")
 
@@ -400,6 +406,79 @@ def fallback_extract_write_file_field(raw: str) -> Optional[dict]:
     return {"action": "tool_call", "tool": "write_file", "parameters": {"path": path, "content": content}}
 
 
+def _repair_call_python_code(code: str) -> str:
+    """Fix rare JSON-recovery artifacts in model-emitted Python source."""
+    if not code:
+        return code
+    return code.replace("\\le:", "\n            ")
+
+
+def fallback_extract_call_python_field(raw: str) -> Optional[dict]:
+    """
+    When JSON is invalid but the model clearly intended ``call_python``, recover ``code``
+    from a ``"code": "…"`` span (handles broken outer JSON if the code string is readable).
+    """
+    text = normalize_unicode_json_quotes(raw.strip())
+    if not (
+        re.search(r'"action"\s*:\s*"call_python"', text)
+        or re.search(r'"tool"\s*:\s*"call_python"', text)
+        or re.search(r'"action"\s*:\s*"tool_call"[^}]*"tool"\s*:\s*"call_python"', text)
+    ):
+        return None
+    extracted = _extract_json_string_field(text, "code", allow_unterminated=True)
+    if extracted is None or not extracted.strip():
+        return None
+    code = _repair_call_python_code(extracted)
+    if call_python_code_rejected_reason(code):
+        return None
+    _record_parse_recovery(
+        "Recovered call_python from malformed JSON (code extracted via string scanner)."
+    )
+    return {"action": "tool_call", "tool": "call_python", "parameters": {"code": code}}
+
+
+def trailing_brace_repair_candidates(s: str) -> list[str]:
+    """Extra closing braces/lines models append after an otherwise complete JSON object."""
+    t = s.strip()
+    out: list[str] = []
+    if t.endswith("}}"):
+        out.append(t[:-1])
+    lines = t.splitlines()
+    while len(lines) > 1 and lines[-1].strip() == "}":
+        candidate = "\n".join(lines[:-1]).rstrip()
+        if candidate and candidate not in out:
+            out.append(candidate)
+        lines = lines[:-1]
+    return out
+
+
+def _looks_like_code_not_json(text: str) -> bool:
+    """True when a leading ``{`` is likely Python/code, not a JSON object."""
+    t = text.strip()
+    if not t.startswith("{"):
+        return False
+    if answer_looks_like_garbled_tool_output(t):
+        return False
+    if re.match(r'^\{\s*"', t):
+        return False
+    code_signals = (
+        "def ",
+        "import ",
+        "except ",
+        "if __name__",
+        "print(",
+        "class ",
+        "for ",
+        "while ",
+        "return ",
+        "elif ",
+        "else:",
+        "sys.",
+        "\n    ",
+    )
+    return any(s in t for s in code_signals)
+
+
 def try_json_loads_object(s: str):
     """Parse a JSON object string; apply light repairs for common model mistakes."""
     if not s or not s.strip():
@@ -412,6 +491,8 @@ def try_json_loads_object(s: str):
         escape_controls_inside_json_strings(s),
         escape_controls_inside_json_strings(normalize_unicode_json_quotes(s)),
     ]
+    for base in list(variants):
+        variants.extend(trailing_brace_repair_candidates(base))
     seen = set()
     uniq_variants = []
     for v in variants:
@@ -436,6 +517,10 @@ def try_json_loads_object(s: str):
     wf = fallback_extract_write_file_field(s)
     if wf is not None:
         return wf
+
+    cp = fallback_extract_call_python_field(s)
+    if cp is not None:
+        return cp
 
     extracted = fallback_extract_answer_field(normalize_unicode_json_quotes(s))
     if extracted is not None and extracted.strip():
@@ -920,6 +1005,15 @@ def normalize_agent_dict(d: dict, deps: AgentJsonDeps) -> dict:
     else:
         out["parameters"] = {}
 
+    if out.get("action") == "tool_call" and out.get("tool") == "call_python":
+        params = out.get("parameters") if isinstance(out.get("parameters"), dict) else {}
+        code = params.get("code")
+        if isinstance(code, str) and code.strip():
+            reject = call_python_code_rejected_reason(code)
+            if reject and not answer_looks_like_garbled_tool_output(code):
+                _record_parse_recovery(CALL_PYTHON_SHOWN_AS_TEXT_NOTE)
+                return {"action": "answer", "answer": code, "parameters": {}}
+
     return out
 
 
@@ -970,8 +1064,16 @@ def parse_agent_json(resp_text, deps: AgentJsonDeps) -> dict:
     if fb_apple is not None:
         return normalize_agent_dict(fb_apple, deps)
 
+    fb_python = fallback_extract_call_python_field(text)
+    if fb_python is not None:
+        return normalize_agent_dict(fb_python, deps)
+
     # Last resort: treat as a direct answer (general Q&A without valid JSON)
-    if text.strip().startswith("{"):
+    if (
+        text.strip().startswith("{")
+        and not _looks_like_code_not_json(text)
+        and not answer_looks_like_garbled_tool_output(text)
+    ):
         _record_parse_recovery(
             "Could not parse model output as JSON; treating the response as a plain-text answer."
         )
