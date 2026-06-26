@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 agent = "agent:main"
+agent_tui = "agent_tui:main"
 
 [project.optional-dependencies]
 tui = [
@@ -26,7 +27,7 @@ browser = [
 ]
 
 [tool.setuptools]
-py-modules = ["agent"]
+py-modules = ["agent", "agent_tui", "_bootstrap"]
 
 [tool.setuptools.packages.find]
 where = ["."]

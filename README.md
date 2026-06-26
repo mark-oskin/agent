@@ -33,29 +33,41 @@ uv sync
 
 Use `./agent.py` or `uv run python agent.py` (see **Run** below).
 
-### Put `agent` on your `PATH` (`uv tool install`)
+### Put `agent` and `agent_tui` on your `PATH` (`uv tool install`)
 
-From the repository root, install an isolated tool environment with the `agent` console script:
+From the repository root, install an isolated tool environment with the console scripts:
 
 ```bash
+# CLI only
 uv tool install .
+
+# CLI + Textual TUI (agent_tui needs the tui extra)
+uv tool install ".[tui]"
 ```
 
-Then use the **`agent`** command anywhere (same flags as `./agent.py`). **`uv`** prints where executables are linked (often `~/.local/bin`; ensure that directory is on your `PATH`).
+Then use **`agent`** and **`agent_tui`** from any directory (same flags as `./agent.py` / `./agent_tui.py`). **`uv`** prints where executables are linked (often `~/.local/bin`; ensure that directory is on your `PATH`).
 
 Updates after pulling git changes:
 
 ```bash
-uv tool install --reinstall .
+uv tool install --reinstall ".[tui]"
 ```
 
-Remove the tool:
+Remove the tools:
 
 ```bash
 uv tool uninstall agent
 ```
 
 When this package is published to an index, you will also be able to run `uv tool install agent` (the PyPI/name story may evolve; installing from a path remains the reliable option for this repo).
+
+**Other ways to run (no global install):**
+
+| Goal | Command |
+|------|---------|
+| From any cwd, no install | `/path/to/ollama-test/agent.py …` or `agent_tui.py` (auto-reexec via project `.venv` / `uv run --project`) |
+| From repo clone | `./agent.py` · `uv run python agent.py` |
+| TUI from clone | `uv run --extra tui python agent_tui.py` |
 
 ## Run
 
@@ -65,7 +77,7 @@ When this package is published to an index, you will also be able to run `uv too
 | One-shot | `./agent.py "…"` · or **`agent` "…"` |
 | Help | `./agent.py --help` · or **`agent --help`** |
 | List tools and on/off state | `./agent.py --list-tools` · or **`agent --list-tools`** |
-| Multi-agent TUI | Install the **tui** extra, then `uv run --extra tui python agent_tui.py` (see **Multi-agent Textual UI** below) |
+| Multi-agent TUI | **`agent_tui`** after `uv tool install ".[tui]"` · or `uv run --extra tui python agent_tui.py` (see **Multi-agent Textual UI** below) |
 
 ## CLI options (summary)
 

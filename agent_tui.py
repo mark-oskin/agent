@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run python3
+#!/usr/bin/env python3
 """
 Terminal UI for multiple embedded agents: **Ctrl+S** toggles the agent list (hidden by
 default). Each lane has a main transcript plus an optional thinking panel (shown only
@@ -68,6 +68,10 @@ interrupt to the worker (best-effort cancel), or press **any other key** to clos
 """
 
 from __future__ import annotations
+
+import _bootstrap
+
+_bootstrap.ensure_runtime(__file__, uv_extra="tui")
 
 import warnings
 

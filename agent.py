@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run python
+#!/usr/bin/env python3
 
 """
 Entrypoint shim.
@@ -6,6 +6,10 @@ Entrypoint shim.
 All application wiring lives in `agentlib.app`. This module remains as a stable
 top-level executable for `./agent.py`.
 """
+
+import _bootstrap
+
+_bootstrap.ensure_runtime(__file__)
 
 import warnings
 
